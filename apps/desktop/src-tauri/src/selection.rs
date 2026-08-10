@@ -447,6 +447,11 @@ mod tests {
                 ),
             ])
             .unwrap();
+        let expected_text = clipboard.get_text().unwrap();
+        let expected_html = clipboard.get_html().unwrap();
+        let expected_custom = clipboard
+            .get_buffer("application/x-say-the-rest-test")
+            .unwrap();
         let selected = capture_selection_via_copy(|| {
             ClipboardContext::new()
                 .map_err(|error| error.to_string())?
@@ -456,13 +461,13 @@ mod tests {
         .unwrap();
         assert_eq!(selected, "temporary selection");
         let restored = ClipboardContext::new().unwrap();
-        assert_eq!(restored.get_text().unwrap(), "original plain text");
-        assert_eq!(restored.get_html().unwrap(), "<b>original rich text</b>");
+        assert_eq!(restored.get_text().unwrap(), expected_text);
+        assert_eq!(restored.get_html().unwrap(), expected_html);
         assert_eq!(
             restored
                 .get_buffer("application/x-say-the-rest-test")
                 .unwrap(),
-            vec![0, 1, 2, 255]
+            expected_custom
         );
     }
 }
