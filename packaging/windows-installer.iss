@@ -31,7 +31,7 @@ Name: "{group}\Say the Rest"; Filename: "{app}\say-the-rest-desktop.exe"
 Name: "{group}\Uninstall Say the Rest"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup.ps1"""; WorkingDir: "{app}"; Description: "Download the default voice and start Say the Rest"; Flags: postinstall skipifsilent waituntilterminated
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup.ps1"""; WorkingDir: "{app}"; Description: "Start Say the Rest and enable launch at sign-in"; Flags: postinstall skipifsilent waituntilterminated
 
 [UninstallRun]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Get-Process say-the-rest-service,say-the-rest-desktop -ErrorAction SilentlyContinue | Stop-Process -Force; Unregister-ScheduledTask -TaskName 'Say the Rest','Say the Rest Desktop' -Confirm:$false -ErrorAction SilentlyContinue"""; Flags: runhidden; RunOnceId: "SayTheRestCleanup"

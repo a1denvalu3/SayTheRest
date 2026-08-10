@@ -46,8 +46,44 @@ fn clipboard_text() -> Result<String, String> {
     cleaned(text)
 }
 
+#[cfg(windows)]
+struct ClipboardSnapshot(Vec<(u32, Vec<u8>)>);
+
+#[cfg(not(windows))]
 struct ClipboardSnapshot(Vec<ClipboardContent>);
 
+#[cfg(windows)]
+fn snapshot_clipboard() -> Result<ClipboardSnapshot, String> {
+    use clipboard_win::{Clipboard, formats::RawData, raw};
+
+    let _clipboard = Clipboard::new_attempts(10)
+        .map_err(|error| format!("cannot open the clipboard: {error}"))?;
+    let formats = raw::EnumFormats::new().collect::<Vec<_>>();
+    if formats.len() > MAX_CLIPBOARD_FORMATS {
+        return Err(format!(
+            "clipboard exposes {} formats; refusing copy fallback because it cannot be preserved safely",
+            formats.len()
+        ));
+    }
+    let mut total = 0usize;
+    let mut contents = Vec::with_capacity(formats.len());
+    for format in formats {
+        let bytes: Vec<u8> = clipboard_win::get(RawData(format)).map_err(|error| {
+            let name = raw::format_name_big(format).unwrap_or_else(|| format!("#{format}"));
+            format!("cannot preserve clipboard format {name:?}: {error}")
+        })?;
+        total = total
+            .checked_add(bytes.len())
+            .ok_or("clipboard snapshot size overflow")?;
+        if total > MAX_CLIPBOARD_SNAPSHOT_BYTES {
+            return Err("clipboard exceeds the 256 MB safe preservation limit; use the clipboard shortcut instead".into());
+        }
+        contents.push((format, bytes));
+    }
+    Ok(ClipboardSnapshot(contents))
+}
+
+#[cfg(not(windows))]
 fn snapshot_clipboard() -> Result<ClipboardSnapshot, String> {
     #[cfg(target_os = "linux")]
     if wayland_data_control_unavailable() {
@@ -176,6 +212,23 @@ pub async fn capture_portal_clipboard() -> Result<String, String> {
     ))
 }
 
+#[cfg(windows)]
+fn restore_clipboard(snapshot: ClipboardSnapshot) -> Result<(), String> {
+    use clipboard_win::{Clipboard, raw};
+
+    let _clipboard = Clipboard::new_attempts(10)
+        .map_err(|error| format!("cannot open the clipboard: {error}"))?;
+    raw::empty().map_err(|error| format!("cannot clear the temporary clipboard: {error}"))?;
+    for (format, bytes) in snapshot.0 {
+        raw::set_without_clear(format, &bytes).map_err(|error| {
+            let name = raw::format_name_big(format).unwrap_or_else(|| format!("#{format}"));
+            format!("cannot restore clipboard format {name:?}: {error}")
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
 fn restore_clipboard(snapshot: ClipboardSnapshot) -> Result<(), String> {
     let clipboard = ClipboardContext::new().map_err(|error| error.to_string())?;
     if snapshot.0.is_empty() {

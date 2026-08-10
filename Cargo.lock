@@ -3647,6 +3647,7 @@ dependencies = [
  "ashpd",
  "atspi",
  "clipboard-rs",
+ "clipboard-win",
  "enigo",
  "hound",
  "reqwest 0.12.28",
