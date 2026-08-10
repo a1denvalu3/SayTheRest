@@ -1082,6 +1082,10 @@ fn relocate_config(
     destination: &Path,
     executable: &Path,
 ) -> Result<EngineConfig> {
+    // Windows canonicalization commonly adds the verbatim `\\?\` prefix. Compare
+    // canonical paths on both sides so an in-tree model file is not mistaken for
+    // an archive escape solely because the source retained its display form.
+    let source = source.canonicalize()?;
     let relocate = |path: PathBuf| -> Result<PathBuf> {
         let path = if path.is_absolute() {
             path
@@ -1090,10 +1094,10 @@ fn relocate_config(
         };
         let path = path.canonicalize()?;
         anyhow::ensure!(
-            path.starts_with(source),
+            path.starts_with(&source),
             "model config references a file outside the imported directory"
         );
-        Ok(destination.join(path.strip_prefix(source)?))
+        Ok(destination.join(path.strip_prefix(&source)?))
     };
     match config {
         EngineConfig::SherpaOnnxVits(config) => Ok(EngineConfig::SherpaOnnxVits(VitsConfig {

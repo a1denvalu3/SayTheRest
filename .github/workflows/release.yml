@@ -43,10 +43,12 @@ jobs:
           test -x dist/SayTheRest-0.1.0-x86_64.AppImage
           test -f dist/say-the-rest_0.1.0_amd64.deb
           test -f dist/say-the-rest-x86_64-unknown-linux-gnu.tar.gz
-          tar -tzf dist/say-the-rest-x86_64-unknown-linux-gnu.tar.gz | grep -q '/say-the-rest-desktop$'
-          tar -tzf dist/say-the-rest-x86_64-unknown-linux-gnu.tar.gz | grep -q '/runtime/bin/sherpa-onnx-offline-tts$'
-          dpkg-deb --contents dist/say-the-rest_0.1.0_amd64.deb | grep -q '/opt/say-the-rest/say-the-rest-service$'
-          dpkg-deb --contents dist/say-the-rest_0.1.0_amd64.deb | grep -q '/usr/lib/systemd/user/say-the-rest-desktop.service$'
+          tar -tzf dist/say-the-rest-x86_64-unknown-linux-gnu.tar.gz > "$RUNNER_TEMP/portable-files.txt"
+          grep -q '/say-the-rest-desktop$' "$RUNNER_TEMP/portable-files.txt"
+          grep -q '/runtime/bin/sherpa-onnx-offline-tts$' "$RUNNER_TEMP/portable-files.txt"
+          dpkg-deb --contents dist/say-the-rest_0.1.0_amd64.deb > "$RUNNER_TEMP/deb-files.txt"
+          grep -q '/opt/say-the-rest/say-the-rest-service$' "$RUNNER_TEMP/deb-files.txt"
+          grep -q '/usr/lib/systemd/user/say-the-rest-desktop.service$' "$RUNNER_TEMP/deb-files.txt"
       - name: Audit Windows packages
         if: runner.os == 'Windows'
         shell: pwsh

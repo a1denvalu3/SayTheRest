@@ -569,10 +569,25 @@ fn replace_file(source: &Path, destination: &Path) -> Result<()> {
     match fs::rename(source, destination) {
         Ok(()) => Ok(()),
         #[cfg(windows)]
-        Err(_) if destination.is_file() => {
-            fs::remove_file(destination)?;
-            fs::rename(source, destination)?;
-            Ok(())
+        Err(initial_error) => {
+            // Windows does not let std::fs::rename replace an existing file and
+            // virus scanners/indexers can hold a newly synced journal briefly.
+            // Retry the bounded replace while retaining the synced source file.
+            let mut last_error = initial_error;
+            for attempt in 0..8 {
+                if destination.is_file()
+                    && let Err(error) = fs::remove_file(destination)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    last_error = error;
+                }
+                match fs::rename(source, destination) {
+                    Ok(()) => return Ok(()),
+                    Err(error) => last_error = error,
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10 * (attempt + 1)));
+            }
+            Err(last_error.into())
         }
         Err(error) => Err(error.into()),
     }
