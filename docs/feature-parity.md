@@ -4,10 +4,10 @@ This document defines parity by user-visible behavior. A checkbox is complete on
 
 ## Always-available speech
 
-- [ ] Start a per-user background service at login.
+- [x] Start a per-user background service at login.
 - [ ] Select text in any accessible application and invoke a configurable global shortcut.
 - [x] Read the clipboard only when its separate configurable shortcut is invoked.
-- [ ] Preserve clipboard contents when copy-based selection fallback is required.
+- [x] Preserve clipboard contents when copy-based selection fallback is required.
 - [x] Queue, replace, or interrupt speech according to the chosen queue policy.
 - [x] Confirm before processing unusually long text.
 - [x] Work offline after the chosen model is installed.
@@ -43,6 +43,29 @@ The copy fallback snapshots advertised raw formats (including text, HTML/RTF, im
 - [x] Keep at most one large model resident and unload it after configurable inactivity.
 - [ ] CPU baseline plus independently packaged/tested acceleration providers.
 
+### SayIt model-family coverage
+
+Exact parity tracks SayIt's bundled catalog at upstream commit
+`e428efeeb2a98425a38c0282f5ea95d9090a250d`; a generic model importer is not evidence that a
+family works. Each entry requires an installed-model synthesis smoke test on Linux and Windows,
+and capability tests for every feature advertised by that model.
+
+- [x] Kokoro
+- [ ] Kitten Mini and Kitten Nano
+- [x] Pocket TTS
+- [ ] Soprano
+- [ ] Qwen3 TTS Base, VoiceDesign, and CustomVoice
+- [ ] Chatterbox, Chatterbox Turbo, and Chatterbox Multilingual
+- [ ] OmniVoice
+- [ ] Fish Audio S2 Pro
+- [ ] Irodori
+- [ ] Vyvo
+- [ ] Orpheus BF16 and 4-bit
+- [ ] MOSS TTS and MOSS Nano
+- [ ] IndexTTS
+- [ ] Echo
+- [ ] Marvis
+
 ## Voices
 
 - [x] Built-in voice and language selection where supported.
@@ -74,9 +97,14 @@ backup restoration, retry, cleanup, and the repeated-interruption guard.
 
 ## Release evidence
 
-The 2026-08-10 release-candidate matrix for commit `4777cb2` ran the same workspace test suite on
-Ubuntu 24.04 and Windows Server 2025, then built and inspected every native package. The Linux
-audit verified the AppImage, Debian package, portable archive, supervised desktop service, and
-bundled inference executable. The Windows audit expanded the portable ZIP and verified the CLI,
-service, desktop shortcut host, PowerShell installer, and bundled inference executable; it also
-verified the per-user installer executable. GitHub Actions run: [31401516733](https://github.com/a1denvalu3/SayTheRest/actions/runs/31401516733).
+The 2026-08-10 release-candidate matrix for commit `3061cb9` ran the same workspace test suite on
+Ubuntu 24.04 and Windows Server 2025, then built and inspected every native package. Before
+packaging, both platforms executed a real desktop-clipboard transaction that saved plain text,
+canonical HTML, and a custom binary format, exposed temporary selected text to the app, and
+verified that all original payloads were restored. This specifically covers Windows standard
+numeric clipboard formats rather than re-registering their names as unrelated custom formats.
+The Linux audit verified the AppImage, Debian package, portable archive, supervised desktop
+service, and bundled inference executable. The Windows audit expanded the portable ZIP and
+verified the CLI, service, desktop shortcut host, PowerShell installer, bundled inference
+executable, and per-user installer. GitHub Actions run:
+[31405332625](https://github.com/a1denvalu3/SayTheRest/actions/runs/31405332625).
