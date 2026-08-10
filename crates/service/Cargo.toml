@@ -1,0 +1,28 @@
+[package]
+name = "say-the-rest-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+bzip2.workspace = true
+chrono.workspace = true
+hound.workspace = true
+say-the-rest-core = { path = "../core" }
+say-the-rest-protocol = { path = "../protocol" }
+serde.workspace = true
+serde_json.workspace = true
+rminiaudio.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+uuid.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower = { version = "0.5", features = ["util"] }

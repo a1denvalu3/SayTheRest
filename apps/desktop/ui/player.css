@@ -1,0 +1,22 @@
+.now-title {
+  color: var(--muted);
+  font: 500 11px/1.4 var(--mono);
+  letter-spacing: .04em;
+  margin: 2px 0 16px;
+  padding-left: 28px;
+}
+
+.lyric-chunk {
+  opacity: .38;
+  transition: opacity .18s, color .18s, background-color .18s;
+}
+
+.lyric-chunk.spoken {
+  opacity: .62;
+}
+
+.lyric-chunk.current {
+  background: linear-gradient(transparent 72%, rgba(238, 83, 47, .16) 72%);
+  color: var(--ink);
+  opacity: 1;
+}

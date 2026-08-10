@@ -1,0 +1,57 @@
+name: Release packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            runtime: sherpa-onnx-v1.13.4-linux-x64-shared.tar.bz2
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            runtime: sherpa-onnx-v1.13.4-win-x64-shared-MT-Release.tar.bz2
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux packaging dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev dpkg-dev desktop-file-utils patchelf
+      - name: Package
+        shell: bash
+        run: ./scripts/package-release.sh '${{ matrix.target }}' '${{ matrix.runtime }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: say-the-rest-${{ matrix.target }}
+          path: |
+            dist/say-the-rest-${{ matrix.target }}.*
+            dist/SayTheRest-Setup-x64.exe
+            dist/say-the-rest_*_amd64.deb
+            dist/SayTheRest-*-x86_64.AppImage
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

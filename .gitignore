@@ -1,0 +1,9 @@
+/target/
+/dist/
+/models/
+/output/
+*.wav
+!.github/fixtures/*.wav
+.env
+.env.*
+!.env.example

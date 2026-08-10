@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+if command -v systemctl >/dev/null 2>&1; then
+  SETTINGS_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/say-the-rest/desktop-settings.json"
+  if [ -f "$SETTINGS_FILE" ] && grep -q '"launch_at_login"[[:space:]]*:[[:space:]]*false' "$SETTINGS_FILE"; then
+    systemctl --user start say-the-rest.service >/dev/null 2>&1 || true
+  else
+    systemctl --user enable --now say-the-rest.service >/dev/null 2>&1 || true
+  fi
+else
+  pgrep -u "$(id -u)" -f '/opt/say-the-rest/say-the-rest-service' >/dev/null 2>&1 || \
+    LD_LIBRARY_PATH=/opt/say-the-rest/runtime/lib /opt/say-the-rest/say-the-rest-service >/dev/null 2>&1 &
+fi
+export LD_LIBRARY_PATH="/opt/say-the-rest/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec /opt/say-the-rest/say-the-rest-desktop "$@"

@@ -1,0 +1,77 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Say the Rest local service",
+    "version": "1.0.0",
+    "description": "Version 1 of the private localhost speech API. Health is public; every other operation requires a per-user bearer token."
+  },
+  "servers": [{ "url": "http://127.0.0.1:55391/v1" }],
+  "components": {
+    "securitySchemes": {
+      "readToken": { "type": "http", "scheme": "bearer", "description": "Read-only per-user token." },
+      "controlToken": { "type": "http", "scheme": "bearer", "description": "Read/write per-user token." }
+    },
+    "schemas": {
+      "ServiceSettingsUpdate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "playback_rate": { "type": "number", "minimum": 0.5, "maximum": 3.0 },
+          "speaking_pace": { "type": "number", "enum": [0.75, 0.9, 1.0, 1.1, 1.25, 1.5] },
+          "volume": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+          "model_unload_delay_seconds": { "type": "integer", "minimum": 30, "maximum": 86400 },
+          "history_quota_bytes": { "type": "integer", "minimum": 16777216, "maximum": 107374182400 },
+          "history_retention_days": { "type": "integer", "minimum": 0, "maximum": 3650, "description": "Maximum age of unpinned history. Zero retains it indefinitely." },
+          "long_text_confirmation_characters": { "type": "integer", "minimum": 500, "maximum": 1000000 },
+          "text_cleaning": { "$ref": "#/components/schemas/TextCleaningSettings" }
+        }
+      },
+      "TextCleaningSettings": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["enabled", "strip_markdown", "strip_html", "strip_code_blocks", "strip_special_characters", "normalize_whitespace"],
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "strip_markdown": { "type": "boolean" },
+          "strip_html": { "type": "boolean" },
+          "strip_code_blocks": { "type": "boolean" },
+          "strip_special_characters": { "type": "boolean" },
+          "normalize_whitespace": { "type": "boolean" }
+        }
+      }
+    }
+  },
+  "security": [{ "readToken": [] }, { "controlToken": [] }],
+  "paths": {
+    "/health": { "get": { "security": [], "summary": "Service health", "responses": { "200": { "description": "Healthy" } } } },
+    "/openapi.json": { "get": { "summary": "This OpenAPI document", "responses": { "200": { "description": "API description" } } } },
+    "/events": { "get": { "summary": "Sequenced server-sent state-change events", "responses": { "200": { "description": "text/event-stream" } } } },
+    "/state": { "get": { "summary": "Service and playback snapshot", "responses": { "200": { "description": "Current state" } } } },
+    "/jobs": {
+      "get": { "summary": "List speech jobs", "responses": { "200": { "description": "Jobs" } } },
+      "post": { "security": [{ "controlToken": [] }], "summary": "Queue speech with an optional native speaking pace", "responses": { "202": { "description": "Queued" }, "413": { "description": "Long text requires confirmation" } } }
+    },
+    "/playback/{action}": { "post": { "security": [{ "controlToken": [] }], "summary": "Pause, resume, stop, seek, set rate, or set volume", "parameters": [{ "in": "path", "name": "action", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Applied" } } } },
+    "/models": { "get": { "summary": "Model catalog and installation state", "responses": { "200": { "description": "Models" } } } },
+    "/models/{id}/update": { "post": { "security": [{ "controlToken": [] }], "summary": "Download, verify, and replace an outdated curated model", "responses": { "202": { "description": "Update started" } } } },
+    "/models/{id}/voices/{voice_id}/select": { "post": { "security": [{ "controlToken": [] }], "summary": "Select a built-in voice exposed by an installed model", "responses": { "204": { "description": "Voice selected" } } } },
+    "/models/{id}/unload": { "post": { "security": [{ "controlToken": [] }], "summary": "Release the resident inference engine without changing model selection", "responses": { "204": { "description": "Model unloaded" } } } },
+    "/models/imports/local": { "post": { "security": [{ "controlToken": [] }], "summary": "Validate and import a self-contained sherpa-compatible model directory", "responses": { "201": { "description": "Imported model" }, "422": { "description": "Unsupported layout or acknowledgement missing" } } } },
+    "/models/imports/huggingface": { "post": { "security": [{ "controlToken": [] }], "summary": "Resolve an immutable Hugging Face revision and import a compatible sherpa model", "responses": { "201": { "description": "Imported model" }, "422": { "description": "Unsupported repository or acknowledgement missing" } } } },
+    "/models/{id}/{action}": { "post": { "security": [{ "controlToken": [] }], "summary": "Install, cancel, select, or benchmark a model", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string" } }, { "in": "path", "name": "action", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Benchmark report" }, "202": { "description": "Accepted" }, "204": { "description": "Applied" } } } },
+    "/models/{id}": { "delete": { "security": [{ "controlToken": [] }], "summary": "Remove a model", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Removed" } } } },
+    "/voices": {
+      "get": { "summary": "List local voice profiles", "responses": { "200": { "description": "Voices" } } },
+      "post": { "security": [{ "controlToken": [] }], "summary": "Clone a voice with affirmative speaker permission", "responses": { "201": { "description": "Created" } } }
+    },
+    "/voices/{id}/{action}": { "post": { "security": [{ "controlToken": [] }], "summary": "Select, preview, or rename a voice", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string" } }, { "in": "path", "name": "action", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Applied" }, "202": { "description": "Preview queued" } } } },
+    "/voices/{id}": { "delete": { "security": [{ "controlToken": [] }], "summary": "Delete a voice profile", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Deleted" } } } },
+    "/history": { "get": { "summary": "List local history", "responses": { "200": { "description": "History" } } } },
+    "/history/{id}/{action}": { "post": { "security": [{ "controlToken": [] }], "summary": "Pin, replay, or regenerate history", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string", "format": "uuid" } }, { "in": "path", "name": "action", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Applied" }, "202": { "description": "Queued" } } } },
+    "/history/{id}": { "delete": { "security": [{ "controlToken": [] }], "summary": "Delete history and archived audio", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string", "format": "uuid" } }], "responses": { "204": { "description": "Deleted" } } } },
+    "/settings": {
+      "get": { "summary": "Read settings", "responses": { "200": { "description": "Settings" } } },
+      "post": { "security": [{ "controlToken": [] }], "summary": "Validate and update playback, native speaking pace, retention, storage, and lifecycle settings", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ServiceSettingsUpdate" } } } }, "responses": { "200": { "description": "Updated settings" } } }
+    }
+  }
+}

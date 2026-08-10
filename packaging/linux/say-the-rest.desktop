@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Say the Rest
+Comment=Private local text-to-speech from any application
+Exec=say-the-rest-desktop
+Icon=say-the-rest
+Terminal=false
+Categories=AudioVideo;Audio;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true

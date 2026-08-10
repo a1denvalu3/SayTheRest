@@ -1,0 +1,10 @@
+{
+  "engine": "sherpa-onnx-vits",
+  "executable": "sherpa-onnx-offline-tts",
+  "model": "models/vits-piper-en_US-lessac-medium/en_US-lessac-medium.onnx",
+  "tokens": "models/vits-piper-en_US-lessac-medium/tokens.txt",
+  "data_dir": "models/vits-piper-en_US-lessac-medium/espeak-ng-data",
+  "provider": "cpu",
+  "num_threads": 4,
+  "speaker_id": 0
+}

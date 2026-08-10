@@ -1,0 +1,14 @@
+{
+  "engine": "sherpa-onnx-pocket",
+  "executable": "runtime/bin/sherpa-onnx-offline-tts",
+  "lm_flow": "models/sherpa-onnx-pocket-tts-int8-2026-01-26/lm_flow.int8.onnx",
+  "lm_main": "models/sherpa-onnx-pocket-tts-int8-2026-01-26/lm_main.int8.onnx",
+  "encoder": "models/sherpa-onnx-pocket-tts-int8-2026-01-26/encoder.onnx",
+  "decoder": "models/sherpa-onnx-pocket-tts-int8-2026-01-26/decoder.int8.onnx",
+  "text_conditioner": "models/sherpa-onnx-pocket-tts-int8-2026-01-26/text_conditioner.onnx",
+  "vocab_json": "models/sherpa-onnx-pocket-tts-int8-2026-01-26/vocab.json",
+  "token_scores_json": "models/sherpa-onnx-pocket-tts-int8-2026-01-26/token_scores.json",
+  "provider": "cpu",
+  "num_threads": 4,
+  "num_steps": 5
+}

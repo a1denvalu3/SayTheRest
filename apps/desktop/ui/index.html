@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Say the Rest</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="player.css">
+  <link rel="stylesheet" href="history.css">
+  <link rel="stylesheet" href="settings.css">
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+  <aside>
+    <div class="brand"><span class="brand-mark">◖</span><span>Say the Rest</span></div>
+    <nav aria-label="Application sections">
+      <button class="nav-item active" data-view="player"><span>01</span>Now speaking</button>
+      <button class="nav-item" data-view="models"><span>02</span>Models</button>
+      <button class="nav-item" data-view="voices"><span>03</span>Voice studio</button>
+      <button class="nav-item" data-view="history"><span>04</span>History</button>
+      <button class="nav-item" data-view="settings"><span>05</span>Settings</button>
+    </nav>
+    <div class="privacy"><i></i><div><strong>Local mode</strong><small>Nothing leaves this computer</small></div></div>
+  </aside>
+
+  <main>
+    <header><div><p class="eyebrow" id="eyebrow">NOW SPEAKING</p><h1 id="view-title">Listen without leaving.</h1></div><div class="service-pill" id="service-pill"><i></i>Connecting</div></header>
+
+    <section class="view active" id="player-view">
+      <article class="player-card">
+        <div class="quote-mark">“</div>
+        <h2 id="now-title" class="now-title" hidden></h2>
+        <p id="spoken-text" class="spoken-text">Select text anywhere, then use your shortcut. Your words will appear here as they’re spoken.</p>
+        <div class="timeline"><div id="timeline-fill"></div></div>
+        <div class="time-row"><span id="position">0:00</span><span id="duration">0:00</span></div>
+        <div class="transport" aria-label="Playback controls">
+          <button data-control="seek-back" aria-label="Back 15 seconds">−15</button>
+          <button class="primary-control" id="play-toggle" aria-label="Pause or resume">Ⅱ</button>
+          <button data-control="seek-forward" aria-label="Forward 15 seconds">+15</button>
+        </div>
+        <div class="player-options">
+          <label>Speed <select id="rate"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label>
+          <label>Volume <input id="volume" type="range" min="0" max="1" value="1" step="0.05"></label>
+        </div>
+      </article>
+      <div class="shortcut-strip"><div><kbd id="selection-shortcut-label">Ctrl + Alt + S</kbd><span>Read selection</span></div><div><kbd id="clipboard-shortcut-label">Ctrl + Alt + V</kbd><span>Read clipboard</span></div></div>
+    </section>
+
+    <section class="view" id="models-view"><div class="section-intro"><h2>Choose the engine.</h2><p>Download once. Synthesize privately, even offline.</p></div><div id="model-list" class="card-list"></div><details class="community-import"><summary>Import compatible local model</summary><form id="model-import-form" class="studio-card settings-form"><label>Model directory<input name="directory" required placeholder="Directory containing config.json and model files"></label><label>Display name<input name="display_name" required maxlength="100"></label><label>License identifier<input name="license" required placeholder="MIT, Apache-2.0, or source terms"></label><label>License URL<input name="license_url" type="url" required placeholder="https://..."></label><label class="consent"><input name="acknowledged" type="checkbox" required><span>I understand this community model is untested and I reviewed its license.</span></label><button type="submit" class="action">Validate and import</button></form></details><details class="community-import"><summary>Import from Hugging Face</summary><form id="hf-import-form" class="studio-card settings-form"><label>Repository ID<input name="repository" required placeholder="namespace/model"></label><label>Revision<input name="revision" placeholder="main or commit/tag"></label><label>Display name<input name="display_name" required maxlength="100"></label><label>License identifier<input name="license" required></label><label>License URL<input name="license_url" type="url" required placeholder="https://huggingface.co/..."></label><label>Access token (only for this request)<input name="access_token" type="password" autocomplete="off"></label><label class="consent"><input name="acknowledged" type="checkbox" required><span>I understand this model is untested and I reviewed its model card and license.</span></label><button type="submit" class="action">Resolve, validate, and import</button></form></details></section>
+    <section class="view" id="voices-view"><div class="section-intro"><h2>A voice, held locally.</h2><p>Record or import a clean 3–15 second sample from a speaker who gave permission.</p></div><form id="voice-form" class="studio-card"><label>Name<input name="name" required maxlength="80" placeholder="Warm narrator"></label><div class="voice-recorder"><div><strong id="recording-time">0.0 sec</strong><span id="recording-state">Use your default microphone</span></div><div class="card-actions"><button id="record-start" type="button" class="action">Record</button><button id="record-stop" type="button" class="action secondary" disabled>Use recording</button><button id="record-cancel" type="button" class="action secondary" disabled>Cancel</button></div></div><label>Or import a reference WAV<input name="path" placeholder="C:\recordings\voice.wav or /home/me/voice.wav"></label><label class="consent"><input name="consent" type="checkbox" required><span>I confirm that the speaker gave permission for their voice to be cloned.</span></label><button type="submit" class="action">Create voice profile</button></form><div id="voice-list" class="card-list compact"></div></section>
+    <section class="view" id="history-view"><div class="section-intro"><h2>What you heard.</h2><p>Your local listening history, ready to revisit.</p></div><label class="search-field">Search history<input id="history-search" type="search" placeholder="Find spoken text"></label><div id="history-list" class="card-list compact"></div></section>
+    <section class="view" id="settings-view"><div class="section-intro"><h2>Make it yours.</h2><p>Speech behavior, storage, and shortcuts.</p></div><form id="shortcut-form" class="studio-card settings-form"><h3>Global shortcuts</h3><p>Use forms such as <kbd>ctrl+alt+s</kbd> or <kbd>super+shift+r</kbd>. Changes take effect immediately.</p><label>Read selection<input name="selection_shortcut" type="text" autocomplete="off" required></label><label>Read clipboard<input name="clipboard_shortcut" type="text" autocomplete="off" required></label><button type="submit" class="action">Apply shortcuts</button></form><form id="settings-form" class="studio-card settings-form"><label>Speaking pace for newly generated audio<select name="speaking_pace"><option value="0.75">Slower · 0.75×</option><option value="0.9">Slow · 0.9×</option><option value="1">Natural · 1×</option><option value="1.1">Brisk · 1.1×</option><option value="1.25">Fast · 1.25×</option><option value="1.5">Faster · 1.5×</option></select></label><p id="speaking-pace-note">Generation pace shapes phoneme timing. Playback speed remains an instant listening control.</p><label>Unload inactive model after (minutes)<input name="model_timeout_minutes" type="number" min="1" max="1440" required></label><label>Keep unpinned history<select name="history_retention_days"><option value="0">Forever</option><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="365">1 year</option></select></label><p>Pinned items are retained until you unpin or delete them.</p><label>History quota (MB)<input name="history_quota_mb" type="number" min="16" max="102400" required></label><label>Confirm selections longer than (characters)<input name="long_text_characters" type="number" min="500" max="1000000" required></label><button type="submit" class="action">Save settings</button></form><article id="diagnostics" class="diagnostics"></article></section>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </main>
+  <dialog id="onboarding"><form method="dialog"><p class="eyebrow">WELCOME</p><h2>Your computer can speak for itself.</h2><ol><li>Choose and download a model. Piper is the quick preset; PocketTTS enables local voice cloning.</li><li>Select text in another app and press <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>S</kbd>.</li><li>Use <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>V</kbd> only when you intentionally want to read the clipboard.</li></ol><p>Everything is processed locally. Voice cloning requires permission from the recorded speaker.</p><button class="action" value="ready">Get started</button></form></dialog>
+  <script src="app.js"></script>
+</body>
+</html>

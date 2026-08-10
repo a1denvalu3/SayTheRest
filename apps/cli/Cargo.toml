@@ -1,0 +1,14 @@
+[package]
+name = "say-the-rest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+say-the-rest-core = { path = "../../crates/core" }
+say-the-rest-protocol = { path = "../../crates/protocol" }
+uuid.workspace = true
