@@ -56,8 +56,8 @@ The copy fallback snapshots advertised raw formats (including text, HTML/RTF, im
 ## Interfaces and operations
 
 - [ ] Desktop onboarding, settings, diagnostics, updates, and launch-at-login.
-- [ ] CLI parity for speech, status, jobs, models, voices, history, and playback control.
-- [ ] Versioned localhost REST API with scoped bearer tokens, rate limiting, event stream, and OpenAPI document.
+- [x] CLI parity for speech, status, jobs, models, voices, history, and playback control.
+- [x] Versioned localhost REST API with scoped bearer tokens, rate limiting, event stream, and OpenAPI document.
 - [x] Crash-safe job journal and service recovery.
 - [ ] Linux packages and Windows installer that need neither Cargo nor Python.
 - [ ] No analytics, cloud inference, passive clipboard monitoring, or unexpected network access.

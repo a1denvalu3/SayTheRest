@@ -2019,6 +2019,31 @@ mod tests {
         assert_eq!(second.resource, "playback");
     }
 
+    #[tokio::test]
+    async fn openapi_document_identifies_v1_and_every_resource_family() {
+        let Json(document) = openapi().await;
+        assert_eq!(document["openapi"], "3.1.0");
+        assert_eq!(document["info"]["version"], "1.0.0");
+        let paths = document["paths"].as_object().unwrap();
+        for path in [
+            "/health",
+            "/events",
+            "/state",
+            "/jobs",
+            "/playback/{action}",
+            "/models",
+            "/models/imports/local",
+            "/models/imports/huggingface",
+            "/voices",
+            "/history",
+            "/settings",
+        ] {
+            assert!(paths.contains_key(path), "OpenAPI is missing {path}");
+        }
+        assert!(document["components"]["securitySchemes"]["readToken"].is_object());
+        assert!(document["components"]["securitySchemes"]["controlToken"].is_object());
+    }
+
     #[test]
     fn playback_metadata_matches_sayit_title_and_unicode_chunk_contract() {
         let title = speech_title(

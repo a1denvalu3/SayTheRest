@@ -66,8 +66,15 @@ enum Command {
     Resume,
     /// Stop current playback.
     Stop,
+    /// Clear active speech and continue with queued work.
+    Clear,
     /// Seek to an absolute position in seconds.
     Seek { seconds: f64 },
+    /// Skip forward or backward by a signed number of seconds.
+    Skip {
+        #[arg(allow_hyphen_values = true)]
+        seconds: f64,
+    },
     /// Change playback speed (0.5 to 3.0).
     Rate { rate: f64 },
     /// Change playback volume (0.0 to 1.0).
@@ -358,11 +365,24 @@ fn main() -> Result<()> {
         Command::Pause => post_and_print(base, "playback/pause", None)?,
         Command::Resume => post_and_print(base, "playback/resume", None)?,
         Command::Stop => post_and_print(base, "playback/stop", None)?,
+        Command::Clear => post_and_print(base, "playback/stop", None)?,
         Command::Seek { seconds } => post_and_print(
             base,
             "playback/seek",
             Some(serde_json::json!({ "seconds": seconds })),
         )?,
+        Command::Skip { seconds } => {
+            let state = get_json(base, "state")?;
+            let position = state
+                .pointer("/playback/position_seconds")
+                .and_then(serde_json::Value::as_f64)
+                .context("service state did not include a playback position")?;
+            post_and_print(
+                base,
+                "playback/seek",
+                Some(serde_json::json!({ "seconds": (position + seconds).max(0.0) })),
+            )?;
+        }
         Command::Rate { rate } => post_and_print(
             base,
             "playback/rate",
@@ -403,7 +423,10 @@ fn main() -> Result<()> {
 }
 
 fn normalized_args() -> Vec<String> {
-    let mut args: Vec<String> = std::env::args().collect();
+    normalize_args(std::env::args().collect())
+}
+
+fn normalize_args(mut args: Vec<String>) -> Vec<String> {
     let known = [
         "speak",
         "status",
@@ -414,7 +437,9 @@ fn normalized_args() -> Vec<String> {
         "pause",
         "resume",
         "stop",
+        "clear",
         "seek",
+        "skip",
         "rate",
         "volume",
         "synth",
@@ -454,6 +479,18 @@ fn get_and_print(base: &str, resource: &str) -> Result<()> {
         .send()
         .context("cannot connect to Say the Rest service")?;
     print_response(response)
+}
+
+fn get_json(base: &str, resource: &str) -> Result<serde_json::Value> {
+    let response = authorized(Client::new().get(format!("{base}/{resource}")))?
+        .send()
+        .context("cannot connect to Say the Rest service")?;
+    let status = response.status();
+    let body = response.text()?;
+    if !status.is_success() {
+        bail!("service returned {status}: {body}");
+    }
+    serde_json::from_str(&body).context("service returned invalid JSON")
 }
 
 fn post_and_print(base: &str, resource: &str, body: Option<serde_json::Value>) -> Result<()> {
@@ -547,4 +584,46 @@ fn load_api_token() -> Result<String> {
     std::fs::read_to_string(base.join("api-token"))
         .map(|token| token.trim().to_owned())
         .context("cannot read the local service token; start the service first or pass --token")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_parses_every_parity_command_family() {
+        let cases: &[&[&str]] = &[
+            &["say-the-rest", "speak", "hello"],
+            &["say-the-rest", "status"],
+            &["say-the-rest", "jobs"],
+            &["say-the-rest", "models"],
+            &[
+                "say-the-rest",
+                "models",
+                "install",
+                "piper-en-us-lessac-medium",
+            ],
+            &["say-the-rest", "voices"],
+            &["say-the-rest", "history"],
+            &["say-the-rest", "pause"],
+            &["say-the-rest", "resume"],
+            &["say-the-rest", "stop"],
+            &["say-the-rest", "clear"],
+            &["say-the-rest", "seek", "12.5"],
+            &["say-the-rest", "skip", "-15"],
+            &["say-the-rest", "rate", "1.25"],
+            &["say-the-rest", "volume", "0.8"],
+        ];
+        for arguments in cases {
+            Cli::try_parse_from(*arguments)
+                .unwrap_or_else(|error| panic!("failed to parse {arguments:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn bare_text_is_normalized_to_the_default_speak_command() {
+        let arguments = vec!["say-the-rest".into(), "Read this".into()];
+        let cli = Cli::try_parse_from(normalize_args(arguments)).unwrap();
+        assert!(matches!(cli.command, Command::Speak { .. }));
+    }
 }
