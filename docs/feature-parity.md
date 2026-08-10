@@ -58,10 +58,16 @@ The copy fallback snapshots advertised raw formats (including text, HTML/RTF, im
 - [ ] Desktop onboarding, settings, diagnostics, updates, and launch-at-login.
 - [ ] CLI parity for speech, status, jobs, models, voices, history, and playback control.
 - [ ] Versioned localhost REST API with scoped bearer tokens, rate limiting, event stream, and OpenAPI document.
-- [ ] Crash-safe job journal and service recovery.
+- [x] Crash-safe job journal and service recovery.
 - [ ] Linux packages and Windows installer that need neither Cargo nor Python.
 - [ ] No analytics, cloud inference, passive clipboard monitoring, or unexpected network access.
 
 ## Definition of done
 
 Linux and Windows release candidates must pass the same behavior suite. Platform-specific selection tests run against representative native, Chromium, Electron, terminal, and office applications. Model/provider changes must compare audio quality and report cold start, warm p50/p95/p99, peak memory, time to first audio, and real-time factor on the supported hardware matrix.
+
+The job journal is written through a synced temporary file with a last-known-good backup. On
+startup, queued work remains queued; interrupted synthesis or playback is requeued once after
+partial audio is removed. A second interruption becomes a visible failed history item instead of
+causing an endless service crash loop. Automated tests cover malformed and missing primary state,
+backup restoration, retry, cleanup, and the repeated-interruption guard.

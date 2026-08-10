@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -77,6 +78,8 @@ struct InnerState {
     voices: Vec<VoiceProfile>,
     #[serde(default)]
     benchmarks: HashMap<String, ModelBenchmark>,
+    #[serde(default)]
+    recovery_attempts: HashMap<Uuid, u8>,
 }
 
 impl Default for ServiceState {
@@ -115,12 +118,8 @@ impl ServiceState {
         let store_path = data_dir.join("service-state.json");
         let api_token = load_or_create_api_token(&data_dir)?;
         let api_read_token = load_or_create_named_token(&data_dir, "api-read-token")?;
-        let mut inner = if store_path.is_file() {
-            let bytes = fs::read(&store_path)?;
-            serde_json::from_slice(&bytes).context("invalid persisted service state")?
-        } else {
-            InnerState::default()
-        };
+        let (mut inner, recovered_from_backup) = load_persisted_state(&store_path)?;
+        let mut state_changed = recover_interrupted_jobs(&mut inner, &audio_dir);
         let migration_model = inner
             .settings
             .active_model_id
@@ -179,11 +178,9 @@ impl ServiceState {
                 });
             inner.settings.active_voice_profile_id = selected;
         }
-        if enforce_history_policy_inner(&mut inner, &audio_dir, chrono::Utc::now()) {
-            let bytes = serde_json::to_vec_pretty(&inner)?;
-            let temporary = store_path.with_extension("json.tmp");
-            fs::write(&temporary, bytes)?;
-            fs::rename(temporary, &store_path)?;
+        state_changed |= enforce_history_policy_inner(&mut inner, &audio_dir, chrono::Utc::now());
+        if state_changed || recovered_from_backup {
+            write_persisted_state(&store_path, &inner, !recovered_from_backup)?;
         }
         let (events, _) = broadcast::channel(256);
         Ok(Self {
@@ -378,6 +375,7 @@ impl ServiceState {
         };
         inner.jobs[index].error = error;
         let completed = inner.jobs[index].clone();
+        inner.recovery_attempts.remove(&id);
         inner.history.insert(
             0,
             HistoryItem {
@@ -401,11 +399,7 @@ impl ServiceState {
     }
 
     async fn persist(&self) -> Result<()> {
-        let bytes = serde_json::to_vec_pretty(&*self.inner.read().await)?;
-        let temporary = self.store_path.with_extension("json.tmp");
-        fs::write(&temporary, bytes)?;
-        fs::rename(temporary, &self.store_path)?;
-        Ok(())
+        write_persisted_state(&self.store_path, &*self.inner.read().await, true)
     }
 
     fn record_api_request(&self, scope: &'static str) -> Result<(), StatusCode> {
@@ -435,6 +429,155 @@ impl ServiceState {
             occurred_at: chrono::Utc::now(),
         });
     }
+}
+
+fn load_persisted_state(store_path: &Path) -> Result<(InnerState, bool)> {
+    if !store_path.is_file() {
+        if recovery_state_exists(store_path) {
+            return load_recovery_state(store_path, "primary journal is missing");
+        }
+        return Ok((InnerState::default(), false));
+    }
+    let primary = fs::read(store_path)
+        .with_context(|| format!("failed to read service state at {}", store_path.display()))?;
+    match serde_json::from_slice(&primary) {
+        Ok(state) => Ok((state, false)),
+        Err(primary_error) => load_recovery_state(
+            store_path,
+            &format!("primary journal is invalid: {primary_error}"),
+        ),
+    }
+}
+
+fn recovery_state_exists(store_path: &Path) -> bool {
+    store_path.with_extension("json.tmp").is_file()
+        || store_path.with_extension("json.bak").is_file()
+}
+
+fn load_recovery_state(store_path: &Path, primary_problem: &str) -> Result<(InnerState, bool)> {
+    let candidates = [
+        store_path.with_extension("json.tmp"),
+        store_path.with_extension("json.bak"),
+    ];
+    let mut failures = Vec::new();
+    for candidate in candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+        match fs::read(&candidate)
+            .with_context(|| format!("failed to read {}", candidate.display()))
+            .and_then(|bytes| {
+                serde_json::from_slice(&bytes)
+                    .with_context(|| format!("invalid state at {}", candidate.display()))
+            }) {
+            Ok(state) => return Ok((state, true)),
+            Err(error) => failures.push(error.to_string()),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "unable to recover service state: {primary_problem}; {}",
+        if failures.is_empty() {
+            "no recovery journal exists".into()
+        } else {
+            failures.join("; ")
+        }
+    ))
+}
+
+fn recover_interrupted_jobs(inner: &mut InnerState, audio_dir: &Path) -> bool {
+    let mut changed = false;
+    let mut repeatedly_interrupted = Vec::new();
+    for job in &mut inner.jobs {
+        if !matches!(
+            job.state,
+            JobState::Synthesizing | JobState::Playing | JobState::Paused
+        ) {
+            continue;
+        }
+        let output = audio_dir.join(format!("{}.wav", job.id));
+        if output.is_file() {
+            let _ = fs::remove_file(output);
+        }
+        let attempts = inner.recovery_attempts.entry(job.id).or_default();
+        if *attempts == 0 {
+            *attempts = 1;
+            job.state = JobState::Queued;
+            job.error = None;
+        } else {
+            job.state = JobState::Failed;
+            job.error = Some(
+                "job was interrupted again after automatic crash recovery; retry it manually"
+                    .into(),
+            );
+            repeatedly_interrupted.push(job.clone());
+        }
+        changed = true;
+    }
+    for job in repeatedly_interrupted {
+        inner.recovery_attempts.remove(&job.id);
+        if !inner.history.iter().any(|item| item.job.id == job.id) {
+            inner.history.insert(
+                0,
+                HistoryItem {
+                    job,
+                    audio_path: None,
+                    duration_seconds: None,
+                    pinned: false,
+                },
+            );
+        }
+    }
+    changed
+}
+
+fn write_persisted_state(store_path: &Path, state: &InnerState, rotate_backup: bool) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(state)?;
+    let temporary = store_path.with_extension("json.tmp");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+
+    if rotate_backup && store_path.is_file() {
+        let backup = store_path.with_extension("json.bak");
+        let backup_temporary = store_path.with_extension("json.bak.tmp");
+        fs::copy(store_path, &backup_temporary)?;
+        fs::File::open(&backup_temporary)?.sync_all()?;
+        replace_file(&backup_temporary, &backup)?;
+    }
+    replace_file(&temporary, store_path)?;
+    sync_parent_directory(store_path)?;
+    Ok(())
+}
+
+fn replace_file(source: &Path, destination: &Path) -> Result<()> {
+    match fs::rename(source, destination) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(_) if destination.is_file() => {
+            fs::remove_file(destination)?;
+            fs::rename(source, destination)?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn enforce_history_policy_inner(
@@ -1910,6 +2053,93 @@ mod tests {
         state.persist().await.unwrap();
         let reopened = ServiceState::open(directory.path().to_owned(), None).unwrap();
         assert_eq!(reopened.inner.read().await.jobs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn startup_requeues_interrupted_jobs_once_and_removes_partial_audio() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = ServiceState::open(directory.path().to_owned(), None).unwrap();
+        let job_id = Uuid::new_v4();
+        state.inner.write().await.jobs.push_back(SpeechJob {
+            id: job_id,
+            text: "recover after a crash".into(),
+            source: SpeechSource::Clipboard,
+            state: JobState::Playing,
+            created_at: chrono::Utc::now(),
+            error: Some("stale error".into()),
+            voice_profile_id: None,
+            speaking_pace: None,
+        });
+        let partial = directory
+            .path()
+            .join("history")
+            .join(format!("{job_id}.wav"));
+        fs::write(&partial, b"partial output").unwrap();
+        state.persist().await.unwrap();
+
+        let recovered = ServiceState::open(directory.path().to_owned(), None).unwrap();
+        let inner = recovered.inner.read().await;
+        assert_eq!(inner.jobs[0].state, JobState::Queued);
+        assert_eq!(inner.jobs[0].error, None);
+        assert_eq!(inner.recovery_attempts.get(&job_id), Some(&1));
+        assert!(!partial.exists());
+        drop(inner);
+
+        recovered.inner.write().await.jobs[0].state = JobState::Synthesizing;
+        recovered.persist().await.unwrap();
+        let stopped_retrying = ServiceState::open(directory.path().to_owned(), None).unwrap();
+        let inner = stopped_retrying.inner.read().await;
+        assert_eq!(inner.jobs[0].state, JobState::Failed);
+        assert!(
+            inner.jobs[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("interrupted again")
+        );
+        assert_eq!(inner.history.len(), 1);
+        assert_eq!(inner.history[0].job.id, job_id);
+        assert!(!inner.recovery_attempts.contains_key(&job_id));
+    }
+
+    #[tokio::test]
+    async fn startup_recovers_from_the_last_valid_state_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = ServiceState::open(directory.path().to_owned(), None).unwrap();
+        state.inner.write().await.jobs.push_back(SpeechJob {
+            id: Uuid::new_v4(),
+            text: "survives journal corruption".into(),
+            source: SpeechSource::Api,
+            state: JobState::Queued,
+            created_at: chrono::Utc::now(),
+            error: None,
+            voice_profile_id: None,
+            speaking_pace: None,
+        });
+        state.persist().await.unwrap();
+        state.inner.write().await.settings.volume = 0.75;
+        state.persist().await.unwrap();
+        state.inner.write().await.settings.volume = 0.5;
+        let newest_state = serde_json::to_vec_pretty(&*state.inner.read().await).unwrap();
+        fs::write(
+            directory.path().join("service-state.json.tmp"),
+            newest_state,
+        )
+        .unwrap();
+        fs::write(directory.path().join("service-state.json"), b"{torn").unwrap();
+
+        let recovered = ServiceState::open(directory.path().to_owned(), None).unwrap();
+        assert_eq!(recovered.inner.read().await.jobs.len(), 1);
+        assert_eq!(recovered.inner.read().await.settings.volume, 0.5);
+        let primary = directory.path().join("service-state.json");
+        let bytes = fs::read(&primary).unwrap();
+        serde_json::from_slice::<InnerState>(&bytes).unwrap();
+
+        fs::remove_file(&primary).unwrap();
+        let recovered_without_primary =
+            ServiceState::open(directory.path().to_owned(), None).unwrap();
+        assert_eq!(recovered_without_primary.inner.read().await.jobs.len(), 1);
+        assert!(primary.is_file());
     }
 
     #[tokio::test]
