@@ -59,7 +59,7 @@ The copy fallback snapshots advertised raw formats (including text, HTML/RTF, im
 - [x] CLI parity for speech, status, jobs, models, voices, history, and playback control.
 - [x] Versioned localhost REST API with scoped bearer tokens, rate limiting, event stream, and OpenAPI document.
 - [x] Crash-safe job journal and service recovery.
-- [ ] Linux packages and Windows installer that need neither Cargo nor Python.
+- [x] Linux packages and Windows installer that need neither Cargo nor Python.
 - [x] No analytics, cloud inference, passive clipboard monitoring, or unexpected network access.
 
 ## Definition of done
@@ -71,3 +71,12 @@ startup, queued work remains queued; interrupted synthesis or playback is requeu
 partial audio is removed. A second interruption becomes a visible failed history item instead of
 causing an endless service crash loop. Automated tests cover malformed and missing primary state,
 backup restoration, retry, cleanup, and the repeated-interruption guard.
+
+## Release evidence
+
+The 2026-08-10 release-candidate matrix for commit `4777cb2` ran the same workspace test suite on
+Ubuntu 24.04 and Windows Server 2025, then built and inspected every native package. The Linux
+audit verified the AppImage, Debian package, portable archive, supervised desktop service, and
+bundled inference executable. The Windows audit expanded the portable ZIP and verified the CLI,
+service, desktop shortcut host, PowerShell installer, and bundled inference executable; it also
+verified the per-user installer executable. GitHub Actions run: [31401516733](https://github.com/a1denvalu3/SayTheRest/actions/runs/31401516733).
