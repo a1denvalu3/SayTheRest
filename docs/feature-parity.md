@@ -39,7 +39,7 @@ The copy fallback snapshots advertised raw formats (including text, HTML/RTF, im
 - [x] Curated catalog with size, speed, quality note, languages, capabilities, and license.
 - [x] Hardware-aware recommendations based on measured local performance.
 - [ ] Download progress, cancellation, integrity validation, install, update, selection, unload, and removal.
-- [ ] Import compatible community models by repository ID or local archive.
+- [x] Import compatible community models by repository ID or local archive.
 - [x] Keep at most one large model resident and unload it after configurable inactivity.
 - [ ] CPU baseline plus independently packaged/tested acceleration providers.
 

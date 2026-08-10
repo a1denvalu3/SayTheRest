@@ -490,30 +490,66 @@ impl ModelManager {
 
     pub fn import_local(
         &self,
-        directory: &Path,
+        source: &Path,
         display_name: &str,
         license: &str,
         license_url: &str,
     ) -> Result<String> {
-        let source = directory
+        let source = source
             .canonicalize()
-            .with_context(|| format!("cannot open model directory {}", directory.display()))?;
-        anyhow::ensure!(source.is_dir(), "model import source must be a directory");
+            .with_context(|| format!("cannot open model source {}", source.display()))?;
+        if source.is_dir() {
+            return self.import_local_directory(&source, display_name, license, license_url);
+        }
+        anyhow::ensure!(
+            source.is_file(),
+            "model import source is not a file or directory"
+        );
+        let filename = source
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        anyhow::ensure!(
+            filename.ends_with(".tar.bz2") || filename.ends_with(".tbz2"),
+            "local model archives must use .tar.bz2 or .tbz2"
+        );
+        let fingerprint = sha256_file(&source)?;
+        let extraction = self
+            .root
+            .join(format!(".archive-{}.importing", &fingerprint[..12]));
+        if extraction.exists() {
+            fs::remove_dir_all(&extraction)?;
+        }
+        fs::create_dir_all(&extraction)?;
+        let result = (|| {
+            extract_model_archive(&source, &extraction)?;
+            let model_root = find_archive_model_root(&extraction)?;
+            self.import_local_directory(&model_root, display_name, license, license_url)
+        })();
+        let cleanup = fs::remove_dir_all(&extraction);
+        if result.is_ok() {
+            cleanup.context("cannot remove temporary model extraction")?;
+        }
+        result
+    }
+
+    fn import_local_directory(
+        &self,
+        source: &Path,
+        display_name: &str,
+        license: &str,
+        license_url: &str,
+    ) -> Result<String> {
+        validate_community_metadata(display_name, license, license_url)?;
         let name = display_name.trim();
-        anyhow::ensure!(
-            !name.is_empty() && name.chars().count() <= 100,
-            "display name must contain 1 to 100 characters"
-        );
-        anyhow::ensure!(
-            !license.trim().is_empty(),
-            "a source license identifier is required"
-        );
-        anyhow::ensure!(
-            license_url.starts_with("https://") || license_url.starts_with("http://localhost/"),
-            "license URL must use HTTPS"
-        );
         let source_config_path = source.join("config.json");
-        let source_config = EngineConfig::from_path(&source_config_path)
+        let source_config: EngineConfig = serde_json::from_slice(
+            &fs::read(&source_config_path)
+                .context("community directory must contain a readable config.json")?,
+        )
+        .context("community directory must contain a supported config.json")?;
+        relocate_config(source_config.clone(), source, source, &self.executable)
+            .and_then(|config| config.validate())
             .context("community directory must contain a valid config.json")?;
         let (fingerprint, size) = directory_fingerprint(&source)?;
         let id = format!("community-local-{}", &fingerprint[..12]);
@@ -863,6 +899,73 @@ fn preset_voice_language(id: &str) -> &'static str {
         Some("ef" | "em" | "ff" | "hf" | "hm" | "if" | "im" | "jf" | "jm" | "pf" | "pm") => "en",
         _ => "en-US",
     }
+}
+
+fn extract_model_archive(archive_path: &Path, destination: &Path) -> Result<()> {
+    const MAX_FILES: usize = 20_000;
+    const MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+    let mut archive = tar::Archive::new(BzDecoder::new(File::open(archive_path)?));
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let kind = entry.header().entry_type();
+        anyhow::ensure!(
+            kind.is_file() || kind.is_dir(),
+            "model archives may contain only regular files and directories"
+        );
+        let path = entry.path()?;
+        anyhow::ensure!(
+            !path.is_absolute()
+                && path.components().all(|component| matches!(
+                    component,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )),
+            "model archive contains an unsafe path"
+        );
+        if kind.is_file() {
+            files = files
+                .checked_add(1)
+                .context("archive file count overflow")?;
+            bytes = bytes
+                .checked_add(entry.header().size()?)
+                .context("archive size overflow")?;
+            anyhow::ensure!(files <= MAX_FILES, "model archive contains too many files");
+            anyhow::ensure!(bytes <= MAX_BYTES, "model archive exceeds the 20 GB limit");
+        }
+        anyhow::ensure!(
+            entry.unpack_in(destination)?,
+            "model archive entry escapes the extraction directory"
+        );
+    }
+    Ok(())
+}
+
+fn find_archive_model_root(extraction: &Path) -> Result<PathBuf> {
+    fn visit(directory: &Path, configs: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let metadata = fs::symlink_metadata(entry.path())?;
+            anyhow::ensure!(
+                !metadata.file_type().is_symlink(),
+                "model archives may not contain symbolic links"
+            );
+            if metadata.is_dir() {
+                visit(&entry.path(), configs)?;
+            } else if metadata.is_file() && entry.file_name() == "config.json" {
+                configs.push(entry.path());
+            }
+        }
+        Ok(())
+    }
+
+    let mut configs = Vec::new();
+    visit(extraction, &mut configs)?;
+    anyhow::ensure!(
+        configs.len() == 1,
+        "model archive must contain exactly one config.json"
+    );
+    Ok(configs.pop().unwrap().parent().unwrap().to_owned())
 }
 
 fn directory_fingerprint(root: &Path) -> Result<(String, u64)> {
@@ -1459,6 +1562,58 @@ mod tests {
                 .descriptors(None, &HashMap::new())
                 .iter()
                 .any(|model| model.id == id && model.installed)
+        );
+    }
+
+    #[test]
+    fn imports_a_self_contained_tar_bz2_model_archive() {
+        let storage = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("model.onnx"), b"model").unwrap();
+        fs::write(source.path().join("tokens.txt"), b"tokens").unwrap();
+        let config = EngineConfig::SherpaOnnxVits(VitsConfig {
+            executable: "ignored-during-import".into(),
+            model: "model.onnx".into(),
+            tokens: "tokens.txt".into(),
+            data_dir: None,
+            lexicon: None,
+            provider: "cpu".into(),
+            num_threads: 2,
+            speaker_id: 0,
+        });
+        fs::write(
+            source.path().join("config.json"),
+            serde_json::to_vec_pretty(&config).unwrap(),
+        )
+        .unwrap();
+        let archive_path = storage.path().join("voice.tar.bz2");
+        let encoder = bzip2::write::BzEncoder::new(
+            File::create(&archive_path).unwrap(),
+            bzip2::Compression::best(),
+        );
+        let mut archive = tar::Builder::new(encoder);
+        archive.append_dir_all("voice", source.path()).unwrap();
+        archive.into_inner().unwrap().finish().unwrap();
+
+        let manager = ModelManager::new(storage.path().join("models"), None).unwrap();
+        let id = manager
+            .import_local(
+                &archive_path,
+                "Archived voice",
+                "MIT",
+                "https://example.com/license",
+            )
+            .unwrap();
+        assert!(id.starts_with("community-local-"));
+        assert!(manager.config_path(&id).is_file());
+        assert!(
+            fs::read_dir(storage.path().join("models"))
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".archive-"))
         );
     }
 
