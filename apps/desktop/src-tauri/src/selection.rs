@@ -198,26 +198,28 @@ fn capture_selection_with_copy() -> Result<String, String> {
         return cleaned(selection);
     }
 
-    let previous = snapshot_clipboard()?;
+    capture_selection_via_copy(|| {
+        let mut keyboard = Enigo::new(&Settings::default())
+            .map_err(|error| format!("cannot access global keyboard input: {error}"))?;
+        keyboard
+            .key(Key::Control, Direction::Press)
+            .map_err(|error| format!("cannot press the copy modifier: {error}"))?;
+        let copy_result = keyboard
+            .key(Key::Unicode('c'), Direction::Click)
+            .map_err(|error| format!("cannot request the selected text: {error}"));
+        let release_result = keyboard
+            .key(Key::Control, Direction::Release)
+            .map_err(|error| format!("cannot release the copy modifier: {error}"));
+        copy_result.and(release_result)
+    })
+}
 
-    let mut keyboard = Enigo::new(&Settings::default())
-        .map_err(|error| format!("cannot access global keyboard input: {error}"))?;
-    keyboard
-        .key(Key::Control, Direction::Press)
-        .map_err(|error| format!("cannot press the copy modifier: {error}"))?;
-    let copy_result = keyboard.key(Key::Unicode('c'), Direction::Click);
-    let release_result = keyboard.key(Key::Control, Direction::Release);
-    let input_error = copy_result
-        .err()
-        .map(|error| format!("cannot request the selected text: {error}"))
-        .or_else(|| {
-            release_result
-                .err()
-                .map(|error| format!("cannot release the copy modifier: {error}"))
-        });
+fn capture_selection_via_copy(copy: impl FnOnce() -> Result<(), String>) -> Result<String, String> {
+    let previous = snapshot_clipboard()?;
+    let copy_result = copy();
     thread::sleep(COPY_SETTLE_TIME);
 
-    let selected = if let Some(error) = input_error {
+    let selected = if let Err(error) = copy_result {
         Err(error)
     } else {
         ClipboardContext::new()
@@ -392,12 +394,14 @@ mod tests {
                 ),
             ])
             .unwrap();
-        let snapshot = snapshot_clipboard().unwrap();
-        ClipboardContext::new()
-            .unwrap()
-            .set_text("temporary selection".into())
-            .unwrap();
-        restore_clipboard(snapshot).unwrap();
+        let selected = capture_selection_via_copy(|| {
+            ClipboardContext::new()
+                .map_err(|error| error.to_string())?
+                .set_text("temporary selection".into())
+                .map_err(|error| error.to_string())
+        })
+        .unwrap();
+        assert_eq!(selected, "temporary selection");
         let restored = ClipboardContext::new().unwrap();
         assert_eq!(restored.get_text().unwrap(), "original plain text");
         assert_eq!(restored.get_html().unwrap(), "<b>original rich text</b>");
