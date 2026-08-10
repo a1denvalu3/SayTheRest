@@ -501,6 +501,125 @@ fn handle_capture(app: tauri::AppHandle, kind: CaptureKind) {
     });
 }
 
+fn handle_tray_playback(app: tauri::AppHandle, toggle: bool) {
+    tauri::async_runtime::spawn(async move {
+        let result = async {
+            let resource = if toggle {
+                let state = authorized(reqwest::Client::new().get(format!("{SERVICE}/state")))?
+                    .send()
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .error_for_status()
+                    .map_err(|error| error.to_string())?
+                    .json::<Value>()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                match state.pointer("/playback/state").and_then(Value::as_str) {
+                    Some("paused") => "playback/resume",
+                    Some("playing") => "playback/pause",
+                    _ => return Err("nothing is currently playing".into()),
+                }
+            } else {
+                "playback/stop"
+            };
+            authorized(reqwest::Client::new().post(format!("{SERVICE}/{resource}")))?
+                .send()
+                .await
+                .map_err(|error| error.to_string())?
+                .error_for_status()
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>(if toggle {
+                "Playback updated"
+            } else {
+                "Playback stopped"
+            })
+        }
+        .await;
+        let failed = result.is_err();
+        let status = match result {
+            Ok(message) => serde_json::json!({"ok": true, "message": message}),
+            Err(error) => serde_json::json!({"ok": false, "message": error}),
+        };
+        let _ = app.emit("desktop-action-status", status);
+        if failed && let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    });
+}
+
+fn tray_status_text(state: &Value) -> (String, String, bool) {
+    let playback = &state["playback"];
+    let status = playback["state"].as_str();
+    let position = playback["position_seconds"].as_f64().unwrap_or(0.0);
+    let duration = playback["duration_seconds"].as_f64().unwrap_or(0.0);
+    let queue = state["queue_depth"].as_u64().unwrap_or(0);
+    let clock = |seconds: f64| {
+        let seconds = seconds.max(0.0).floor() as u64;
+        format!("{}:{:02}", seconds / 60, seconds % 60)
+    };
+    match status {
+        Some("playing") => (
+            format!("Speaking · {} / {}", clock(position), clock(duration)),
+            "Pause".into(),
+            true,
+        ),
+        Some("paused") => (
+            format!("Paused · {} / {}", clock(position), clock(duration)),
+            "Resume".into(),
+            true,
+        ),
+        Some("synthesizing") => (
+            if queue > 0 {
+                format!("Generating locally · {queue} queued")
+            } else {
+                "Generating speech locally".into()
+            },
+            "Pause / resume".into(),
+            false,
+        ),
+        _ if queue > 0 => (
+            format!("Ready · {queue} queued"),
+            "Pause / resume".into(),
+            false,
+        ),
+        _ => (
+            "Ready · local speech".into(),
+            "Pause / resume".into(),
+            false,
+        ),
+    }
+}
+
+fn start_tray_status_poll(
+    status_item: MenuItem<tauri::Wry>,
+    pause_item: MenuItem<tauri::Wry>,
+    stop_item: MenuItem<tauri::Wry>,
+) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let state = match authorized(reqwest::Client::new().get(format!("{SERVICE}/state"))) {
+                Ok(request) => match request.send().await {
+                    Ok(response) if response.status().is_success() => {
+                        response.json::<Value>().await.ok()
+                    }
+                    _ => None,
+                },
+                Err(_) => None,
+            };
+            let (status, pause, controls_enabled) = state
+                .as_ref()
+                .map(tray_status_text)
+                .unwrap_or_else(|| ("Service unavailable".into(), "Pause / resume".into(), false));
+            let _ = status_item.set_text(status);
+            let _ = pause_item.set_text(pause);
+            let _ = pause_item.set_enabled(controls_enabled);
+            let _ = stop_item.set_enabled(controls_enabled);
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    });
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -555,9 +674,34 @@ fn main() {
                 .map_err(|_| "desktop settings lock is unavailable")?
                 .clone();
             register_shortcuts(app.handle(), &settings)?;
+            let status = MenuItem::with_id(
+                app,
+                "status",
+                "Connecting to local service…",
+                false,
+                None::<&str>,
+            )?;
             let open = MenuItem::with_id(app, "open", "Open Say the Rest", true, None::<&str>)?;
+            let read_selection =
+                MenuItem::with_id(app, "read-selection", "Read selection", true, None::<&str>)?;
+            let read_clipboard =
+                MenuItem::with_id(app, "read-clipboard", "Read clipboard", true, None::<&str>)?;
+            let pause_resume =
+                MenuItem::with_id(app, "pause-resume", "Pause / resume", false, None::<&str>)?;
+            let stop = MenuItem::with_id(app, "stop", "Stop", false, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &quit])?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &status,
+                    &open,
+                    &read_selection,
+                    &read_clipboard,
+                    &pause_resume,
+                    &stop,
+                    &quit,
+                ],
+            )?;
             TrayIconBuilder::new()
                 .icon(tray_image())
                 .menu(&menu)
@@ -568,10 +712,15 @@ fn main() {
                             let _ = window.set_focus();
                         }
                     }
+                    "read-selection" => handle_capture(app.clone(), CaptureKind::Selection),
+                    "read-clipboard" => handle_capture(app.clone(), CaptureKind::Clipboard),
+                    "pause-resume" => handle_tray_playback(app.clone(), true),
+                    "stop" => handle_tray_playback(app.clone(), false),
                     "quit" => app.exit(0),
                     _ => {}
                 })
                 .build(app)?;
+            start_tray_status_poll(status, pause_resume, stop);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -617,6 +766,39 @@ mod tests {
         )
         .unwrap();
         assert!(settings.launch_at_login);
+    }
+
+    #[test]
+    fn tray_status_reflects_service_and_player_state() {
+        let playing = serde_json::json!({
+            "queue_depth": 2,
+            "playback": {
+                "state": "playing",
+                "position_seconds": 65.9,
+                "duration_seconds": 130.2
+            }
+        });
+        assert_eq!(
+            tray_status_text(&playing),
+            ("Speaking · 1:05 / 2:10".into(), "Pause".into(), true)
+        );
+
+        let paused = serde_json::json!({
+            "queue_depth": 0,
+            "playback": {"state": "paused", "position_seconds": 2, "duration_seconds": 9}
+        });
+        assert_eq!(tray_status_text(&paused).1, "Resume");
+        assert!(tray_status_text(&paused).2);
+
+        let generating = serde_json::json!({
+            "queue_depth": 3,
+            "playback": {"state": "synthesizing"}
+        });
+        assert_eq!(
+            tray_status_text(&generating).0,
+            "Generating locally · 3 queued"
+        );
+        assert!(!tray_status_text(&generating).2);
     }
 
     #[cfg(target_os = "linux")]

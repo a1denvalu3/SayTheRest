@@ -28,11 +28,11 @@ The copy fallback snapshots advertised raw formats (including text, HTML/RTF, im
 
 ## Player and history
 
-- [ ] Tray/menu-bar status and compact player.
-- [ ] Play, pause, resume, stop, seek, skip forward/back, rate, and volume.
-- [ ] Current title, progress, duration, current spoken text, and chunk separators.
-- [ ] Persistent history with search, pinning, replay, regeneration, deletion, and audio export.
-- [ ] Configurable history retention and disk quota.
+- [x] Tray/menu-bar status and compact player.
+- [x] Play, pause, resume, stop, seek, skip forward/back, rate, and volume.
+- [x] Current title, progress, duration, current spoken text, and chunk separators.
+- [x] Persistent history with search, pinning, replay, regeneration, deletion, and audio export.
+- [x] Configurable history retention and disk quota.
 
 ## Models
 

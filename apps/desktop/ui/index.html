@@ -31,12 +31,14 @@
         <div class="quote-mark">“</div>
         <h2 id="now-title" class="now-title" hidden></h2>
         <p id="spoken-text" class="spoken-text">Select text anywhere, then use your shortcut. Your words will appear here as they’re spoken.</p>
-        <div class="timeline"><div id="timeline-fill"></div></div>
+        <label class="timeline" for="timeline"><span class="visually-hidden">Playback position</span><input id="timeline" type="range" min="0" max="0" value="0" step="0.1" aria-label="Playback position"></label>
         <div class="time-row"><span id="position">0:00</span><span id="duration">0:00</span></div>
+        <p id="playback-status" class="playback-status" role="status">Ready for selected text</p>
         <div class="transport" aria-label="Playback controls">
           <button data-control="seek-back" aria-label="Back 15 seconds">−15</button>
           <button class="primary-control" id="play-toggle" aria-label="Pause or resume">Ⅱ</button>
           <button data-control="seek-forward" aria-label="Forward 15 seconds">+15</button>
+          <button data-control="stop" aria-label="Stop playback">■<span class="visually-hidden">Stop</span></button>
         </div>
         <div class="player-options">
           <label>Speed <select id="rate"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label>

@@ -768,13 +768,19 @@ async fn events(
 async fn snapshot(State(state): State<ServiceState>) -> Json<ServiceSnapshot> {
     let player = state.player.snapshot();
     let inner = state.inner.read().await;
-    let playback_state = match player.status {
-        PlayerStatus::Playing => Some(JobState::Playing),
-        PlayerStatus::Paused => Some(JobState::Paused),
-        PlayerStatus::Idle | PlayerStatus::Finished => None,
+    let processing = inner
+        .jobs
+        .iter()
+        .find(|job| job.state == JobState::Synthesizing);
+    let (playback_state, active_job_id) = match player.status {
+        PlayerStatus::Playing => (Some(JobState::Playing), player.job_id),
+        PlayerStatus::Paused => (Some(JobState::Paused), player.job_id),
+        PlayerStatus::Idle | PlayerStatus::Finished => (
+            processing.map(|_| JobState::Synthesizing),
+            processing.map(|job| job.id),
+        ),
     };
-    let spoken_text = player
-        .job_id
+    let spoken_text = active_job_id
         .and_then(|id| inner.jobs.iter().find(|job| job.id == id))
         .map(|job| job.text.clone())
         .unwrap_or_default();
@@ -790,7 +796,7 @@ async fn snapshot(State(state): State<ServiceState>) -> Json<ServiceSnapshot> {
             .count(),
         playback: PlaybackSnapshot {
             state: playback_state,
-            job_id: player.job_id,
+            job_id: active_job_id,
             position_seconds: player.position_seconds,
             duration_seconds: player.duration_seconds,
             rate: player.rate,
@@ -909,6 +915,7 @@ async fn pin_history(
     item.pinned = request.pinned;
     drop(inner);
     state.persist().await.map_err(internal_error)?;
+    state.emit("history");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -961,21 +968,17 @@ async fn replay_history(
             ))?;
         (path, inner.settings.playback_rate, inner.settings.volume)
     };
+    let previously_active = state.player.snapshot().job_id;
     state.player.stop().map_err(internal_error)?;
     state
         .player
         .play(id, path, rate, volume)
         .map_err(internal_error)?;
-    if let Some(job) = state
-        .inner
-        .write()
-        .await
-        .jobs
-        .iter_mut()
-        .find(|job| job.id == id)
     {
-        job.state = JobState::Playing;
+        let mut inner = state.inner.write().await;
+        mark_replay_started(&mut inner, id, previously_active);
     }
+    state.persist().await.map_err(internal_error)?;
     let replay_state = state.clone();
     tokio::spawn(async move {
         loop {
@@ -988,20 +991,37 @@ async fn replay_history(
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         let _ = replay_state.player.stop();
-        if let Some(job) = replay_state
-            .inner
-            .write()
-            .await
-            .jobs
-            .iter_mut()
-            .find(|job| job.id == id)
         {
-            job.state = JobState::Completed;
+            let mut inner = replay_state.inner.write().await;
+            mark_replay_finished(&mut inner, id);
         }
+        let _ = replay_state.persist().await;
+        replay_state.emit("jobs");
         replay_state.emit("playback");
     });
+    state.emit("jobs");
     state.emit("playback");
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn mark_replay_started(inner: &mut InnerState, replay_id: Uuid, active_id: Option<Uuid>) {
+    if let Some(active) = active_id.filter(|active| *active != replay_id)
+        && let Some(job) = inner.jobs.iter_mut().find(|job| job.id == active)
+        && matches!(job.state, JobState::Playing | JobState::Paused)
+    {
+        job.state = JobState::Cancelled;
+    }
+    if let Some(job) = inner.jobs.iter_mut().find(|job| job.id == replay_id) {
+        job.state = JobState::Playing;
+    }
+}
+
+fn mark_replay_finished(inner: &mut InnerState, replay_id: Uuid) {
+    if let Some(job) = inner.jobs.iter_mut().find(|job| job.id == replay_id)
+        && job.state == JobState::Playing
+    {
+        job.state = JobState::Completed;
+    }
 }
 
 async fn delete_history(
@@ -1021,6 +1041,7 @@ async fn delete_history(
         }
     }
     state.persist().await.map_err(internal_error)?;
+    state.emit("history");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2025,6 +2046,62 @@ mod tests {
                 .iter()
                 .all(|chunk| chunk.text_end - chunk.text_start <= 1_000)
         );
+    }
+
+    #[tokio::test]
+    async fn snapshot_exposes_the_job_while_speech_is_being_generated() {
+        let state = ServiceState::default();
+        let job_id = Uuid::new_v4();
+        state.inner.write().await.jobs.push_back(SpeechJob {
+            id: job_id,
+            text: "Visible while synthesis is running.".into(),
+            source: SpeechSource::Selection,
+            state: JobState::Synthesizing,
+            created_at: chrono::Utc::now(),
+            error: None,
+            voice_profile_id: None,
+            speaking_pace: None,
+        });
+        let Json(snapshot) = snapshot(State(state)).await;
+        assert_eq!(snapshot.playback.state, Some(JobState::Synthesizing));
+        assert_eq!(snapshot.playback.job_id, Some(job_id));
+        assert_eq!(
+            snapshot.playback.spoken_text,
+            "Visible while synthesis is running."
+        );
+    }
+
+    #[test]
+    fn replay_cancels_previous_audio_and_never_overwrites_an_explicit_stop() {
+        let active_id = Uuid::new_v4();
+        let replay_id = Uuid::new_v4();
+        let make_job = |id, state| SpeechJob {
+            id,
+            text: id.to_string(),
+            source: SpeechSource::History,
+            state,
+            created_at: chrono::Utc::now(),
+            error: None,
+            voice_profile_id: None,
+            speaking_pace: None,
+        };
+        let mut inner = InnerState::default();
+        inner.jobs.push_back(make_job(active_id, JobState::Playing));
+        inner
+            .jobs
+            .push_back(make_job(replay_id, JobState::Completed));
+
+        mark_replay_started(&mut inner, replay_id, Some(active_id));
+        assert_eq!(inner.jobs[0].state, JobState::Cancelled);
+        assert_eq!(inner.jobs[1].state, JobState::Playing);
+
+        inner.jobs[1].state = JobState::Cancelled;
+        mark_replay_finished(&mut inner, replay_id);
+        assert_eq!(inner.jobs[1].state, JobState::Cancelled);
+
+        inner.jobs[1].state = JobState::Playing;
+        mark_replay_finished(&mut inner, replay_id);
+        assert_eq!(inner.jobs[1].state, JobState::Completed);
     }
 
     #[tokio::test]
