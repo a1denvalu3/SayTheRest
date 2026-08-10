@@ -50,7 +50,7 @@ The copy fallback snapshots advertised raw formats (including text, HTML/RTF, im
 - [ ] Voice descriptions where supported.
 - [x] Local recording/import, quality analysis, trimming, and voice cloning where supported.
 - [ ] Voice discovery/random generation where supported.
-- [ ] Rename, preview, tune, select, and delete local voice profiles.
+- [x] Rename, preview, tune, select, and delete local voice profiles.
 - [x] Require an affirmative speaker-permission acknowledgement for cloning.
 
 ## Interfaces and operations

@@ -18,7 +18,7 @@ use say_the_rest_protocol::{
     ModelBenchmark, ModelDescriptor, PROTOCOL_VERSION, PinRequest, PlaybackSnapshot,
     PlaybackTextChunk, QueuePolicy, ServiceEvent, ServiceSettings, ServiceSettingsUpdate,
     ServiceSnapshot, SpeechJob, SpeechSource, SpeechSubmission, VoiceCloneRequest, VoiceProfile,
-    VoiceQuality, VoiceRenameRequest,
+    VoiceQuality, VoiceRenameRequest, VoiceTuningRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -274,20 +274,28 @@ impl ServiceState {
             return;
         };
         let output = self.audio_dir.join(format!("{}.wav", job.id));
-        let (reference_audio, speaking_pace) = {
+        let (reference_audio, speaking_pace, refinement_steps) = {
             let inner = self.inner.read().await;
+            let voice = job
+                .voice_profile_id
+                .and_then(|id| inner.voices.iter().find(|voice| voice.id == id));
             (
-                job.voice_profile_id
-                    .and_then(|id| inner.voices.iter().find(|voice| voice.id == id))
-                    .map(|voice| PathBuf::from(&voice.reference_audio_path)),
+                voice.map(|voice| PathBuf::from(&voice.reference_audio_path)),
                 job.speaking_pace.unwrap_or(inner.settings.speaking_pace),
+                voice.map(|voice| voice.refinement_steps),
             )
         };
         let text = job.text.clone();
         let resident_engine = self.resident_engine.clone();
         let synthesis = tokio::task::spawn_blocking(move || -> Result<(PathBuf, f64)> {
-            let config = EngineConfig::from_path(&config_path)?;
-            let config_bytes = fs::read(&config_path)?;
+            let mut config = EngineConfig::from_path(&config_path)?;
+            if let (EngineConfig::SherpaOnnxPocket(pocket), Some(steps)) =
+                (&mut config, refinement_steps)
+            {
+                pocket.num_steps = steps as usize;
+            }
+            let mut config_bytes = fs::read(&config_path)?;
+            config_bytes.extend_from_slice(&refinement_steps.unwrap_or_default().to_le_bytes());
             let mut resident = resident_engine.lock().unwrap();
             let reload = resident.as_ref().is_none_or(|slot| {
                 slot.config_path != config_path || slot.config_bytes != config_bytes
@@ -672,6 +680,7 @@ pub fn router(state: ServiceState) -> Router {
         .route("/v1/voices/{id}/select", post(select_voice))
         .route("/v1/voices/{id}/preview", post(preview_voice))
         .route("/v1/voices/{id}/rename", post(rename_voice))
+        .route("/v1/voices/{id}/tune", post(tune_voice))
         .route("/v1/voices/{id}", axum::routing::delete(delete_voice))
         .route("/v1/history", get(history))
         .route("/v1/history/{id}/pin", post(pin_history))
@@ -1274,6 +1283,29 @@ async fn rename_voice(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn tune_voice(
+    State(state): State<ServiceState>,
+    RoutePath(id): RoutePath<Uuid>,
+    Json(request): Json<VoiceTuningRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if !(3..=8).contains(&request.refinement_steps) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "PocketTTS refinement steps must be between 3 and 8".into(),
+        ));
+    }
+    let mut inner = state.inner.write().await;
+    let Some(voice) = inner.voices.iter_mut().find(|voice| voice.id == id) else {
+        return Err((StatusCode::NOT_FOUND, "voice profile not found".into()));
+    };
+    voice.refinement_steps = request.refinement_steps;
+    drop(inner);
+    *state.resident_engine.lock().unwrap() = None;
+    state.persist().await.map_err(internal_error)?;
+    state.emit("voices");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn delete_voice(
     State(state): State<ServiceState>,
     RoutePath(id): RoutePath<Uuid>,
@@ -1444,6 +1476,7 @@ async fn create_voice(
         reference_duration_seconds: quality.trimmed_duration_seconds,
         created_at: chrono::Utc::now(),
         quality,
+        refinement_steps: 5,
     };
     state.inner.write().await.voices.push(profile.clone());
     state.persist().await.map_err(internal_error)?;
@@ -2257,6 +2290,42 @@ mod tests {
         assert!(error.1.contains("permission"));
     }
 
+    #[tokio::test]
+    async fn cloned_voice_refinement_is_validated_and_persisted() {
+        let state = ServiceState::default();
+        let id = Uuid::new_v4();
+        state.inner.write().await.voices.push(VoiceProfile {
+            id,
+            name: "Tunable".into(),
+            model_id: "pocket-tts-int8".into(),
+            reference_audio_path: "voice.wav".into(),
+            reference_duration_seconds: 4.0,
+            created_at: chrono::Utc::now(),
+            quality: VoiceQuality::default(),
+            refinement_steps: 5,
+        });
+        let invalid = tune_voice(
+            State(state.clone()),
+            RoutePath(id),
+            Json(VoiceTuningRequest {
+                refinement_steps: 9,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(invalid.0, StatusCode::UNPROCESSABLE_ENTITY);
+        tune_voice(
+            State(state.clone()),
+            RoutePath(id),
+            Json(VoiceTuningRequest {
+                refinement_steps: 7,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.inner.read().await.voices[0].refinement_steps, 7);
+    }
+
     #[test]
     fn voice_import_trims_silence_and_reports_signal_quality() {
         let directory = tempfile::tempdir().unwrap();
@@ -2645,6 +2714,7 @@ mod tests {
                 reference_duration_seconds: 4.0,
                 created_at: chrono::Utc::now(),
                 quality: VoiceQuality::default(),
+                refinement_steps: 5,
             });
             inner
                 .settings

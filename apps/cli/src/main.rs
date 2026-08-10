@@ -184,6 +184,11 @@ enum VoiceAction {
         id: uuid::Uuid,
         name: String,
     },
+    Tune {
+        id: uuid::Uuid,
+        #[arg(value_parser = clap::value_parser!(u32).range(3..=8))]
+        refinement_steps: u32,
+    },
     Remove {
         id: uuid::Uuid,
     },
@@ -334,6 +339,17 @@ fn main() -> Result<()> {
             base,
             &format!("voices/{id}/rename"),
             Some(serde_json::json!({"name": name})),
+        )?,
+        Command::Voices {
+            action:
+                Some(VoiceAction::Tune {
+                    id,
+                    refinement_steps,
+                }),
+        } => post_and_print(
+            base,
+            &format!("voices/{id}/tune"),
+            Some(serde_json::json!({"refinement_steps": refinement_steps})),
         )?,
         Command::Voices {
             action: Some(VoiceAction::Remove { id }),

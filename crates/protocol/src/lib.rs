@@ -318,6 +318,12 @@ pub struct VoiceProfile {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub quality: VoiceQuality,
+    #[serde(default = "default_voice_refinement_steps")]
+    pub refinement_steps: u32,
+}
+
+fn default_voice_refinement_steps() -> u32 {
+    5
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -335,6 +341,11 @@ pub struct VoiceQuality {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct VoiceRenameRequest {
     pub name: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct VoiceTuningRequest {
+    pub refinement_steps: u32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
