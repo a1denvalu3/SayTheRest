@@ -529,6 +529,7 @@ fn tray_image() -> Image<'static> {
 
 fn handle_capture(app: tauri::AppHandle, kind: CaptureKind) {
     tauri::async_runtime::spawn(async move {
+        eprintln!("shortcut capture started: {}", kind.source());
         let result = tauri::async_runtime::spawn_blocking(move || selection::capture(kind)).await;
         let mut result = match result {
             Ok(result) => result,
@@ -624,6 +625,18 @@ fn handle_capture(app: tauri::AppHandle, kind: CaptureKind) {
             }),
         };
         let failed = status.get("ok").and_then(Value::as_bool) == Some(false);
+        if failed {
+            eprintln!(
+                "shortcut capture failed ({}): {}",
+                kind.source(),
+                status
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown error")
+            );
+        } else {
+            eprintln!("shortcut capture submitted: {}", kind.source());
+        }
         let _ = app.emit("capture-status", status);
         if failed && let Some(window) = app.get_webview_window("main") {
             let _ = window.show();
@@ -782,7 +795,10 @@ fn main() {
             app.handle().plugin(
                 tauri_plugin_global_shortcut::Builder::new()
                     .with_handler(|app, shortcut, event| {
-                        if event.state != ShortcutState::Pressed {
+                        // Capture after all shortcut modifiers have been released. The
+                        // selection fallback emits Ctrl+C, which becomes an unintended
+                        // Ctrl+Alt+C chord when started from the key-down event.
+                        if event.state != ShortcutState::Released {
                             return;
                         }
                         let settings = app.state::<DesktopState>();
@@ -869,6 +885,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn service_proxy_rejects_path_traversal() {
         assert!(safe_resource("../secrets").is_err());

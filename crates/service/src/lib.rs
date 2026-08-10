@@ -376,6 +376,9 @@ impl ServiceState {
             Ok((path, duration)) => (Some(path.display().to_string()), Some(duration), None),
             Err(error) => (None, None, Some(error.to_string())),
         };
+        if let Some(error) = &error {
+            eprintln!("speech job {id} failed: {error}");
+        }
         inner.jobs[index].state = if error.is_some() {
             JobState::Failed
         } else {
