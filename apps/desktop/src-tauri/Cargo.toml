@@ -25,7 +25,7 @@ url.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-uiautomation = { version = "0.25", default-features = false, features = ["pattern", "input"] }
+uiautomation = { version = "0.25", default-features = false, features = ["pattern", "input", "control"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 atspi = "0.30"

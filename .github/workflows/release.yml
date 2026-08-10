@@ -31,9 +31,43 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev dpkg-dev desktop-file-utils patchelf
+      - name: Test workspace
+        run: cargo test --workspace --locked --target '${{ matrix.target }}'
       - name: Package
         shell: bash
         run: ./scripts/package-release.sh '${{ matrix.target }}' '${{ matrix.runtime }}'
+      - name: Audit Linux packages
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          test -x dist/SayTheRest-0.1.0-x86_64.AppImage
+          test -f dist/say-the-rest_0.1.0_amd64.deb
+          test -f dist/say-the-rest-x86_64-unknown-linux-gnu.tar.gz
+          tar -tzf dist/say-the-rest-x86_64-unknown-linux-gnu.tar.gz | grep -q '/say-the-rest-desktop$'
+          tar -tzf dist/say-the-rest-x86_64-unknown-linux-gnu.tar.gz | grep -q '/runtime/bin/sherpa-onnx-offline-tts$'
+          dpkg-deb --contents dist/say-the-rest_0.1.0_amd64.deb | grep -q '/opt/say-the-rest/say-the-rest-service$'
+          dpkg-deb --contents dist/say-the-rest_0.1.0_amd64.deb | grep -q '/usr/lib/systemd/user/say-the-rest-desktop.service$'
+      - name: Audit Windows packages
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $zip = 'dist/say-the-rest-x86_64-pc-windows-msvc.zip'
+          $installer = 'dist/SayTheRest-Setup-x64.exe'
+          if (!(Test-Path $zip -PathType Leaf)) { throw "Missing portable ZIP: $zip" }
+          if (!(Test-Path $installer -PathType Leaf)) { throw "Missing installer: $installer" }
+          $audit = Join-Path $env:RUNNER_TEMP 'say-the-rest-package-audit'
+          Expand-Archive -LiteralPath $zip -DestinationPath $audit
+          $root = Join-Path $audit 'say-the-rest-x86_64-pc-windows-msvc'
+          @(
+            'say-the-rest.exe',
+            'say-the-rest-service.exe',
+            'say-the-rest-desktop.exe',
+            'setup.ps1',
+            'runtime/bin/sherpa-onnx-offline-tts.exe'
+          ) | ForEach-Object {
+            $path = Join-Path $root $_
+            if (!(Test-Path $path -PathType Leaf)) { throw "Missing packaged file: $path" }
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: say-the-rest-${{ matrix.target }}
