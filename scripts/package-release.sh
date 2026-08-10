@@ -51,15 +51,15 @@ else
     "$DEB_ROOT/usr/bin" \
     "$DEB_ROOT/usr/lib/systemd/user" \
     "$DEB_ROOT/usr/share/applications" \
-    "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps" \
-    "$DEB_ROOT/etc/xdg/autostart"
+    "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps"
   cp -a "$STAGE/runtime" "$DEB_ROOT/opt/say-the-rest/"
   cp "$STAGE/say-the-rest" "$STAGE/say-the-rest-service" "$STAGE/say-the-rest-desktop" \
     "$STAGE/LICENSE" "$STAGE/README.md" "$DEB_ROOT/opt/say-the-rest/"
-  cp "$ROOT_DIR/packaging/linux/say-the-rest.service" "$DEB_ROOT/usr/lib/systemd/user/"
+  cp "$ROOT_DIR/packaging/linux/say-the-rest.service" \
+    "$ROOT_DIR/packaging/linux/say-the-rest-desktop.service" \
+    "$DEB_ROOT/usr/lib/systemd/user/"
   cp "$ROOT_DIR/packaging/linux/say-the-rest-launcher" "$DEB_ROOT/usr/bin/say-the-rest-desktop"
   cp "$ROOT_DIR/packaging/linux/say-the-rest.desktop" "$DEB_ROOT/usr/share/applications/"
-  cp "$ROOT_DIR/packaging/linux/say-the-rest.desktop" "$DEB_ROOT/etc/xdg/autostart/"
   cp "$ROOT_DIR/apps/desktop/src-tauri/icons/icon.png" \
     "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps/say-the-rest.png"
   ln -s /opt/say-the-rest/say-the-rest "$DEB_ROOT/usr/bin/say-the-rest"
@@ -69,8 +69,8 @@ else
     "$DEB_ROOT/usr/bin/say-the-rest-desktop"
   chmod 644 "$DEB_ROOT/opt/say-the-rest/LICENSE" "$DEB_ROOT/opt/say-the-rest/README.md" \
     "$DEB_ROOT/usr/lib/systemd/user/say-the-rest.service" \
+    "$DEB_ROOT/usr/lib/systemd/user/say-the-rest-desktop.service" \
     "$DEB_ROOT/usr/share/applications/say-the-rest.desktop" \
-    "$DEB_ROOT/etc/xdg/autostart/say-the-rest.desktop" \
     "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps/say-the-rest.png"
   cat > "$DEB_ROOT/DEBIAN/control" <<EOF
 Package: say-the-rest
@@ -97,6 +97,7 @@ EOF
   cp "$ROOT_DIR/packaging/linux/say-the-rest.metainfo.xml" \
     "$APPDIR/usr/share/metainfo/sh.saytherest.desktop.metainfo.xml"
   cp "$ROOT_DIR/packaging/linux-appimage/say-the-rest-appimage.service" "$APPDIR/usr/share/say-the-rest/"
+  cp "$ROOT_DIR/packaging/linux-appimage/say-the-rest-appimage-desktop.service" "$APPDIR/usr/share/say-the-rest/"
   chmod 755 "$APPDIR/AppRun" "$APPDIR/usr/bin/"say-the-rest*
   LINUXDEPLOY="$ROOT_DIR/dist/linuxdeploy-x86_64.AppImage"
   curl --fail --location --retry 3 \

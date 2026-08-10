@@ -1,0 +1,13 @@
+[Unit]
+Description=Say the Rest shortcuts and tray
+After=graphical-session.target say-the-rest.service
+Wants=say-the-rest.service
+
+[Service]
+Type=simple
+ExecStart="@APPIMAGE@" --desktop
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

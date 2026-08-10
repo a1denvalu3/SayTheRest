@@ -126,7 +126,12 @@ fn update_desktop_settings(
 fn configure_launch_at_login(enabled: bool) -> Result<(), String> {
     let systemctl_action = if enabled { "enable" } else { "disable" };
     let status = std::process::Command::new("systemctl")
-        .args(["--user", systemctl_action, "say-the-rest.service"])
+        .args([
+            "--user",
+            systemctl_action,
+            "say-the-rest.service",
+            "say-the-rest-desktop.service",
+        ])
         .status()
         .map_err(|error| format!("cannot run systemctl: {error}"))?;
     if !status.success() {
@@ -586,6 +591,23 @@ mod tests {
     fn service_proxy_rejects_path_traversal() {
         assert!(safe_resource("../secrets").is_err());
         assert!(safe_resource("models/piper/install").is_ok());
+    }
+
+    #[test]
+    fn linux_packages_supervise_the_shortcut_host_separately() {
+        let appimage_unit = include_str!(
+            "../../../../packaging/linux-appimage/say-the-rest-appimage-desktop.service"
+        );
+        let installed_unit =
+            include_str!("../../../../packaging/linux/say-the-rest-desktop.service");
+        let app_run = include_str!("../../../../packaging/linux-appimage/AppRun");
+        for unit in [appimage_unit, installed_unit] {
+            assert!(unit.contains("Restart=on-failure"));
+            assert!(unit.contains("Wants=say-the-rest.service"));
+        }
+        assert!(appimage_unit.contains("--desktop"));
+        assert!(app_run.contains("restart say-the-rest-desktop.service"));
+        assert!(app_run.contains("import-environment DISPLAY WAYLAND_DISPLAY"));
     }
 
     #[test]

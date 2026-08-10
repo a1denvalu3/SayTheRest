@@ -45,15 +45,33 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 EOF
+  cat > "$UNIT_DIR/say-the-rest-desktop.service" <<EOF
+[Unit]
+Description=Say the Rest shortcuts and tray
+After=graphical-session.target say-the-rest.service
+Wants=say-the-rest.service
+
+[Service]
+Type=simple
+WorkingDirectory="$APP_DIR"
+ExecStart="$APP_DIR/say-the-rest-desktop"
+Environment=LD_LIBRARY_PATH=$APP_DIR/runtime/lib
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
+EOF
   systemctl --user daemon-reload
-  systemctl --user enable --now say-the-rest.service
+  systemctl --user enable say-the-rest.service say-the-rest-desktop.service
+  systemctl --user stop say-the-rest-desktop.service >/dev/null 2>&1 || true
+  pkill -TERM -u "$(id -u)" -f "$APP_DIR/say-the-rest-desktop" >/dev/null 2>&1 || true
+  systemctl --user restart say-the-rest.service say-the-rest-desktop.service
 else
   "$APP_DIR/say-the-rest-service" --config "$APP_DIR/say-the-rest.json" >/dev/null 2>&1 &
-fi
-
-AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
-mkdir -p "$AUTOSTART_DIR"
-cat > "$AUTOSTART_DIR/say-the-rest.desktop" <<EOF
+  AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
+  mkdir -p "$AUTOSTART_DIR"
+  cat > "$AUTOSTART_DIR/say-the-rest.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Say the Rest
@@ -62,6 +80,6 @@ Exec="$APP_DIR/say-the-rest-desktop"
 Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
-
-"$APP_DIR/say-the-rest-desktop" >/dev/null 2>&1 &
+  "$APP_DIR/say-the-rest-desktop" >/dev/null 2>&1 &
+fi
 echo "Setup complete. Say the Rest is running in your system tray."

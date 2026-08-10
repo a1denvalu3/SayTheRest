@@ -22,7 +22,7 @@ The tray is single-instance on Linux and Windows. Launching Say the Rest again r
 
 On GNOME and other Wayland compositors without `ext-data-control`/`wlr-data-control`, the explicit clipboard shortcut first tries the XWayland clipboard bridge and then uses a user-approved XDG Clipboard portal session. The approval dialog is a compositor security requirement. Selection still prefers AT-SPI; when an application exposes neither accessible selected text nor a losslessly restorable copy route, Say the Rest reports that limitation without changing the clipboard.
 
-The “Start the speech service and shortcut tray when I sign in” switch controls both processes. Linux packages use the per-user systemd unit plus an XDG autostart override; Windows packages enable or disable both per-user scheduled tasks. Turning startup off does not terminate current playback—it takes effect at the next sign-in.
+The “Start the speech service and shortcut tray when I sign in” switch controls both processes. Linux packages use separate supervised per-user units for synthesis and for the shortcut/tray host; Windows packages enable or disable both per-user scheduled tasks. Turning startup off does not terminate current playback—it takes effect at the next sign-in.
 
 History is stored locally and can be searched, pinned, replayed, regenerated, exported, or deleted. Settings can retain unpinned items forever or for 7, 30, 90, or 365 days; pinned items survive age cleanup, while the independent disk quota removes the oldest unpinned entries first.
 
@@ -49,6 +49,13 @@ The portable Linux tarball remains available. Extract it and run its included se
 
 ```sh
 ./setup.sh
+```
+
+On systemd-based Linux desktops, both entries below must be active for global shortcuts to work.
+The desktop unit automatically restarts the shortcut host after a crash:
+
+```sh
+systemctl --user status say-the-rest.service say-the-rest-desktop.service
 ```
 
 Windows: download and run `SayTheRest-Setup-x64.exe`. The installer is per-user and does not require administrator privileges. A portable ZIP containing the same binaries is also published; from that archive, PowerShell setup is:
