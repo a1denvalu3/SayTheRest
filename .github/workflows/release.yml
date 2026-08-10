@@ -57,6 +57,7 @@ jobs:
           tar -tzf dist/say-the-rest-x86_64-unknown-linux-gnu.tar.gz > "$RUNNER_TEMP/portable-files.txt"
           grep -q '/say-the-rest-desktop$' "$RUNNER_TEMP/portable-files.txt"
           grep -q '/runtime/bin/sherpa-onnx-offline-tts$' "$RUNNER_TEMP/portable-files.txt"
+          grep -q '/runtime/generative/qwen_worker.py$' "$RUNNER_TEMP/portable-files.txt"
           dpkg-deb --contents dist/say-the-rest_0.1.0_amd64.deb > "$RUNNER_TEMP/deb-files.txt"
           grep -q '/opt/say-the-rest/say-the-rest-service$' "$RUNNER_TEMP/deb-files.txt"
           grep -q '/usr/lib/systemd/user/say-the-rest-desktop.service$' "$RUNNER_TEMP/deb-files.txt"
@@ -77,6 +78,7 @@ jobs:
             'say-the-rest-desktop.exe',
             'setup.ps1',
             'runtime/bin/sherpa-onnx-offline-tts.exe'
+            'runtime/generative/qwen_worker.py'
           ) | ForEach-Object {
             $path = Join-Path $root $_
             if (!(Test-Path $path -PathType Leaf)) { throw "Missing packaged file: $path" }

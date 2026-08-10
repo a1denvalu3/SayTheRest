@@ -157,6 +157,9 @@ unsafe impl Send for ResidentSherpaEngine {}
 
 impl ResidentSherpaEngine {
     pub fn load(config: &EngineConfig) -> Result<Self> {
+        if matches!(config, EngineConfig::Qwen3Tts(_)) {
+            bail!("Qwen models require the persistent generative worker");
+        }
         let executable = executable(config);
         let library_path = c_api_library(&executable);
         // SAFETY: The library is shipped with the matching executable and remains
@@ -232,6 +235,7 @@ impl ResidentSherpaEngine {
                 native.model.provider = keep(value.provider.clone())?;
                 (0, value.num_steps as i32, true)
             }
+            EngineConfig::Qwen3Tts(_) => unreachable!(),
         };
         native.max_num_sentences = 2;
         native.silence_scale = 0.2;
@@ -325,6 +329,7 @@ fn executable(config: &EngineConfig) -> PathBuf {
         EngineConfig::SherpaOnnxKokoro(v) => v.executable.clone(),
         EngineConfig::SherpaOnnxKitten(v) => v.executable.clone(),
         EngineConfig::SherpaOnnxPocket(v) => v.executable.clone(),
+        EngineConfig::Qwen3Tts(v) => v.python.clone(),
     }
 }
 fn path_string(path: &Path) -> String {

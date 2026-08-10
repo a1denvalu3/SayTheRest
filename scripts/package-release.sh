@@ -51,6 +51,8 @@ curl --fail --location --retry 3 \
   --output "$ARCHIVE"
 verify_sha256 "$SHERPA_SHA256" "$ARCHIVE"
 tar -xjf "$ARCHIVE" -C "$STAGE/runtime" --strip-components=1
+mkdir -p "$STAGE/runtime/generative"
+cp "$ROOT_DIR/runtime/qwen_worker.py" "$STAGE/runtime/generative/"
 rm "$ARCHIVE"
 
 if [[ "$TARGET" == *windows* ]]; then

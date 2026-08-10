@@ -10,8 +10,8 @@ use axum::{
     routing::{get, post},
 };
 use say_the_rest_core::{
-    BenchmarkRunner, EngineConfig, ResidentSherpaEngine, SherpaOnnxEngine, SynthesisRequest,
-    TextCleaningOptions, clean_text, wav_duration_seconds,
+    BenchmarkRunner, EngineConfig, ResidentQwenEngine, ResidentSherpaEngine, SherpaOnnxEngine,
+    SynthesisRequest, TextCleaningOptions, clean_text, wav_duration_seconds,
 };
 use say_the_rest_protocol::{
     Health, HistoryItem, HuggingFaceModelImportRequest, JobState, LocalModelImportRequest,
@@ -65,8 +65,31 @@ pub struct ServiceState {
 struct ResidentEngineSlot {
     config_path: PathBuf,
     config_bytes: Vec<u8>,
-    engine: ResidentSherpaEngine,
+    engine: ResidentEngine,
     last_used: Instant,
+}
+
+enum ResidentEngine {
+    Sherpa(ResidentSherpaEngine),
+    Qwen(ResidentQwenEngine),
+}
+
+impl ResidentEngine {
+    fn load(config: &EngineConfig) -> Result<Self> {
+        match config {
+            EngineConfig::Qwen3Tts(config) => {
+                ResidentQwenEngine::load(config).map(ResidentEngine::Qwen)
+            }
+            _ => ResidentSherpaEngine::load(config).map(ResidentEngine::Sherpa),
+        }
+    }
+
+    fn synthesize(&mut self, request: &SynthesisRequest<'_>) -> Result<()> {
+        match self {
+            Self::Sherpa(engine) => engine.synthesize(request),
+            Self::Qwen(engine) => engine.synthesize(request),
+        }
+    }
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -156,6 +179,7 @@ impl ServiceState {
                     }
                 }
                 EngineConfig::SherpaOnnxPocket(_) => "pocket-tts-int8",
+                EngineConfig::Qwen3Tts(_) => "qwen3-tts",
             });
         if let (Some(id), Some(source)) = (configured_model_id, engine_config_path.as_deref()) {
             let managed = models.config_path(id);
@@ -316,7 +340,7 @@ impl ServiceState {
                 *resident = Some(ResidentEngineSlot {
                     config_path: config_path.clone(),
                     config_bytes,
-                    engine: ResidentSherpaEngine::load(&config)?,
+                    engine: ResidentEngine::load(&config)?,
                     last_used: Instant::now(),
                 });
             }
@@ -1486,7 +1510,13 @@ async fn create_voice(
         )
     };
     let config = EngineConfig::from_path(&config_path).map_err(unprocessable)?;
-    if !matches!(config, EngineConfig::SherpaOnnxPocket(_)) {
+    if !matches!(&config, EngineConfig::SherpaOnnxPocket(_))
+        && !matches!(
+            &config,
+            EngineConfig::Qwen3Tts(qwen)
+                if matches!(qwen.mode, say_the_rest_core::Qwen3TtsMode::VoiceClone)
+        )
+    {
         return Err((
             StatusCode::CONFLICT,
             "the selected model does not support voice cloning".into(),

@@ -300,6 +300,7 @@ impl ModelManager {
                 EngineConfig::SherpaOnnxKokoro(config) => &mut config.executable,
                 EngineConfig::SherpaOnnxKitten(config) => &mut config.executable,
                 EngineConfig::SherpaOnnxPocket(config) => &mut config.executable,
+                EngineConfig::Qwen3Tts(_) => continue,
             };
             if executable == &self.executable {
                 continue;
@@ -333,6 +334,7 @@ impl ModelManager {
                         EngineConfig::SherpaOnnxKokoro(config) => Some(config.speaker_id),
                         EngineConfig::SherpaOnnxKitten(config) => Some(config.speaker_id),
                         EngineConfig::SherpaOnnxPocket(_) => None,
+                        EngineConfig::Qwen3Tts(_) => None,
                     });
                 ModelDescriptor {
                     id: entry.id.into(),
@@ -445,6 +447,7 @@ impl ModelManager {
             }
             EngineConfig::SherpaOnnxKitten(config) => config.speaker_id = speaker_id,
             EngineConfig::SherpaOnnxPocket(_) => bail!("model does not provide preset voices"),
+            EngineConfig::Qwen3Tts(config) => config.speaker = Some(voice_id.into()),
         }
         let temporary = path.with_extension("json.tmp");
         fs::write(&temporary, serde_json::to_vec_pretty(&config)?)?;
@@ -621,7 +624,7 @@ impl ModelManager {
             destination.join("config.json"),
             serde_json::to_vec_pretty(&config)?,
         )?;
-        let voice_cloning = matches!(config, EngineConfig::SherpaOnnxPocket(_));
+        let voice_cloning = supports_voice_cloning(&config);
         let mut community = self.community.lock().unwrap();
         community.retain(|entry| entry.id != id);
         community.push(CommunityEntry {
@@ -803,7 +806,7 @@ impl ModelManager {
             destination.join("config.json"),
             serde_json::to_vec_pretty(&relocated)?,
         )?;
-        let voice_cloning = matches!(relocated, EngineConfig::SherpaOnnxPocket(_));
+        let voice_cloning = supports_voice_cloning(&relocated);
         let (_, actual_size) = directory_fingerprint(&destination)?;
         let mut community = self.community.lock().unwrap();
         community.retain(|entry| entry.id != id);
@@ -1201,6 +1204,10 @@ fn relocate_config(
                 speaker_id: config.speaker_id,
             }))
         }
+        EngineConfig::Qwen3Tts(mut config) => {
+            config.model = relocate(config.model)?;
+            Ok(EngineConfig::Qwen3Tts(config))
+        }
     }
 }
 
@@ -1227,6 +1234,15 @@ fn validate_community_metadata(display_name: &str, license: &str, license_url: &
         "license URL must use HTTPS"
     );
     Ok(())
+}
+
+fn supports_voice_cloning(config: &EngineConfig) -> bool {
+    matches!(config, EngineConfig::SherpaOnnxPocket(_))
+        || matches!(
+            config,
+            EngineConfig::Qwen3Tts(qwen)
+                if matches!(qwen.mode, say_the_rest_core::Qwen3TtsMode::VoiceClone)
+        )
 }
 
 fn valid_hf_revision(value: &str) -> bool {
@@ -1292,6 +1308,7 @@ fn config_requirements(config: &EngineConfig) -> Result<Vec<(String, bool)>> {
             path(&config.tokens, false)?,
             path(&config.data_dir, true)?,
         ]),
+        EngineConfig::Qwen3Tts(config) => Ok(vec![path(&config.model, true)?]),
     }
 }
 

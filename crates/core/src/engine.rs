@@ -31,6 +31,9 @@ impl SherpaOnnxEngine {
     }
 
     pub fn command_args(&self, request: &SynthesisRequest<'_>) -> Result<Vec<String>> {
+        if matches!(self.config, EngineConfig::Qwen3Tts(_)) {
+            bail!("Qwen models require the persistent generative worker");
+        }
         anyhow::ensure!(
             request.speaking_pace.is_finite() && (0.5..=2.0).contains(&request.speaking_pace),
             "speaking pace must be between 0.5 and 2.0"
@@ -92,12 +95,14 @@ impl SherpaOnnxEngine {
                 format!("--sid={}", config.speaker_id),
                 format!("--kitten-length-scale={}", 1.0 / request.speaking_pace),
             ],
+            EngineConfig::Qwen3Tts(_) => unreachable!(),
         };
         let (provider, threads) = match &self.config {
             EngineConfig::SherpaOnnxVits(config) => (&config.provider, config.num_threads),
             EngineConfig::SherpaOnnxPocket(config) => (&config.provider, config.num_threads),
             EngineConfig::SherpaOnnxKokoro(config) => (&config.provider, config.num_threads),
             EngineConfig::SherpaOnnxKitten(config) => (&config.provider, config.num_threads),
+            EngineConfig::Qwen3Tts(_) => unreachable!(),
         };
         args.push(Self::arg("output-filename", request.output));
         args.push(format!("--provider={provider}"));
@@ -112,6 +117,7 @@ impl SherpaOnnxEngine {
             EngineConfig::SherpaOnnxPocket(config) => config.executable.clone(),
             EngineConfig::SherpaOnnxKokoro(config) => config.executable.clone(),
             EngineConfig::SherpaOnnxKitten(config) => config.executable.clone(),
+            EngineConfig::Qwen3Tts(config) => config.python.clone(),
         }
     }
 }
@@ -148,6 +154,7 @@ impl TtsEngine for SherpaOnnxEngine {
             EngineConfig::SherpaOnnxPocket(_) => "sherpa-onnx-pocket/process-cold",
             EngineConfig::SherpaOnnxKokoro(_) => "sherpa-onnx-kokoro/process-cold",
             EngineConfig::SherpaOnnxKitten(_) => "sherpa-onnx-kitten/process-cold",
+            EngineConfig::Qwen3Tts(_) => "qwen3-tts/persistent-worker",
         }
     }
 }

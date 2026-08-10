@@ -10,6 +10,31 @@ pub enum EngineConfig {
     SherpaOnnxKokoro(KokoroConfig),
     SherpaOnnxKitten(KittenConfig),
     SherpaOnnxPocket(PocketConfig),
+    Qwen3Tts(Qwen3TtsConfig),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Qwen3TtsMode {
+    CustomVoice,
+    VoiceDesign,
+    VoiceClone,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Qwen3TtsConfig {
+    pub python: PathBuf,
+    pub worker: PathBuf,
+    pub model: PathBuf,
+    pub mode: Qwen3TtsMode,
+    #[serde(default = "default_qwen_device")]
+    pub device: String,
+    #[serde(default = "default_qwen_dtype")]
+    pub dtype: String,
+    #[serde(default = "default_qwen_language")]
+    pub language: String,
+    pub speaker: Option<String>,
+    pub voice_description: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -82,6 +107,15 @@ pub struct KittenConfig {
 
 fn default_steps() -> usize {
     5
+}
+fn default_qwen_device() -> String {
+    "cpu".into()
+}
+fn default_qwen_dtype() -> String {
+    "float32".into()
+}
+fn default_qwen_language() -> String {
+    "Auto".into()
 }
 
 fn default_executable() -> PathBuf {
@@ -179,6 +213,29 @@ impl EngineConfig {
                 }
                 if !kitten.data_dir.is_dir() {
                     bail!("data_dir does not exist: {}", kitten.data_dir.display());
+                }
+            }
+            Self::Qwen3Tts(qwen) => {
+                for (name, path) in [("python", &qwen.python), ("worker", &qwen.worker)] {
+                    if !path.is_file() {
+                        bail!("{name} file does not exist: {}", path.display());
+                    }
+                }
+                if !qwen.model.is_dir() {
+                    bail!("model directory does not exist: {}", qwen.model.display());
+                }
+                if !matches!(qwen.dtype.as_str(), "float32" | "float16" | "bfloat16") {
+                    bail!("Qwen dtype must be float32, float16, or bfloat16");
+                }
+                if matches!(qwen.mode, Qwen3TtsMode::CustomVoice)
+                    && qwen.speaker.as_deref().is_none_or(str::is_empty)
+                {
+                    bail!("Qwen custom-voice models require a speaker");
+                }
+                if matches!(qwen.mode, Qwen3TtsMode::VoiceDesign)
+                    && qwen.voice_description.as_deref().is_none_or(str::is_empty)
+                {
+                    bail!("Qwen voice-design models require a voice description");
                 }
             }
         }
