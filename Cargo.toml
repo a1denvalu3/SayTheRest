@@ -27,6 +27,8 @@ html-escape = "0.2"
 regex = "1.11"
 unicode-normalization = "0.1"
 bzip2 = "0.6"
+flate2 = "1.1"
+zip = { version = "4.6", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 tar = "0.4"
 url = "2.5"

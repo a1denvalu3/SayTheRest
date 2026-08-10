@@ -51,7 +51,7 @@ family works. Each entry requires an installed-model synthesis smoke test on Lin
 and capability tests for every feature advertised by that model.
 
 - [x] Kokoro
-- [ ] Kitten Mini and Kitten Nano
+- [ ] Kitten Mini and Kitten Nano (cross-platform synthesis passes; progressive playback remains)
 - [x] Pocket TTS
 - [ ] Soprano
 - [ ] Qwen3 TTS Base, VoiceDesign, and CustomVoice
@@ -108,3 +108,11 @@ service, and bundled inference executable. The Windows audit expanded the portab
 verified the CLI, service, desktop shortcut host, PowerShell installer, bundled inference
 executable, and per-user installer. GitHub Actions run:
 [31405332625](https://github.com/a1denvalu3/SayTheRest/actions/runs/31405332625).
+
+Commit `2a36d0b` added pinned Kitten Mini 0.8 and Kitten Nano 0.8 INT8 downloads, all eight
+preset voices, process-cold inference, and resident native inference. Release run
+[31407920797](https://github.com/a1denvalu3/SayTheRest/actions/runs/31407920797) downloaded both
+real model archives independently on Ubuntu and Windows, verified their SHA-256 digests, loaded
+them through each packaged sherpa runtime, and produced valid audio before auditing all release
+packages. This proves cross-platform synthesis, not SayIt's progressive first-audio behavior;
+that remaining capability keeps the model-family parity item open.

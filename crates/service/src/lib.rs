@@ -41,6 +41,7 @@ use uuid::Uuid;
 
 mod model_manager;
 mod player;
+pub mod qwen_runtime;
 use model_manager::ModelManager;
 use player::{PlaybackController, PlayerStatus};
 

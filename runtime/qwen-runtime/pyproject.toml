@@ -1,0 +1,18 @@
+[project]
+name = "say-the-rest-qwen-runtime"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "qwen-tts==0.1.1",
+  "torch==2.9.1+cpu",
+  "torchaudio==2.9.1+cpu",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchaudio = { index = "pytorch-cpu" }
