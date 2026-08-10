@@ -3660,6 +3660,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "uiautomation",
+ "url",
  "wl-clipboard-rs",
 ]
 

@@ -19,6 +19,7 @@ tauri.workspace = true
 tauri-plugin-global-shortcut = "2.3"
 tauri-plugin-single-instance = "2.4.3"
 tokio.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

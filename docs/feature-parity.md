@@ -55,7 +55,7 @@ The copy fallback snapshots advertised raw formats (including text, HTML/RTF, im
 
 ## Interfaces and operations
 
-- [ ] Desktop onboarding, settings, diagnostics, updates, and launch-at-login.
+- [x] Desktop onboarding, settings, diagnostics, updates, and launch-at-login.
 - [x] CLI parity for speech, status, jobs, models, voices, history, and playback control.
 - [x] Versioned localhost REST API with scoped bearer tokens, rate limiting, event stream, and OpenAPI document.
 - [x] Crash-safe job journal and service recovery.

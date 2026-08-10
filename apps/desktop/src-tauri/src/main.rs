@@ -14,6 +14,137 @@ mod selection;
 use selection::CaptureKind;
 
 const SERVICE: &str = "http://127.0.0.1:55391/v1";
+const RELEASES_API: &str = "https://api.github.com/repos/a1denvalu3/SayTheRest/releases?per_page=1";
+const RELEASES_PAGE: &str = "https://github.com/a1denvalu3/SayTheRest/releases";
+
+#[derive(Clone, Debug, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    html_url: String,
+    assets: Vec<GitHubReleaseAsset>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GitHubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct UpdateInfo {
+    current_version: String,
+    latest_version: String,
+    update_available: bool,
+    package_name: Option<String>,
+    download_url: String,
+    release_url: String,
+}
+
+fn version_numbers(version: &str) -> Option<Vec<u64>> {
+    let version = version.trim().trim_start_matches(['v', 'V']);
+    let core = version.split(['-', '+']).next()?;
+    let numbers = core
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    (numbers.len() >= 2 && numbers.len() <= 4).then_some(numbers)
+}
+
+fn newer_version(latest: &str, current: &str) -> Result<bool, String> {
+    let mut latest = version_numbers(latest).ok_or("release has an invalid version tag")?;
+    let mut current = version_numbers(current).ok_or("application has an invalid version")?;
+    let width = latest.len().max(current.len());
+    latest.resize(width, 0);
+    current.resize(width, 0);
+    Ok(latest > current)
+}
+
+fn preferred_release_asset<'a>(assets: &'a [GitHubReleaseAsset]) -> Option<&'a GitHubReleaseAsset> {
+    let suffixes: &[&str] = if cfg!(windows) {
+        &["Setup-x64.exe", "windows-msvc.zip"]
+    } else if std::env::var_os("APPIMAGE").is_some() {
+        &["x86_64.AppImage", "amd64.deb", "linux-gnu.tar.gz"]
+    } else {
+        &["amd64.deb", "x86_64.AppImage", "linux-gnu.tar.gz"]
+    };
+    suffixes
+        .iter()
+        .find_map(|suffix| assets.iter().find(|asset| asset.name.ends_with(suffix)))
+}
+
+fn validate_release_url(candidate: &str) -> Result<(), String> {
+    let url = url::Url::parse(candidate).map_err(|_| "release URL is invalid")?;
+    if url.scheme() != "https"
+        || !matches!(
+            url.host_str(),
+            Some("github.com" | "objects.githubusercontent.com")
+        )
+    {
+        return Err("release URL is not hosted by GitHub over HTTPS".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn check_for_updates() -> Result<UpdateInfo, String> {
+    let releases = reqwest::Client::new()
+        .get(RELEASES_API)
+        .header(reqwest::header::USER_AGENT, "SayTheRest desktop updater")
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|error| format!("cannot check GitHub releases: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("GitHub release check failed: {error}"))?
+        .json::<Vec<GitHubRelease>>()
+        .await
+        .map_err(|error| format!("invalid GitHub release response: {error}"))?;
+    let current = env!("CARGO_PKG_VERSION");
+    let Some(release) = releases.into_iter().next() else {
+        return Ok(UpdateInfo {
+            current_version: current.into(),
+            latest_version: current.into(),
+            update_available: false,
+            package_name: None,
+            download_url: RELEASES_PAGE.into(),
+            release_url: RELEASES_PAGE.into(),
+        });
+    };
+    validate_release_url(&release.html_url)?;
+    let asset = preferred_release_asset(&release.assets);
+    let download_url = asset
+        .map(|asset| asset.browser_download_url.as_str())
+        .unwrap_or(&release.html_url);
+    validate_release_url(download_url)?;
+    Ok(UpdateInfo {
+        current_version: current.into(),
+        latest_version: release.tag_name.clone(),
+        update_available: newer_version(&release.tag_name, current)?,
+        package_name: asset.map(|asset| asset.name.clone()),
+        download_url: download_url.into(),
+        release_url: release.html_url,
+    })
+}
+
+#[tauri::command]
+fn open_release_download(url: String) -> Result<(), String> {
+    validate_release_url(&url)?;
+    #[cfg(target_os = "linux")]
+    let mut command = std::process::Command::new("xdg-open");
+    #[cfg(target_os = "linux")]
+    command.arg(&url);
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = std::process::Command::new("rundll32.exe");
+        command.args(["url.dll,FileProtocolHandler", &url]);
+        command
+    };
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("cannot open the release download: {error}"))
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct DesktopSettings {
@@ -637,6 +768,8 @@ fn main() {
             desktop_diagnostics,
             desktop_settings,
             update_desktop_settings,
+            check_for_updates,
+            open_release_download,
             start_voice_recording,
             voice_recording_status,
             stop_voice_recording,
@@ -799,6 +932,46 @@ mod tests {
             "Generating locally · 3 queued"
         );
         assert!(!tray_status_text(&generating).2);
+    }
+
+    #[test]
+    fn updater_compares_versions_and_accepts_only_github_https_urls() {
+        assert!(newer_version("v0.2.0", "0.1.9").unwrap());
+        assert!(newer_version("1.0.0", "0.99.99").unwrap());
+        assert!(!newer_version("v0.1.0", "0.1.0").unwrap());
+        assert!(!newer_version("0.1.0", "0.2.0").unwrap());
+        assert!(newer_version("latest", "0.1.0").is_err());
+        assert!(validate_release_url("https://github.com/a1denvalu3/SayTheRest/releases").is_ok());
+        assert!(validate_release_url("http://github.com/a1denvalu3/SayTheRest").is_err());
+        assert!(validate_release_url("https://example.com/SayTheRest.exe").is_err());
+    }
+
+    #[test]
+    fn updater_selects_a_native_release_package() {
+        let assets = vec![
+            GitHubReleaseAsset {
+                name: "say-the-rest-x86_64-pc-windows-msvc.zip".into(),
+                browser_download_url: "https://github.com/example/windows.zip".into(),
+            },
+            GitHubReleaseAsset {
+                name: "SayTheRest-Setup-x64.exe".into(),
+                browser_download_url: "https://github.com/example/setup.exe".into(),
+            },
+            GitHubReleaseAsset {
+                name: "SayTheRest-0.2.0-x86_64.AppImage".into(),
+                browser_download_url: "https://github.com/example/appimage".into(),
+            },
+            GitHubReleaseAsset {
+                name: "say-the-rest_0.2.0_amd64.deb".into(),
+                browser_download_url: "https://github.com/example/deb".into(),
+            },
+        ];
+        let selected = preferred_release_asset(&assets).unwrap();
+        if cfg!(windows) {
+            assert!(selected.name.ends_with("Setup-x64.exe"));
+        } else {
+            assert!(selected.name.ends_with("amd64.deb"));
+        }
     }
 
     #[cfg(target_os = "linux")]
