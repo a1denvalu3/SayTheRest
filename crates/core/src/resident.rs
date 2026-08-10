@@ -208,6 +208,16 @@ impl ResidentSherpaEngine {
                 native.model.provider = keep(value.provider.clone())?;
                 (value.speaker_id as i32, 0, false)
             }
+            EngineConfig::SherpaOnnxKitten(value) => {
+                native.model.kitten.model = keep(path_string(&value.model))?;
+                native.model.kitten.voices = keep(path_string(&value.voices))?;
+                native.model.kitten.tokens = keep(path_string(&value.tokens))?;
+                native.model.kitten.data_dir = keep(path_string(&value.data_dir))?;
+                native.model.kitten.length_scale = 1.0;
+                native.model.num_threads = value.num_threads as i32;
+                native.model.provider = keep(value.provider.clone())?;
+                (value.speaker_id as i32, 0, false)
+            }
             EngineConfig::SherpaOnnxPocket(value) => {
                 native.model.pocket.lm_flow = keep(path_string(&value.lm_flow))?;
                 native.model.pocket.lm_main = keep(path_string(&value.lm_main))?;
@@ -313,6 +323,7 @@ fn executable(config: &EngineConfig) -> PathBuf {
     match config {
         EngineConfig::SherpaOnnxVits(v) => v.executable.clone(),
         EngineConfig::SherpaOnnxKokoro(v) => v.executable.clone(),
+        EngineConfig::SherpaOnnxKitten(v) => v.executable.clone(),
         EngineConfig::SherpaOnnxPocket(v) => v.executable.clone(),
     }
 }
@@ -392,8 +403,9 @@ fn read_reference(path: &Path) -> Result<(Vec<f32>, i32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::c_api_library;
-    use std::path::Path;
+    use super::{ResidentSherpaEngine, c_api_library};
+    use crate::{EngineConfig, KittenConfig, SynthesisRequest, wav_duration_seconds};
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn resolves_c_api_next_to_the_packaged_runtime() {
@@ -410,5 +422,41 @@ mod tests {
             Some(expected)
         );
         assert_eq!(path.parent(), Some(Path::new("bundle/runtime/lib")));
+    }
+
+    #[test]
+    #[ignore = "requires extracted Kitten weights and a packaged sherpa runtime"]
+    fn kitten_models_synthesize_through_resident_runtime() {
+        let models = PathBuf::from(std::env::var_os("SAY_THE_REST_KITTEN_TEST_ROOT").unwrap());
+        let executable = PathBuf::from(std::env::var_os("SAY_THE_REST_TTS_TEST_RUNTIME").unwrap());
+        for (directory, model) in [
+            ("kitten-mini-en-v0_8", "model.onnx"),
+            ("kitten-nano-en-v0_8-int8", "model.int8.onnx"),
+        ] {
+            let root = models.join(directory);
+            let config = EngineConfig::SherpaOnnxKitten(KittenConfig {
+                executable: executable.clone(),
+                model: root.join(model),
+                voices: root.join("voices.bin"),
+                tokens: root.join("tokens.txt"),
+                data_dir: root.join("espeak-ng-data"),
+                provider: "cpu".into(),
+                num_threads: 4,
+                speaker_id: 1,
+            });
+            config.validate().unwrap();
+            let mut engine = ResidentSherpaEngine::load(&config).unwrap();
+            let temporary = tempfile::tempdir().unwrap();
+            let output = temporary.path().join(format!("{directory}.wav"));
+            engine
+                .synthesize(&SynthesisRequest {
+                    text: "Kitten speech runs through the resident native engine.",
+                    output: &output,
+                    reference_audio: None,
+                    speaking_pace: 1.0,
+                })
+                .unwrap();
+            assert!(wav_duration_seconds(&output).unwrap() > 1.0);
+        }
     }
 }

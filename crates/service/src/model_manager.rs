@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, bail};
 use bzip2::read::BzDecoder;
-use say_the_rest_core::{EngineConfig, KokoroConfig, PocketConfig, SherpaOnnxEngine, VitsConfig};
+use say_the_rest_core::{
+    EngineConfig, KittenConfig, KokoroConfig, PocketConfig, SherpaOnnxEngine, VitsConfig,
+};
 use say_the_rest_protocol::{
     DownloadSnapshot, DownloadState, ModelBenchmark, ModelCapabilities, ModelDescriptor,
     ModelPresetVoice,
@@ -144,6 +146,48 @@ const CATALOG: &[CatalogEntry] = &[
         },
         preset_voices: &[],
     },
+    CatalogEntry {
+        id: "kitten-mini-en-v0-8",
+        name: "Kitten Mini 0.8",
+        archive_root: "kitten-mini-en-v0_8",
+        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kitten-mini-en-v0_8.tar.bz2",
+        sha256: "518f9b130320f690d5b5476df77bde4215fca67773cda16710318e5081234b9d",
+        size: 67_547_594,
+        languages: &["en"],
+        license: "Apache-2.0",
+        license_url: "https://huggingface.co/KittenML/kitten-tts-mini-0.8",
+        quality_note: "Eight expressive English voices; experimental and less natural than larger models.",
+        speed_note: "Small 74M-parameter CPU model; benchmark locally before selecting it.",
+        capabilities: ModelCapabilitiesStatic {
+            preset_voices: true,
+            voice_cloning: false,
+            streaming: true,
+        },
+        preset_voices: KITTEN_VOICES,
+    },
+    CatalogEntry {
+        id: "kitten-nano-en-v0-8-int8",
+        name: "Kitten Nano 0.8 INT8",
+        archive_root: "kitten-nano-en-v0_8-int8",
+        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kitten-nano-en-v0_8-int8.tar.bz2",
+        sha256: "6fa5be852612ce761094ba74ee6123b4fc4acfefa79bf64dc63acae4a83af2fd",
+        size: 31_220_690,
+        languages: &["en"],
+        license: "Apache-2.0",
+        license_url: "https://huggingface.co/KittenML/kitten-tts-nano-0.8-fp32",
+        quality_note: "Extremely compact English speech with eight voices; quality is intentionally modest.",
+        speed_note: "INT8 CPU model optimized for the smallest download and memory footprint.",
+        capabilities: ModelCapabilitiesStatic {
+            preset_voices: true,
+            voice_cloning: false,
+            streaming: true,
+        },
+        preset_voices: KITTEN_VOICES,
+    },
+];
+
+const KITTEN_VOICES: &[&str] = &[
+    "bella", "jasper", "luna", "bruno", "rosie", "hugo", "kiki", "leo",
 ];
 
 const KOKORO_VOICES: &[&str] = &[
@@ -254,6 +298,7 @@ impl ModelManager {
             let executable = match &mut config {
                 EngineConfig::SherpaOnnxVits(config) => &mut config.executable,
                 EngineConfig::SherpaOnnxKokoro(config) => &mut config.executable,
+                EngineConfig::SherpaOnnxKitten(config) => &mut config.executable,
                 EngineConfig::SherpaOnnxPocket(config) => &mut config.executable,
             };
             if executable == &self.executable {
@@ -286,6 +331,7 @@ impl ModelManager {
                     .and_then(|config| match config {
                         EngineConfig::SherpaOnnxVits(config) => Some(config.speaker_id),
                         EngineConfig::SherpaOnnxKokoro(config) => Some(config.speaker_id),
+                        EngineConfig::SherpaOnnxKitten(config) => Some(config.speaker_id),
                         EngineConfig::SherpaOnnxPocket(_) => None,
                     });
                 ModelDescriptor {
@@ -397,6 +443,7 @@ impl ModelManager {
                 };
                 config.lexicons = vec![root.join(english), root.join("lexicon-zh.txt")];
             }
+            EngineConfig::SherpaOnnxKitten(config) => config.speaker_id = speaker_id,
             EngineConfig::SherpaOnnxPocket(_) => bail!("model does not provide preset voices"),
         }
         let temporary = path.with_extension("json.tmp");
@@ -1142,6 +1189,18 @@ fn relocate_config(
                 speaker_id: config.speaker_id,
             }))
         }
+        EngineConfig::SherpaOnnxKitten(config) => {
+            Ok(EngineConfig::SherpaOnnxKitten(KittenConfig {
+                executable: executable.into(),
+                model: relocate(config.model)?,
+                voices: relocate(config.voices)?,
+                tokens: relocate(config.tokens)?,
+                data_dir: relocate(config.data_dir)?,
+                provider: config.provider,
+                num_threads: config.num_threads,
+                speaker_id: config.speaker_id,
+            }))
+        }
     }
 }
 
@@ -1227,6 +1286,12 @@ fn config_requirements(config: &EngineConfig) -> Result<Vec<(String, bool)>> {
             }
             Ok(required)
         }
+        EngineConfig::SherpaOnnxKitten(config) => Ok(vec![
+            path(&config.model, false)?,
+            path(&config.voices, false)?,
+            path(&config.tokens, false)?,
+            path(&config.data_dir, true)?,
+        ]),
     }
 }
 
@@ -1349,6 +1414,13 @@ fn validate_model_files(id: &str, root: &Path) -> Result<()> {
             "lexicon-gb-en.txt",
             "lexicon-zh.txt",
         ],
+        "kitten-mini-en-v0-8" => &["model.onnx", "voices.bin", "tokens.txt", "espeak-ng-data"],
+        "kitten-nano-en-v0-8-int8" => &[
+            "model.int8.onnx",
+            "voices.bin",
+            "tokens.txt",
+            "espeak-ng-data",
+        ],
         _ => bail!("unknown model"),
     };
     for name in required {
@@ -1395,6 +1467,26 @@ fn config_for(id: &str, root: &Path, executable: &Path) -> Result<EngineConfig> 
             num_threads: 4,
             speaker_id: 3,
         })),
+        "kitten-mini-en-v0-8" => Ok(EngineConfig::SherpaOnnxKitten(KittenConfig {
+            executable: executable.into(),
+            model: root.join("model.onnx"),
+            voices: root.join("voices.bin"),
+            tokens: root.join("tokens.txt"),
+            data_dir: root.join("espeak-ng-data"),
+            provider: "cpu".into(),
+            num_threads: 4,
+            speaker_id: 1,
+        })),
+        "kitten-nano-en-v0-8-int8" => Ok(EngineConfig::SherpaOnnxKitten(KittenConfig {
+            executable: executable.into(),
+            model: root.join("model.int8.onnx"),
+            voices: root.join("voices.bin"),
+            tokens: root.join("tokens.txt"),
+            data_dir: root.join("espeak-ng-data"),
+            provider: "cpu".into(),
+            num_threads: 4,
+            speaker_id: 1,
+        })),
         _ => bail!("unknown model"),
     }
 }
@@ -1425,6 +1517,13 @@ mod tests {
         assert_eq!(kokoro.preset_voices.len(), 53);
         assert_eq!(kokoro.preset_voices[3].id, "af_heart");
         assert_eq!(kokoro.preset_voices[45].language, "zh-CN");
+        for id in ["kitten-mini-en-v0-8", "kitten-nano-en-v0-8-int8"] {
+            let kitten = models.iter().find(|model| model.id == id).unwrap();
+            assert_eq!(kitten.preset_voices.len(), 8);
+            assert_eq!(kitten.preset_voices[1].id, "jasper");
+            assert_eq!(kitten.preset_voices[1].language, "en-US");
+            assert!(kitten.capabilities.streaming);
+        }
         let uninstalled = manager.descriptors(Some("piper-en-us-lessac-medium"), &HashMap::new());
         let piper = uninstalled
             .iter()

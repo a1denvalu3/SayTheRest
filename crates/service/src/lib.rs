@@ -143,6 +143,18 @@ impl ServiceState {
             .map(|config| match config {
                 EngineConfig::SherpaOnnxVits(_) => "piper-en-us-lessac-medium",
                 EngineConfig::SherpaOnnxKokoro(_) => "kokoro-int8-multi-lang-v1-1",
+                EngineConfig::SherpaOnnxKitten(config) => {
+                    if config
+                        .model
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.contains("int8"))
+                    {
+                        "kitten-nano-en-v0-8-int8"
+                    } else {
+                        "kitten-mini-en-v0-8"
+                    }
+                }
                 EngineConfig::SherpaOnnxPocket(_) => "pocket-tts-int8",
             });
         if let (Some(id), Some(source)) = (configured_model_id, engine_config_path.as_deref()) {

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 pub enum EngineConfig {
     SherpaOnnxVits(VitsConfig),
     SherpaOnnxKokoro(KokoroConfig),
+    SherpaOnnxKitten(KittenConfig),
     SherpaOnnxPocket(PocketConfig),
 }
 
@@ -55,6 +56,22 @@ pub struct KokoroConfig {
     pub tokens: PathBuf,
     pub data_dir: PathBuf,
     pub lexicons: Vec<PathBuf>,
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    #[serde(default = "default_threads")]
+    pub num_threads: usize,
+    #[serde(default)]
+    pub speaker_id: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct KittenConfig {
+    #[serde(default = "default_executable")]
+    pub executable: PathBuf,
+    pub model: PathBuf,
+    pub voices: PathBuf,
+    pub tokens: PathBuf,
+    pub data_dir: PathBuf,
     #[serde(default = "default_provider")]
     pub provider: String,
     #[serde(default = "default_threads")]
@@ -145,6 +162,23 @@ impl EngineConfig {
                 if kokoro.lexicons.is_empty() || kokoro.lexicons.iter().any(|path| !path.is_file())
                 {
                     bail!("Kokoro requires one or more existing lexicon files");
+                }
+            }
+            Self::SherpaOnnxKitten(kitten) => {
+                if kitten.num_threads == 0 {
+                    bail!("num_threads must be at least 1");
+                }
+                for (name, path) in [
+                    ("model", &kitten.model),
+                    ("voices", &kitten.voices),
+                    ("tokens", &kitten.tokens),
+                ] {
+                    if !path.is_file() {
+                        bail!("{name} file does not exist: {}", path.display());
+                    }
+                }
+                if !kitten.data_dir.is_dir() {
+                    bail!("data_dir does not exist: {}", kitten.data_dir.display());
                 }
             }
         }

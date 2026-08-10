@@ -84,11 +84,20 @@ impl SherpaOnnxEngine {
                 format!("--sid={}", config.speaker_id),
                 format!("--kokoro-length-scale={}", 1.0 / request.speaking_pace),
             ],
+            EngineConfig::SherpaOnnxKitten(config) => vec![
+                Self::arg("kitten-model", &config.model),
+                Self::arg("kitten-voices", &config.voices),
+                Self::arg("kitten-tokens", &config.tokens),
+                Self::arg("kitten-data-dir", &config.data_dir),
+                format!("--sid={}", config.speaker_id),
+                format!("--kitten-length-scale={}", 1.0 / request.speaking_pace),
+            ],
         };
         let (provider, threads) = match &self.config {
             EngineConfig::SherpaOnnxVits(config) => (&config.provider, config.num_threads),
             EngineConfig::SherpaOnnxPocket(config) => (&config.provider, config.num_threads),
             EngineConfig::SherpaOnnxKokoro(config) => (&config.provider, config.num_threads),
+            EngineConfig::SherpaOnnxKitten(config) => (&config.provider, config.num_threads),
         };
         args.push(Self::arg("output-filename", request.output));
         args.push(format!("--provider={provider}"));
@@ -102,6 +111,7 @@ impl SherpaOnnxEngine {
             EngineConfig::SherpaOnnxVits(config) => config.executable.clone(),
             EngineConfig::SherpaOnnxPocket(config) => config.executable.clone(),
             EngineConfig::SherpaOnnxKokoro(config) => config.executable.clone(),
+            EngineConfig::SherpaOnnxKitten(config) => config.executable.clone(),
         }
     }
 }
@@ -137,6 +147,7 @@ impl TtsEngine for SherpaOnnxEngine {
             EngineConfig::SherpaOnnxVits(_) => "sherpa-onnx-vits/process-cold",
             EngineConfig::SherpaOnnxPocket(_) => "sherpa-onnx-pocket/process-cold",
             EngineConfig::SherpaOnnxKokoro(_) => "sherpa-onnx-kokoro/process-cold",
+            EngineConfig::SherpaOnnxKitten(_) => "sherpa-onnx-kitten/process-cold",
         }
     }
 }
@@ -144,7 +155,7 @@ impl TtsEngine for SherpaOnnxEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{KokoroConfig, PocketConfig, VitsConfig};
+    use crate::{KittenConfig, KokoroConfig, PocketConfig, VitsConfig};
 
     #[test]
     fn builds_vits_arguments_without_shell_interpolation() {
@@ -225,5 +236,30 @@ mod tests {
         assert!(args.contains(&"--sid=3".into()));
         assert!(args.contains(&"--kokoro-length-scale=0.8".into()));
         assert!(args.contains(&"--kokoro-lexicon=lexicon-us-en.txt,lexicon-zh.txt".into()));
+    }
+
+    #[test]
+    fn builds_kitten_multivoice_arguments() {
+        let engine = SherpaOnnxEngine::from_config(EngineConfig::SherpaOnnxKitten(KittenConfig {
+            executable: "tts".into(),
+            model: "model.int8.onnx".into(),
+            voices: "voices.bin".into(),
+            tokens: "tokens.txt".into(),
+            data_dir: "espeak-ng-data".into(),
+            provider: "cpu".into(),
+            num_threads: 4,
+            speaker_id: 1,
+        }));
+        let args = engine
+            .command_args(&SynthesisRequest {
+                text: "hello",
+                output: Path::new("out.wav"),
+                reference_audio: None,
+                speaking_pace: 1.25,
+            })
+            .unwrap();
+        assert!(args.contains(&"--kitten-model=model.int8.onnx".into()));
+        assert!(args.contains(&"--sid=1".into()));
+        assert!(args.contains(&"--kitten-length-scale=0.8".into()));
     }
 }
