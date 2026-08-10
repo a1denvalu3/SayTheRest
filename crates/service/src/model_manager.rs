@@ -785,74 +785,85 @@ impl ModelManager {
     }
 
     fn install(&self, entry: CatalogEntry, cancelled: &AtomicBool) -> Result<()> {
+        self.install_from(entry, entry.url, entry.sha256, cancelled)
+    }
+
+    fn install_from(
+        &self,
+        entry: CatalogEntry,
+        url: &str,
+        expected_sha256: &str,
+        cancelled: &AtomicBool,
+    ) -> Result<()> {
         let downloads = self.root.join(".downloads");
         fs::create_dir_all(&downloads)?;
         let archive_path = downloads.join(format!("{}.tar.bz2", entry.id));
-        let mut response = reqwest::blocking::get(entry.url)?.error_for_status()?;
-        let total = response.content_length().unwrap_or(entry.size);
-        let mut output = File::create(&archive_path)?;
-        let mut downloaded = 0u64;
-        let mut buffer = [0u8; 128 * 1024];
-        loop {
+        let staging = downloads.join(format!("{}-staging", entry.id));
+        let result = (|| {
+            let mut response = reqwest::blocking::get(url)?.error_for_status()?;
+            let total = response.content_length().unwrap_or(entry.size);
+            let mut output = File::create(&archive_path)?;
+            let mut downloaded = 0u64;
+            let mut buffer = [0u8; 128 * 1024];
+            loop {
+                if cancelled.load(Ordering::Relaxed) {
+                    bail!("download cancelled");
+                }
+                let count = response.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                output.write_all(&buffer[..count])?;
+                downloaded += count as u64;
+                self.set_progress(
+                    entry.id,
+                    DownloadState::Downloading,
+                    downloaded,
+                    total,
+                    None,
+                );
+            }
+            output.sync_all()?;
+            drop(output);
+            self.set_progress(entry.id, DownloadState::Verifying, downloaded, total, None);
+            let digest = sha256_file(&archive_path)?;
+            if digest != expected_sha256 {
+                bail!(
+                    "download checksum mismatch: expected {}, received {digest}",
+                    expected_sha256
+                );
+            }
             if cancelled.load(Ordering::Relaxed) {
                 bail!("download cancelled");
             }
-            let count = response.read(&mut buffer)?;
-            if count == 0 {
-                break;
+            self.set_progress(entry.id, DownloadState::Installing, downloaded, total, None);
+            if staging.is_dir() {
+                fs::remove_dir_all(&staging)?;
             }
-            output.write_all(&buffer[..count])?;
-            downloaded += count as u64;
-            self.set_progress(
-                entry.id,
-                DownloadState::Downloading,
-                downloaded,
-                total,
-                None,
-            );
-        }
-        output.sync_all()?;
-        self.set_progress(entry.id, DownloadState::Verifying, downloaded, total, None);
-        let digest = sha256_file(&archive_path)?;
-        if digest != entry.sha256 {
-            bail!(
-                "download checksum mismatch: expected {}, received {digest}",
-                entry.sha256
-            );
-        }
-        if cancelled.load(Ordering::Relaxed) {
-            bail!("download cancelled");
-        }
-        self.set_progress(entry.id, DownloadState::Installing, downloaded, total, None);
-        let staging = downloads.join(format!("{}-staging", entry.id));
-        if staging.is_dir() {
-            fs::remove_dir_all(&staging)?;
-        }
-        fs::create_dir_all(&staging)?;
-        tar::Archive::new(BzDecoder::new(File::open(&archive_path)?)).unpack(&staging)?;
-        let unpacked = staging.join(entry.archive_root);
-        validate_model_files(entry.id, &unpacked)?;
-        let destination = self.root.join(entry.id);
-        if destination.is_dir() {
-            fs::remove_dir_all(&destination)?;
-        }
-        fs::rename(&unpacked, &destination)?;
-        let config = config_for(entry.id, &destination, &self.executable)?;
-        fs::write(
-            destination.join("config.json"),
-            serde_json::to_vec_pretty(&config)?,
-        )?;
-        fs::write(
-            destination.join("catalog-install.json"),
-            serde_json::to_vec_pretty(&CatalogInstallManifest {
-                id: entry.id.into(),
-                sha256: entry.sha256.into(),
-            })?,
-        )?;
-        let _ = fs::remove_file(archive_path);
-        let _ = fs::remove_dir_all(staging);
-        self.set_progress(entry.id, DownloadState::Installed, total, total, None);
-        Ok(())
+            fs::create_dir_all(&staging)?;
+            tar::Archive::new(BzDecoder::new(File::open(&archive_path)?)).unpack(&staging)?;
+            let unpacked = staging.join(entry.archive_root);
+            validate_model_files(entry.id, &unpacked)?;
+            let destination = self.root.join(entry.id);
+            let config = config_for(entry.id, &destination, &self.executable)?;
+            fs::write(
+                unpacked.join("config.json"),
+                serde_json::to_vec_pretty(&config)?,
+            )?;
+            fs::write(
+                unpacked.join("catalog-install.json"),
+                serde_json::to_vec_pretty(&CatalogInstallManifest {
+                    id: entry.id.into(),
+                    sha256: expected_sha256.into(),
+                })?,
+            )?;
+            replace_model_directory(&unpacked, &destination)?;
+            self.set_progress(entry.id, DownloadState::Installed, total, total, None);
+            Ok(())
+        })();
+        let _ = fs::remove_file(&archive_path);
+        let _ = fs::remove_dir_all(&staging);
+        result
     }
 
     fn set_progress(
@@ -899,6 +910,27 @@ fn preset_voice_language(id: &str) -> &'static str {
         Some("ef" | "em" | "ff" | "hf" | "hm" | "if" | "im" | "jf" | "jm" | "pf" | "pm") => "en",
         _ => "en-US",
     }
+}
+
+fn replace_model_directory(staged: &Path, destination: &Path) -> Result<()> {
+    let backup = destination.with_extension("previous");
+    if backup.exists() {
+        fs::remove_dir_all(&backup)?;
+    }
+    let had_previous = destination.is_dir();
+    if had_previous {
+        fs::rename(destination, &backup).context("cannot preserve the installed model")?;
+    }
+    if let Err(error) = fs::rename(staged, destination) {
+        if had_previous {
+            let _ = fs::rename(&backup, destination);
+        }
+        return Err(error).context("cannot activate the downloaded model");
+    }
+    if had_previous {
+        let _ = fs::remove_dir_all(backup);
+    }
+    Ok(())
 }
 
 fn extract_model_archive(archive_path: &Path, destination: &Path) -> Result<()> {
@@ -1636,6 +1668,111 @@ mod tests {
             speaker_id: 0,
         });
         assert!(config_requirements(&unsafe_config).is_err());
+    }
+
+    #[test]
+    fn curated_install_verifies_download_installs_and_removes_atomically() {
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+
+        let entry = CATALOG[0];
+        let encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::best());
+        let mut builder = tar::Builder::new(encoder);
+        for (path, contents) in [
+            (
+                format!("{}/en_US-lessac-medium.onnx", entry.archive_root),
+                b"model".as_slice(),
+            ),
+            (
+                format!("{}/tokens.txt", entry.archive_root),
+                b"tokens".as_slice(),
+            ),
+            (
+                format!("{}/espeak-ng-data/placeholder", entry.archive_root),
+                b"data".as_slice(),
+            ),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, path, contents).unwrap();
+        }
+        let archive = builder.into_inner().unwrap().finish().unwrap();
+        let digest = format!("{:x}", Sha256::digest(&archive));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_archive = archive.clone();
+        let server = std::thread::spawn(move || {
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    server_archive.len()
+                )
+                .unwrap();
+                stream.write_all(&server_archive).unwrap();
+            }
+        });
+        let storage = tempfile::tempdir().unwrap();
+        let manager = ModelManager::new(storage.path().into(), None).unwrap();
+        let url = format!("http://{address}/model.tar.bz2");
+
+        manager
+            .install_from(entry, &url, &digest, &AtomicBool::new(false))
+            .unwrap();
+        let descriptor = manager
+            .descriptors(None, &HashMap::new())
+            .into_iter()
+            .find(|model| model.id == entry.id)
+            .unwrap();
+        assert!(descriptor.installed);
+        assert!(matches!(
+            descriptor.download.unwrap().state,
+            DownloadState::Installed
+        ));
+        assert!(EngineConfig::from_path(&manager.config_path(entry.id)).is_ok());
+        let stale = manager.root.join(entry.id).join("stale-version");
+        fs::write(&stale, b"old").unwrap();
+        manager
+            .install_from(entry, &url, &digest, &AtomicBool::new(false))
+            .unwrap();
+        assert!(!stale.exists());
+        manager.remove(entry.id).unwrap();
+        assert!(!manager.config_path(entry.id).exists());
+
+        let checksum_error = manager
+            .install_from(entry, &url, &"0".repeat(64), &AtomicBool::new(false))
+            .unwrap_err();
+        assert!(checksum_error.to_string().contains("checksum mismatch"));
+        let cancellation = manager
+            .install_from(entry, &url, &digest, &AtomicBool::new(true))
+            .unwrap_err();
+        assert!(cancellation.to_string().contains("cancelled"));
+        assert!(
+            !manager
+                .root
+                .join(".downloads")
+                .join(format!("{}.tar.bz2", entry.id))
+                .exists()
+        );
+        assert!(
+            !manager
+                .root
+                .join(".downloads")
+                .join(format!("{}-staging", entry.id))
+                .exists()
+        );
+        server.join().unwrap();
     }
 
     #[test]
