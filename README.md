@@ -64,7 +64,7 @@ Windows: download and run `SayTheRest-Setup-x64.exe`. The installer is per-user 
 .\setup.ps1
 ```
 
-Every format contains the desktop app, service, CLI, and sherpa-onnx CPU runtime. The `.deb` and AppImage start the per-user service and let you choose a licensed model during onboarding; portable setup downloads the default voice. Models remain separate because each has its own license. Voice cloning is entirely local: Voice Studio can record a 3–15 second sample from the default microphone or import a PCM WAV, then trims and analyzes it before use. The recorded speaker must grant permission.
+Every format contains the desktop app, service, CLI, and sherpa-onnx CPU runtime. Installation performs no network requests. Onboarding lets you explicitly choose a licensed model, then downloads it with pinned SHA-256 verification. Models remain separate because each has its own license. Voice cloning is entirely local: Voice Studio can record a 3–15 second sample from the default microphone or import a PCM WAV, then trims and analyzes it before use. The recorded speaker must grant permission.
 
 ## Build from source
 
@@ -87,6 +87,7 @@ See [the recorded model benchmark](docs/model-benchmarks.md) for the current CPU
 ## Design
 
 See [ADR 0001](docs/adr/0001-inference-boundary.md) for the runtime decision and acceptance targets.
+The explicit external-access allowlist is documented in the [network policy](docs/network-policy.md).
 
 ## License
 

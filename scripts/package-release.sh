@@ -9,6 +9,29 @@ PACKAGE_NAME="say-the-rest-${TARGET}"
 STAGE="$ROOT_DIR/dist/$PACKAGE_NAME"
 ARCHIVE="$ROOT_DIR/dist/$SHERPA_ASSET"
 
+case "$SHERPA_ASSET" in
+  sherpa-onnx-v1.13.4-linux-x64-shared.tar.bz2)
+    SHERPA_SHA256=18887dc13c7d313d0e0f6c164ed31715c27c1c2c4f71acd7c0147dc84cf02514
+    ;;
+  sherpa-onnx-v1.13.4-win-x64-shared-MT-Release.tar.bz2)
+    SHERPA_SHA256=c312b30e55258d291067537ce4a6f90e155f1c16b6a10381a5729924e98b7879
+    ;;
+  *)
+    echo "Unsupported or unpinned sherpa-onnx release asset: $SHERPA_ASSET" >&2
+    exit 1
+    ;;
+esac
+
+verify_sha256() {
+  expected=$1
+  file=$2
+  actual=$(sha256sum "$file" | cut -d ' ' -f 1)
+  if [ "$actual" != "$expected" ]; then
+    echo "SHA-256 mismatch for $file: expected $expected, received $actual" >&2
+    exit 1
+  fi
+}
+
 rm -rf "$STAGE"
 mkdir -p "$STAGE/runtime" "$STAGE/icons" "$ROOT_DIR/dist"
 cargo build --release --locked --target "$TARGET" --manifest-path "$ROOT_DIR/Cargo.toml"
@@ -26,6 +49,7 @@ cp "$ROOT_DIR/apps/desktop/src-tauri/icons/icon.ico" "$STAGE/icons/"
 curl --fail --location --retry 3 \
   "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SHERPA_VERSION}/${SHERPA_ASSET}" \
   --output "$ARCHIVE"
+verify_sha256 "$SHERPA_SHA256" "$ARCHIVE"
 tar -xjf "$ARCHIVE" -C "$STAGE/runtime" --strip-components=1
 rm "$ARCHIVE"
 
@@ -100,19 +124,29 @@ EOF
   cp "$ROOT_DIR/packaging/linux-appimage/say-the-rest-appimage-desktop.service" "$APPDIR/usr/share/say-the-rest/"
   chmod 755 "$APPDIR/AppRun" "$APPDIR/usr/bin/"say-the-rest*
   LINUXDEPLOY="$ROOT_DIR/dist/linuxdeploy-x86_64.AppImage"
+  LINUXDEPLOY_SHA256=421ca71d5c69ea97c6309276232990d43df1dcece0edfaa26bbf926ff96ed12e
   curl --fail --location --retry 3 \
     "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage" \
     --output "$LINUXDEPLOY"
+  verify_sha256 "$LINUXDEPLOY_SHA256" "$LINUXDEPLOY"
   chmod +x "$LINUXDEPLOY"
+  APPIMAGETOOL="$ROOT_DIR/dist/appimagetool-x86_64.AppImage"
+  APPIMAGETOOL_SHA256=a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0
+  curl --fail --location --retry 3 \
+    "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" \
+    --output "$APPIMAGETOOL"
+  verify_sha256 "$APPIMAGETOOL_SHA256" "$APPIMAGETOOL"
+  chmod +x "$APPIMAGETOOL"
   APPIMAGE_OUTPUT="$ROOT_DIR/dist/SayTheRest-${VERSION}-x86_64.AppImage"
   APPIMAGE_TEMP="$ROOT_DIR/dist/SayTheRest-${VERSION}-x86_64.new.AppImage"
   rm -f "$APPIMAGE_TEMP"
-  APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 LDAI_OUTPUT="$APPIMAGE_TEMP" \
+  APPIMAGE_EXTRACT_AND_RUN=1 \
     "$LINUXDEPLOY" --appdir "$APPDIR" \
       --executable "$APPDIR/usr/bin/say-the-rest-desktop" \
       --executable "$APPDIR/usr/bin/say-the-rest-service" \
       --desktop-file "$APPDIR/usr/share/applications/say-the-rest.desktop" \
-      --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/say-the-rest.png" \
-      --output appimage
+      --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/say-the-rest.png"
+  APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 \
+    "$APPIMAGETOOL" "$APPDIR" "$APPIMAGE_TEMP"
   mv -f "$APPIMAGE_TEMP" "$APPIMAGE_OUTPUT"
 fi

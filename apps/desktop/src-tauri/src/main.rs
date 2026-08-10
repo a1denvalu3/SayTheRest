@@ -893,6 +893,38 @@ mod tests {
     }
 
     #[test]
+    fn packaged_installers_are_offline_and_require_no_developer_toolchain() {
+        let linux = include_str!("../../../../packaging/setup.sh");
+        let windows = include_str!("../../../../packaging/setup.ps1");
+        for setup in [linux, windows] {
+            let lower = setup.to_ascii_lowercase();
+            for forbidden in [
+                "cargo",
+                "python",
+                "curl ",
+                "wget ",
+                "invoke-webrequest",
+                "http://",
+                "https://",
+            ] {
+                assert!(
+                    !lower.contains(forbidden),
+                    "installer contains forbidden dependency or network operation: {forbidden}"
+                );
+            }
+            assert!(setup.contains("say-the-rest-service"));
+            assert!(setup.contains("say-the-rest-desktop"));
+        }
+        assert!(windows.contains("-RestartCount 999"));
+        assert!(windows.contains("-DontStopIfGoingOnBatteries"));
+        let packaging = include_str!("../../../../scripts/package-release.sh");
+        assert!(packaging.contains("SHERPA_SHA256="));
+        assert!(packaging.contains("LINUXDEPLOY_SHA256="));
+        assert!(packaging.contains("APPIMAGETOOL_SHA256="));
+        assert!(packaging.contains("verify_sha256"));
+    }
+
+    #[test]
     fn legacy_desktop_settings_keep_launch_at_login_enabled() {
         let settings: DesktopSettings = serde_json::from_str(
             r#"{"selection_shortcut":"ctrl+alt+s","clipboard_shortcut":"ctrl+alt+v"}"#,

@@ -60,7 +60,7 @@ The copy fallback snapshots advertised raw formats (including text, HTML/RTF, im
 - [x] Versioned localhost REST API with scoped bearer tokens, rate limiting, event stream, and OpenAPI document.
 - [x] Crash-safe job journal and service recovery.
 - [ ] Linux packages and Windows installer that need neither Cargo nor Python.
-- [ ] No analytics, cloud inference, passive clipboard monitoring, or unexpected network access.
+- [x] No analytics, cloud inference, passive clipboard monitoring, or unexpected network access.
 
 ## Definition of done
 

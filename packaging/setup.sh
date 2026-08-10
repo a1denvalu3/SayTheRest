@@ -2,31 +2,6 @@
 set -eu
 
 APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-MODEL_NAME=vits-piper-en_US-lessac-medium
-MODEL_ARCHIVE="$MODEL_NAME.tar.bz2"
-MODEL_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/$MODEL_ARCHIVE"
-
-mkdir -p "$APP_DIR/models"
-if [ ! -f "$APP_DIR/models/$MODEL_NAME/en_US-lessac-medium.onnx" ]; then
-  echo "Downloading the default English voice (about 60 MB)..."
-  curl --fail --location --progress-bar "$MODEL_URL" --output "$APP_DIR/models/$MODEL_ARCHIVE"
-  tar -xjf "$APP_DIR/models/$MODEL_ARCHIVE" -C "$APP_DIR/models"
-  rm "$APP_DIR/models/$MODEL_ARCHIVE"
-fi
-
-cat > "$APP_DIR/say-the-rest.json" <<EOF
-{
-  "engine": "sherpa-onnx-vits",
-  "executable": "$APP_DIR/runtime/bin/sherpa-onnx-offline-tts",
-  "model": "$APP_DIR/models/$MODEL_NAME/en_US-lessac-medium.onnx",
-  "tokens": "$APP_DIR/models/$MODEL_NAME/tokens.txt",
-  "data_dir": "$APP_DIR/models/$MODEL_NAME/espeak-ng-data",
-  "provider": "cpu",
-  "num_threads": 4,
-  "speaker_id": 0
-}
-EOF
-
 if command -v systemctl >/dev/null 2>&1; then
   UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
   mkdir -p "$UNIT_DIR"
@@ -38,7 +13,7 @@ After=graphical-session.target
 [Service]
 Type=simple
 WorkingDirectory="$APP_DIR"
-ExecStart="$APP_DIR/say-the-rest-service" --config "$APP_DIR/say-the-rest.json"
+ExecStart="$APP_DIR/say-the-rest-service"
 Restart=on-failure
 RestartSec=2
 
@@ -82,4 +57,4 @@ X-GNOME-Autostart-enabled=true
 EOF
   "$APP_DIR/say-the-rest-desktop" >/dev/null 2>&1 &
 fi
-echo "Setup complete. Say the Rest is running in your system tray."
+echo "Setup complete. Say the Rest is running in your system tray. Choose a model in onboarding to download it with integrity verification."
