@@ -557,7 +557,13 @@ fn write_persisted_state(store_path: &Path, state: &InnerState, rotate_backup: b
         let backup = store_path.with_extension("json.bak");
         let backup_temporary = store_path.with_extension("json.bak.tmp");
         fs::copy(store_path, &backup_temporary)?;
-        fs::File::open(&backup_temporary)?.sync_all()?;
+        // Windows requires a writable handle for FlushFileBuffers, which is
+        // what File::sync_all uses. Opening the copied backup read-only works
+        // on Unix but fails with ERROR_ACCESS_DENIED on Windows.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&backup_temporary)?
+            .sync_all()?;
         replace_file(&backup_temporary, &backup)?;
     }
     replace_file(&temporary, store_path)?;
@@ -565,32 +571,32 @@ fn write_persisted_state(store_path: &Path, state: &InnerState, rotate_backup: b
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn replace_file(source: &Path, destination: &Path) -> Result<()> {
-    match fs::rename(source, destination) {
-        Ok(()) => Ok(()),
-        #[cfg(windows)]
-        Err(initial_error) => {
-            // Windows does not let std::fs::rename replace an existing file and
-            // virus scanners/indexers can hold a newly synced journal briefly.
-            // Retry the bounded replace while retaining the synced source file.
-            let mut last_error = initial_error;
-            for attempt in 0..8 {
-                if destination.is_file()
-                    && let Err(error) = fs::remove_file(destination)
-                    && error.kind() != std::io::ErrorKind::NotFound
-                {
-                    last_error = error;
-                }
-                match fs::rename(source, destination) {
-                    Ok(()) => return Ok(()),
-                    Err(error) => last_error = error,
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10 * (attempt + 1)));
-            }
-            Err(last_error.into())
-        }
-        Err(error) => Err(error.into()),
+    fs::rename(source, destination)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> Result<()> {
+    if fs::rename(source, destination).is_ok() {
+        return Ok(());
     }
+    // Windows does not let std::fs::rename replace an existing file and
+    // virus scanners/indexers can hold a newly synced journal briefly.
+    // Retry the bounded replace while retaining the synced source file.
+    let mut last_error = None;
+    for attempt in 0..8 {
+        if destination.is_file() {
+            let _ = fs::remove_file(destination);
+        }
+        match fs::rename(source, destination) {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10 * (attempt + 1)));
+    }
+    Err(last_error.expect("replacement attempted").into())
 }
 
 #[cfg(unix)]
