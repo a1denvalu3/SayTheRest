@@ -30,3 +30,10 @@ jobs and `resident: false` immediately after the explicit unload request. A sepa
 service loaded Kokoro through the same resident path and completed a valid synthesis job. The
 service stores one optional resident slot, replaces it during model changes, reloads it when a
 voice configuration changes, and checks the configured inactivity timeout every 15 seconds.
+
+The rebuilt AppImage was then exercised as the active per-user systemd service. Two queued Kokoro
+jobs completed without API errors, both outputs were valid 24 kHz mono 16-bit PCM WAV files, the
+catalog reported the selected model as resident between jobs, and an explicit unload changed that
+state to false. The Windows resident-loader path is compile-checked for x86-64 and uses
+`LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` so sherpa's adjacent ONNX Runtime and provider DLLs resolve from
+the packaged runtime directory; an actual Windows-device acceptance run is still required.

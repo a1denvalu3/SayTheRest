@@ -161,7 +161,7 @@ impl ResidentSherpaEngine {
         let library_path = c_api_library(&executable);
         // SAFETY: The library is shipped with the matching executable and remains
         // owned by this object until after the native TTS instance is destroyed.
-        let library = unsafe { Library::new(&library_path) }
+        let library = unsafe { load_c_api_library(&library_path) }
             .with_context(|| format!("failed to load {}", library_path.display()))?;
         let create: Create = unsafe { *library.get(b"SherpaOnnxCreateOfflineTts\0")? };
         let destroy: Destroy = unsafe { *library.get(b"SherpaOnnxDestroyOfflineTts\0")? };
@@ -346,6 +346,31 @@ fn c_api_library(executable: &Path) -> PathBuf {
             .join("libsherpa-onnx-c-api.so")
     }
 }
+
+#[cfg(windows)]
+unsafe fn load_c_api_library(path: &Path) -> Result<Library, libloading::Error> {
+    use libloading::os::windows::{
+        LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+        Library as WindowsLibrary,
+    };
+
+    // Sherpa's C API depends on adjacent ONNX Runtime and provider DLLs. Loading
+    // with an absolute path alone does not add that directory to dependency
+    // resolution on Windows, so opt into the safe DLL search flags explicitly.
+    unsafe {
+        WindowsLibrary::load_with_flags(
+            path,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+        )
+        .map(Into::into)
+    }
+}
+
+#[cfg(not(windows))]
+unsafe fn load_c_api_library(path: &Path) -> Result<Library, libloading::Error> {
+    unsafe { Library::new(path) }
+}
+
 fn read_reference(path: &Path) -> Result<(Vec<f32>, i32)> {
     let mut reader = hound::WavReader::open(path)?;
     let spec = reader.spec();
@@ -363,4 +388,27 @@ fn read_reference(path: &Path) -> Result<(Vec<f32>, i32)> {
         }
     };
     Ok((samples, spec.sample_rate as i32))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::c_api_library;
+    use std::path::Path;
+
+    #[test]
+    fn resolves_c_api_next_to_the_packaged_runtime() {
+        let path = c_api_library(Path::new("bundle/runtime/bin/sherpa-onnx-offline-tts"));
+        let expected = if cfg!(windows) {
+            "sherpa-onnx-c-api.dll"
+        } else if cfg!(target_os = "macos") {
+            "libsherpa-onnx-c-api.dylib"
+        } else {
+            "libsherpa-onnx-c-api.so"
+        };
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(expected)
+        );
+        assert_eq!(path.parent(), Some(Path::new("bundle/runtime/lib")));
+    }
 }
