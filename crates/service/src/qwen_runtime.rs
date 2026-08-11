@@ -53,7 +53,7 @@ impl QwenRuntimeManager {
         let uv = self.install_uv()?;
         let python_install_dir = self.root.join("python");
         let status = Command::new(&uv)
-            .args(["python", "install", PYTHON_VERSION])
+            .args(["python", "install", PYTHON_VERSION, "--no-bin"])
             .env("UV_PYTHON_INSTALL_DIR", &python_install_dir)
             .status()
             .context("failed to start the managed Python installer")?;

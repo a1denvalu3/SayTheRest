@@ -1,7 +1,9 @@
+use crate::qwen_runtime::QwenRuntimeManager;
 use anyhow::{Context, Result, bail};
 use bzip2::read::BzDecoder;
 use say_the_rest_core::{
-    EngineConfig, KittenConfig, KokoroConfig, PocketConfig, SherpaOnnxEngine, VitsConfig,
+    EngineConfig, KittenConfig, KokoroConfig, PocketConfig, Qwen3TtsConfig, Qwen3TtsMode,
+    SherpaOnnxEngine, VitsConfig,
 };
 use say_the_rest_protocol::{
     DownloadSnapshot, DownloadState, ModelBenchmark, ModelCapabilities, ModelDescriptor,
@@ -27,6 +29,7 @@ pub struct ModelManager {
     progress: Arc<Mutex<HashMap<String, DownloadSnapshot>>>,
     cancellations: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     community: Arc<Mutex<Vec<CommunityEntry>>>,
+    qwen_runtime: QwenRuntimeManager,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -79,6 +82,8 @@ struct CatalogEntry {
     speed_note: &'static str,
     capabilities: ModelCapabilitiesStatic,
     preset_voices: &'static [&'static str],
+    hf_repository: Option<&'static str>,
+    hf_revision: Option<&'static str>,
 }
 
 #[derive(Clone, Copy)]
@@ -107,6 +112,8 @@ const CATALOG: &[CatalogEntry] = &[
             streaming: false,
         },
         preset_voices: &["lessac"],
+        hf_repository: None,
+        hf_revision: None,
     },
     CatalogEntry {
         id: "kokoro-int8-multi-lang-v1-1",
@@ -126,6 +133,8 @@ const CATALOG: &[CatalogEntry] = &[
             streaming: false,
         },
         preset_voices: KOKORO_VOICES,
+        hf_repository: None,
+        hf_revision: None,
     },
     CatalogEntry {
         id: "pocket-tts-int8",
@@ -145,6 +154,8 @@ const CATALOG: &[CatalogEntry] = &[
             streaming: true,
         },
         preset_voices: &[],
+        hf_repository: None,
+        hf_revision: None,
     },
     CatalogEntry {
         id: "kitten-mini-en-v0-8",
@@ -164,6 +175,8 @@ const CATALOG: &[CatalogEntry] = &[
             streaming: true,
         },
         preset_voices: KITTEN_VOICES,
+        hf_repository: None,
+        hf_revision: None,
     },
     CatalogEntry {
         id: "kitten-nano-en-v0-8-int8",
@@ -183,12 +196,50 @@ const CATALOG: &[CatalogEntry] = &[
             streaming: true,
         },
         preset_voices: KITTEN_VOICES,
+        hf_repository: None,
+        hf_revision: None,
+    },
+    CatalogEntry {
+        id: "qwen3-tts-06b-base",
+        name: "Qwen3 TTS 0.6B Base",
+        archive_root: "",
+        url: "",
+        sha256: "5d83992436eae1d760afd27aff78a71d676296fc",
+        size: 2_516_106_051,
+        languages: &[
+            "auto", "zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it",
+        ],
+        license: "Apache-2.0",
+        license_url: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        quality_note: "Expressive multilingual zero-shot voice cloning and random voice sampling.",
+        speed_note: "Large generative model; installs a managed CPU inference runtime and should be benchmarked locally.",
+        capabilities: ModelCapabilitiesStatic {
+            preset_voices: false,
+            voice_cloning: true,
+            streaming: true,
+        },
+        preset_voices: &[],
+        hf_repository: Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base"),
+        hf_revision: Some("5d83992436eae1d760afd27aff78a71d676296fc"),
     },
 ];
 
 const KITTEN_VOICES: &[&str] = &[
     "bella", "jasper", "luna", "bruno", "rosie", "hugo", "kiki", "leo",
 ];
+
+fn packaged_qwen_manifest_dir() -> PathBuf {
+    let packaged = std::env::current_exe().ok().and_then(|path| {
+        path.parent()
+            .map(|parent| parent.join("runtime/generative"))
+    });
+    if let Some(path) = packaged
+        && path.join("qwen_worker.py").is_file()
+    {
+        return path;
+    }
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime")
+}
 
 const KOKORO_VOICES: &[&str] = &[
     "af_alloy",
@@ -271,12 +322,17 @@ impl ModelManager {
         } else {
             Vec::new()
         };
+        let qwen_runtime = QwenRuntimeManager::new(
+            root.parent().unwrap_or(&root).join("runtimes/qwen"),
+            packaged_qwen_manifest_dir(),
+        );
         let manager = Self {
             root,
             executable,
             progress: Default::default(),
             cancellations: Default::default(),
             community: Arc::new(Mutex::new(community)),
+            qwen_runtime,
         };
         manager.rebind_installed_runtime_paths()?;
         Ok(manager)
@@ -295,17 +351,27 @@ impl ModelManager {
             let Ok(mut config) = EngineConfig::from_path(&path) else {
                 continue;
             };
-            let executable = match &mut config {
-                EngineConfig::SherpaOnnxVits(config) => &mut config.executable,
-                EngineConfig::SherpaOnnxKokoro(config) => &mut config.executable,
-                EngineConfig::SherpaOnnxKitten(config) => &mut config.executable,
-                EngineConfig::SherpaOnnxPocket(config) => &mut config.executable,
-                EngineConfig::Qwen3Tts(_) => continue,
+            let changed = match &mut config {
+                EngineConfig::SherpaOnnxVits(config) => {
+                    replace_path(&mut config.executable, &self.executable)
+                }
+                EngineConfig::SherpaOnnxKokoro(config) => {
+                    replace_path(&mut config.executable, &self.executable)
+                }
+                EngineConfig::SherpaOnnxKitten(config) => {
+                    replace_path(&mut config.executable, &self.executable)
+                }
+                EngineConfig::SherpaOnnxPocket(config) => {
+                    replace_path(&mut config.executable, &self.executable)
+                }
+                EngineConfig::Qwen3Tts(config) => {
+                    replace_path(&mut config.python, &self.qwen_runtime.python())
+                        | replace_path(&mut config.worker, &self.qwen_runtime.worker())
+                }
             };
-            if executable == &self.executable {
+            if !changed {
                 continue;
             }
-            *executable = self.executable.clone();
             let temporary = path.with_extension("json.tmp");
             fs::write(&temporary, serde_json::to_vec_pretty(&config)?)?;
             fs::rename(temporary, path)?;
@@ -693,6 +759,7 @@ impl ModelManager {
         metadata_url
             .path_segments_mut()
             .map_err(|_| anyhow::anyhow!("invalid Hugging Face API URL"))?
+            .pop_if_empty()
             .extend([parts[0], parts[1], "revision", revision]);
         metadata_url.query_pairs_mut().append_pair("blobs", "true");
         let metadata: HuggingFaceMetadata = hf_request(&client, metadata_url, access_token)
@@ -721,6 +788,8 @@ impl ModelManager {
             access_token,
             None,
             base_url,
+            None,
+            None,
         )?;
         let source_config: EngineConfig = serde_json::from_slice(&config_bytes).context(
             "repository config.json is not a supported sherpa/Piper or PocketTTS config",
@@ -785,6 +854,8 @@ impl ModelManager {
                     access_token,
                     Some(&destination),
                     base_url,
+                    None,
+                    None,
                 )?;
             }
         }
@@ -835,7 +906,139 @@ impl ModelManager {
     }
 
     fn install(&self, entry: CatalogEntry, cancelled: &AtomicBool) -> Result<()> {
-        self.install_from(entry, entry.url, entry.sha256, cancelled)
+        if entry.hf_repository.is_some() {
+            self.install_hugging_face_catalog(entry, cancelled)
+        } else {
+            self.install_from(entry, entry.url, entry.sha256, cancelled)
+        }
+    }
+
+    fn install_hugging_face_catalog(
+        &self,
+        entry: CatalogEntry,
+        cancelled: &AtomicBool,
+    ) -> Result<()> {
+        let repository = entry
+            .hf_repository
+            .context("missing Hugging Face repository")?;
+        let revision = entry
+            .hf_revision
+            .context("missing immutable Hugging Face revision")?;
+        self.set_progress(entry.id, DownloadState::Installing, 0, entry.size, None);
+        if !self.qwen_runtime.is_installed() {
+            self.qwen_runtime.install()?;
+        }
+        if cancelled.load(Ordering::Relaxed) {
+            bail!("download cancelled");
+        }
+
+        let base_url = url::Url::parse("https://huggingface.co/")?;
+        let client = reqwest::blocking::Client::builder()
+            .user_agent("say-the-rest/0.1")
+            .build()?;
+        let mut metadata_url = base_url.join("api/models/")?;
+        metadata_url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("invalid Hugging Face API URL"))?
+            .pop_if_empty()
+            .extend(repository.split('/'))
+            .extend(["revision", revision]);
+        metadata_url.query_pairs_mut().append_pair("blobs", "true");
+        let metadata: HuggingFaceMetadata = client
+            .get(metadata_url)
+            .send()?
+            .error_for_status()?
+            .json()?;
+        anyhow::ensure!(
+            metadata.sha == revision,
+            "curated model revision changed: expected {revision}, received {}",
+            metadata.sha
+        );
+        let selected = metadata
+            .siblings
+            .iter()
+            .filter(|file| !matches!(file.rfilename.as_str(), ".gitattributes" | "README.md"))
+            .collect::<Vec<_>>();
+        let total = selected.iter().try_fold(0u64, |total, file| {
+            total
+                .checked_add(
+                    file.lfs
+                        .as_ref()
+                        .and_then(|lfs| lfs.size)
+                        .or(file.size)
+                        .unwrap_or(0),
+                )
+                .context("model size overflow")
+        })?;
+        anyhow::ensure!(total <= entry.size, "curated model exceeds its pinned size");
+
+        let staging = self.root.join(format!(".{}.installing", entry.id));
+        if staging.exists() {
+            fs::remove_dir_all(&staging)?;
+        }
+        fs::create_dir_all(&staging)?;
+        let result = (|| {
+            let mut downloaded = 0u64;
+            for file in selected {
+                let destination = staging.join(safe_repository_path(&file.rfilename)?);
+                if let Some(parent) = destination.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let mut progress = |count| {
+                    downloaded += count;
+                    self.set_progress(
+                        entry.id,
+                        DownloadState::Downloading,
+                        downloaded,
+                        total,
+                        None,
+                    );
+                };
+                download_hf_file(
+                    &client,
+                    repository,
+                    revision,
+                    file,
+                    None,
+                    Some(&destination),
+                    &base_url,
+                    Some(cancelled),
+                    Some(&mut progress),
+                )?;
+            }
+            self.set_progress(entry.id, DownloadState::Verifying, downloaded, total, None);
+            let destination = self.root.join(entry.id);
+            let config = EngineConfig::Qwen3Tts(Qwen3TtsConfig {
+                python: self.qwen_runtime.python(),
+                worker: self.qwen_runtime.worker(),
+                model: destination.clone(),
+                mode: Qwen3TtsMode::VoiceClone,
+                device: "cpu".into(),
+                dtype: "float32".into(),
+                language: "Auto".into(),
+                speaker: None,
+                voice_description: None,
+            });
+            fs::write(
+                staging.join("config.json"),
+                serde_json::to_vec_pretty(&config)?,
+            )?;
+            fs::write(
+                staging.join("catalog-install.json"),
+                serde_json::to_vec_pretty(&CatalogInstallManifest {
+                    id: entry.id.into(),
+                    sha256: revision.into(),
+                })?,
+            )?;
+            replace_model_directory(&staging, &destination)?;
+            EngineConfig::from_path(&destination.join("config.json"))?;
+            self.set_progress(entry.id, DownloadState::Installed, total, total, None);
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(staging);
+        }
+        result
     }
 
     fn install_from(
@@ -933,6 +1136,15 @@ impl ModelManager {
                 error,
             },
         );
+    }
+}
+
+fn replace_path(current: &mut PathBuf, expected: &Path) -> bool {
+    if current == expected {
+        false
+    } else {
+        *current = expected.to_owned();
+        true
     }
 }
 
@@ -1332,6 +1544,8 @@ fn download_hf_file(
     token: Option<&str>,
     destination: Option<&Path>,
     base_url: &url::Url,
+    cancelled: Option<&AtomicBool>,
+    mut on_chunk: Option<&mut dyn FnMut(u64)>,
 ) -> Result<Vec<u8>> {
     let mut url = base_url.clone();
     let mut segments = url
@@ -1353,11 +1567,17 @@ fn download_hf_file(
     let mut downloaded = 0u64;
     let mut buffer = [0u8; 128 * 1024];
     loop {
+        if cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Relaxed)) {
+            bail!("download cancelled");
+        }
         let count = response.read(&mut buffer)?;
         if count == 0 {
             break;
         }
         downloaded += count as u64;
+        if let Some(callback) = &mut on_chunk {
+            callback(count as u64);
+        }
         anyhow::ensure!(
             downloaded <= 20 * 1024 * 1024 * 1024,
             "download exceeds the 20 GB file limit"
@@ -1548,6 +1768,37 @@ mod tests {
             .unwrap();
         assert!(!piper.installed);
         assert!(!piper.selected);
+    }
+
+    #[test]
+    #[ignore = "downloads the pinned Qwen runtime and 0.6B Base weights, then performs CPU inference"]
+    fn qwen_base_installs_and_synthesizes_offline() {
+        let acceptance_root =
+            PathBuf::from(std::env::var_os("SAY_THE_REST_QWEN_ACCEPTANCE_ROOT").unwrap());
+        fs::create_dir_all(&acceptance_root).unwrap();
+        let manager = ModelManager::new(acceptance_root.join("models"), None).unwrap();
+        let entry = *CATALOG
+            .iter()
+            .find(|entry| entry.id == "qwen3-tts-06b-base")
+            .unwrap();
+        manager.install(entry, &AtomicBool::new(false)).unwrap();
+        let config = EngineConfig::from_path(&manager.config_path(entry.id)).unwrap();
+        let EngineConfig::Qwen3Tts(config) = config else {
+            panic!("Qwen install wrote the wrong engine config")
+        };
+        let reference =
+            PathBuf::from(std::env::var_os("SAY_THE_REST_QWEN_REFERENCE_AUDIO").unwrap());
+        let output = acceptance_root.join("qwen-acceptance.wav");
+        let mut engine = say_the_rest_core::ResidentQwenEngine::load(&config).unwrap();
+        engine
+            .synthesize(&say_the_rest_core::SynthesisRequest {
+                text: "Say the Rest now runs Qwen voice cloning locally and offline.",
+                output: &output,
+                reference_audio: Some(&reference),
+                speaking_pace: 1.0,
+            })
+            .unwrap();
+        assert!(say_the_rest_core::wav_duration_seconds(&output).unwrap() > 1.0);
     }
 
     #[test]
