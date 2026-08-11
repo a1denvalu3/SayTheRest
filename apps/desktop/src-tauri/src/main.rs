@@ -275,6 +275,8 @@ fn register_gnome_wayland_shortcuts(settings: &DesktopSettings) -> Result<(), St
 
     let selection_path = format!("{BASE}/sayit-selection/");
     let clipboard_path = format!("{BASE}/sayit-clipboard/");
+    let legacy_selection_path = format!("{BASE}/say-the-rest-selection/");
+    let legacy_clipboard_path = format!("{BASE}/say-the-rest-clipboard/");
     let current = run_gsettings(&["get", SCHEMA, KEY])?;
     let current = current.strip_prefix("@as ").unwrap_or(&current);
     let mut paths = current
@@ -283,6 +285,7 @@ fn register_gnome_wayland_shortcuts(settings: &DesktopSettings) -> Result<(), St
         .split(',')
         .map(|item| item.trim().trim_matches('\''))
         .filter(|item| !item.is_empty())
+        .filter(|item| item != &legacy_selection_path && item != &legacy_clipboard_path)
         .map(str::to_owned)
         .collect::<Vec<_>>();
     for path in [&selection_path, &clipboard_path] {

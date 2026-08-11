@@ -152,6 +152,17 @@ impl ServiceState {
         for voice in &mut inner.voices {
             if voice.model_id.is_empty() {
                 voice.model_id = migration_model.clone();
+                state_changed = true;
+            }
+            let reference = PathBuf::from(&voice.reference_audio_path);
+            if !reference.is_file()
+                && let Some(name) = reference.file_name()
+            {
+                let migrated = voices_dir.join(name);
+                if migrated.is_file() {
+                    voice.reference_audio_path = migrated.display().to_string();
+                    state_changed = true;
+                }
             }
         }
         if inner.settings.voice_profile_by_model.is_empty() {
