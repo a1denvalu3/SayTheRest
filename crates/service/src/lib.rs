@@ -1808,12 +1808,14 @@ async fn submit_job(
     State(state): State<ServiceState>,
     Json(submission): Json<SpeechSubmission>,
 ) -> Result<(StatusCode, Json<SpeechJob>), (StatusCode, String)> {
-    if state.resolve_engine_config().await.is_none() {
-        return Err((
-            StatusCode::CONFLICT,
-            "download and select a speech model before reading text aloud".into(),
-        ));
-    }
+    let config_path = state.resolve_engine_config().await.ok_or((
+        StatusCode::CONFLICT,
+        "download and select a speech model before reading text aloud".into(),
+    ))?;
+    let requires_voice_profile = matches!(
+        EngineConfig::from_path(&config_path).map_err(unprocessable)?,
+        EngineConfig::SherpaOnnxPocket(_)
+    );
     let cleaning = state.inner.read().await.settings.text_cleaning;
     let cleaned = clean_text(
         &submission.text,
@@ -1889,6 +1891,13 @@ async fn submit_job(
     let voice_profile_id = submission
         .voice_profile_id
         .or(inner.settings.active_voice_profile_id);
+    if requires_voice_profile && voice_profile_id.is_none() {
+        return Err((
+            StatusCode::CONFLICT,
+            "PocketTTS requires a cloned voice; open Voices and create or select a voice profile first"
+                .into(),
+        ));
+    }
     if let Some(voice_id) = voice_profile_id {
         let active_model = inner.settings.active_model_id.as_deref();
         let compatible = inner
@@ -2365,6 +2374,47 @@ mod tests {
         let error = create_voice(State(state), Json(request)).await.unwrap_err();
         assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(error.1.contains("permission"));
+    }
+
+    #[tokio::test]
+    async fn pocket_tts_rejects_jobs_until_a_voice_is_selected() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("pocket.json");
+        let asset = directory.path().join("unused");
+        fs::write(&asset, []).unwrap();
+        let config = EngineConfig::SherpaOnnxPocket(say_the_rest_core::PocketConfig {
+            executable: asset.clone(),
+            lm_flow: asset.clone(),
+            lm_main: asset.clone(),
+            encoder: asset.clone(),
+            decoder: asset.clone(),
+            text_conditioner: asset.clone(),
+            vocab_json: asset.clone(),
+            token_scores_json: asset,
+            provider: "cpu".into(),
+            num_threads: 1,
+            num_steps: 5,
+        });
+        fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let state = ServiceState::open(directory.path().join("data"), Some(config_path)).unwrap();
+
+        let error = submit_job(
+            State(state.clone()),
+            Json(SpeechSubmission {
+                text: "This must not enter the queue.".into(),
+                voice_profile_id: None,
+                source: SpeechSource::Desktop,
+                queue_policy: QueuePolicy::Append,
+                confirmed_long_text: false,
+                speaking_pace: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert!(error.1.contains("requires a cloned voice"));
+        assert!(state.inner.read().await.jobs.is_empty());
     }
 
     #[tokio::test]
