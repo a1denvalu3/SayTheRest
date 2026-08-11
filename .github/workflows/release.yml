@@ -51,33 +51,33 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          test -x dist/SayTheRest-0.1.0-x86_64.AppImage
-          test -f dist/say-the-rest_0.1.0_amd64.deb
-          test -f dist/say-the-rest-x86_64-unknown-linux-gnu.tar.gz
-          tar -tzf dist/say-the-rest-x86_64-unknown-linux-gnu.tar.gz > "$RUNNER_TEMP/portable-files.txt"
-          grep -q '/say-the-rest-desktop$' "$RUNNER_TEMP/portable-files.txt"
+          test -x dist/sayIt-0.1.0-x86_64.AppImage
+          test -f dist/sayit_0.1.0_amd64.deb
+          test -f dist/sayit-x86_64-unknown-linux-gnu.tar.gz
+          tar -tzf dist/sayit-x86_64-unknown-linux-gnu.tar.gz > "$RUNNER_TEMP/portable-files.txt"
+          grep -q '/sayit-desktop$' "$RUNNER_TEMP/portable-files.txt"
           grep -q '/runtime/bin/sherpa-onnx-offline-tts$' "$RUNNER_TEMP/portable-files.txt"
           grep -q '/runtime/generative/qwen_worker.py$' "$RUNNER_TEMP/portable-files.txt"
-          dpkg-deb --contents dist/say-the-rest_0.1.0_amd64.deb > "$RUNNER_TEMP/deb-files.txt"
-          grep -q '/opt/say-the-rest/say-the-rest-service$' "$RUNNER_TEMP/deb-files.txt"
-          grep -q '/usr/lib/systemd/user/say-the-rest-desktop.service$' "$RUNNER_TEMP/deb-files.txt"
+          dpkg-deb --contents dist/sayit_0.1.0_amd64.deb > "$RUNNER_TEMP/deb-files.txt"
+          grep -q '/opt/sayit/sayit-service$' "$RUNNER_TEMP/deb-files.txt"
+          grep -q '/usr/lib/systemd/user/sayit-desktop.service$' "$RUNNER_TEMP/deb-files.txt"
       - name: Audit Windows packages
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $zip = 'dist/say-the-rest-x86_64-pc-windows-msvc.zip'
-          $installer = 'dist/SayTheRest-Setup-x64.exe'
+          $zip = 'dist/sayit-x86_64-pc-windows-msvc.zip'
+          $installer = 'dist/sayIt-Setup-x64.exe'
           if (!(Test-Path $zip -PathType Leaf)) { throw "Missing portable ZIP: $zip" }
           if (!(Test-Path $installer -PathType Leaf)) { throw "Missing installer: $installer" }
-          $audit = Join-Path $env:RUNNER_TEMP 'say-the-rest-package-audit'
+          $audit = Join-Path $env:RUNNER_TEMP 'sayit-package-audit'
           Expand-Archive -LiteralPath $zip -DestinationPath $audit
-          $root = Join-Path $audit 'say-the-rest-x86_64-pc-windows-msvc'
+          $root = Join-Path $audit 'sayit-x86_64-pc-windows-msvc'
           @(
-            'say-the-rest.exe',
-            'say-the-rest-service.exe',
-            'say-the-rest-desktop.exe',
+            'sayit.exe',
+            'sayit-service.exe',
+            'sayit-desktop.exe',
             'setup.ps1',
-            'runtime/bin/sherpa-onnx-offline-tts.exe'
+            'runtime/bin/sherpa-onnx-offline-tts.exe',
             'runtime/generative/qwen_worker.py'
           ) | ForEach-Object {
             $path = Join-Path $root $_
@@ -85,12 +85,12 @@ jobs:
           }
       - uses: actions/upload-artifact@v4
         with:
-          name: say-the-rest-${{ matrix.target }}
+          name: sayit-${{ matrix.target }}
           path: |
-            dist/say-the-rest-${{ matrix.target }}.*
-            dist/SayTheRest-Setup-x64.exe
-            dist/say-the-rest_*_amd64.deb
-            dist/SayTheRest-*-x86_64.AppImage
+            dist/sayit-${{ matrix.target }}.*
+            dist/sayIt-Setup-x64.exe
+            dist/sayit_*_amd64.deb
+            dist/sayIt-*-x86_64.AppImage
 
   publish:
     if: startsWith(github.ref, 'refs/tags/')
