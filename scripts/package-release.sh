@@ -5,7 +5,7 @@ TARGET=${1:?usage: package-release.sh <rust-target> <sherpa-asset>}
 SHERPA_ASSET=${2:?usage: package-release.sh <rust-target> <sherpa-asset>}
 SHERPA_VERSION=1.13.4
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-PACKAGE_NAME="say-the-rest-${TARGET}"
+PACKAGE_NAME="sayit-${TARGET}"
 STAGE="$ROOT_DIR/dist/$PACKAGE_NAME"
 ARCHIVE="$ROOT_DIR/dist/$SHERPA_ASSET"
 
@@ -37,8 +37,8 @@ mkdir -p "$STAGE/runtime" "$STAGE/icons" "$ROOT_DIR/dist"
 cargo build --release --locked --target "$TARGET" --manifest-path "$ROOT_DIR/Cargo.toml"
 
 case "$TARGET" in
-  *windows*) APP_BINARY=say-the-rest.exe; SERVICE_BINARY=say-the-rest-service.exe; DESKTOP_BINARY=say-the-rest-desktop.exe ;;
-  *) APP_BINARY=say-the-rest; SERVICE_BINARY=say-the-rest-service; DESKTOP_BINARY=say-the-rest-desktop ;;
+  *windows*) APP_BINARY=sayit.exe; SERVICE_BINARY=sayit-service.exe; DESKTOP_BINARY=sayit-desktop.exe ;;
+  *) APP_BINARY=sayit; SERVICE_BINARY=sayit-service; DESKTOP_BINARY=sayit-desktop ;;
 esac
 cp "$ROOT_DIR/target/$TARGET/release/$APP_BINARY" "$STAGE/"
 cp "$ROOT_DIR/target/$TARGET/release/$SERVICE_BINARY" "$STAGE/"
@@ -67,7 +67,7 @@ if [[ "$TARGET" == *windows* ]]; then
     '$compiler = (Get-Command ISCC.exe -ErrorAction Stop).Source; & $compiler "/DStage=$env:STR_STAGE" "/DOutputDir=$env:STR_OUTPUT" $env:STR_ISS; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
 else
   cp "$ROOT_DIR/packaging/setup.sh" "$STAGE/"
-  chmod +x "$STAGE/setup.sh" "$STAGE/say-the-rest" "$STAGE/say-the-rest-service" "$STAGE/say-the-rest-desktop"
+  chmod +x "$STAGE/setup.sh" "$STAGE/sayit" "$STAGE/sayit-service" "$STAGE/sayit-desktop"
   tar -czf "$ROOT_DIR/dist/$PACKAGE_NAME.tar.gz" -C "$ROOT_DIR/dist" "$PACKAGE_NAME"
 
   VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT_DIR/Cargo.toml" | head -n 1)
@@ -75,58 +75,61 @@ else
   rm -rf "$DEB_ROOT"
   mkdir -p \
     "$DEB_ROOT/DEBIAN" \
-    "$DEB_ROOT/opt/say-the-rest" \
+    "$DEB_ROOT/opt/sayit" \
     "$DEB_ROOT/usr/bin" \
     "$DEB_ROOT/usr/lib/systemd/user" \
     "$DEB_ROOT/usr/share/applications" \
     "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps"
-  cp -a "$STAGE/runtime" "$DEB_ROOT/opt/say-the-rest/"
-  cp "$STAGE/say-the-rest" "$STAGE/say-the-rest-service" "$STAGE/say-the-rest-desktop" \
-    "$STAGE/LICENSE" "$STAGE/README.md" "$DEB_ROOT/opt/say-the-rest/"
-  cp "$ROOT_DIR/packaging/linux/say-the-rest.service" \
-    "$ROOT_DIR/packaging/linux/say-the-rest-desktop.service" \
+  cp -a "$STAGE/runtime" "$DEB_ROOT/opt/sayit/"
+  cp "$STAGE/sayit" "$STAGE/sayit-service" "$STAGE/sayit-desktop" \
+    "$STAGE/LICENSE" "$STAGE/README.md" "$DEB_ROOT/opt/sayit/"
+  cp "$ROOT_DIR/packaging/linux/sayit.service" \
+    "$ROOT_DIR/packaging/linux/sayit-desktop.service" \
     "$DEB_ROOT/usr/lib/systemd/user/"
-  cp "$ROOT_DIR/packaging/linux/say-the-rest-launcher" "$DEB_ROOT/usr/bin/say-the-rest-desktop"
-  cp "$ROOT_DIR/packaging/linux/say-the-rest.desktop" "$DEB_ROOT/usr/share/applications/"
+  cp "$ROOT_DIR/packaging/linux/sayit-launcher" "$DEB_ROOT/usr/bin/sayit-desktop"
+  cp "$ROOT_DIR/packaging/linux/sayit.desktop" "$DEB_ROOT/usr/share/applications/"
   cp "$ROOT_DIR/apps/desktop/src-tauri/icons/icon.png" \
-    "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps/say-the-rest.png"
-  ln -s /opt/say-the-rest/say-the-rest "$DEB_ROOT/usr/bin/say-the-rest"
-  chmod 755 "$DEB_ROOT/opt/say-the-rest/say-the-rest" \
-    "$DEB_ROOT/opt/say-the-rest/say-the-rest-service" \
-    "$DEB_ROOT/opt/say-the-rest/say-the-rest-desktop" \
-    "$DEB_ROOT/usr/bin/say-the-rest-desktop"
-  chmod 644 "$DEB_ROOT/opt/say-the-rest/LICENSE" "$DEB_ROOT/opt/say-the-rest/README.md" \
-    "$DEB_ROOT/usr/lib/systemd/user/say-the-rest.service" \
-    "$DEB_ROOT/usr/lib/systemd/user/say-the-rest-desktop.service" \
-    "$DEB_ROOT/usr/share/applications/say-the-rest.desktop" \
-    "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps/say-the-rest.png"
+    "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps/sayit.png"
+  ln -s /opt/sayit/sayit "$DEB_ROOT/usr/bin/sayit"
+  chmod 755 "$DEB_ROOT/opt/sayit/sayit" \
+    "$DEB_ROOT/opt/sayit/sayit-service" \
+    "$DEB_ROOT/opt/sayit/sayit-desktop" \
+    "$DEB_ROOT/usr/bin/sayit-desktop"
+  chmod 644 "$DEB_ROOT/opt/sayit/LICENSE" "$DEB_ROOT/opt/sayit/README.md" \
+    "$DEB_ROOT/usr/lib/systemd/user/sayit.service" \
+    "$DEB_ROOT/usr/lib/systemd/user/sayit-desktop.service" \
+    "$DEB_ROOT/usr/share/applications/sayit.desktop" \
+    "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps/sayit.png"
   cat > "$DEB_ROOT/DEBIAN/control" <<EOF
-Package: say-the-rest
+Package: sayit
 Version: $VERSION
 Section: sound
 Priority: optional
 Architecture: amd64
 Maintainer: a1denvalu3
+Provides: say-the-rest
+Conflicts: say-the-rest
+Replaces: say-the-rest
 Depends: libgtk-3-0t64 | libgtk-3-0, libwebkit2gtk-4.1-0, libayatana-appindicator3-1, libxdo3
 Description: Private local text-to-speech for Linux
  Read selected text aloud with offline models and local voice cloning.
 EOF
   dpkg-deb --root-owner-group --build "$DEB_ROOT" \
-    "$ROOT_DIR/dist/say-the-rest_${VERSION}_amd64.deb"
+    "$ROOT_DIR/dist/sayit_${VERSION}_amd64.deb"
 
-  APPDIR="$ROOT_DIR/dist/SayTheRest.AppDir"
+  APPDIR="$ROOT_DIR/dist/sayIt.AppDir"
   rm -rf "$APPDIR"
-  mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/256x256/apps" "$APPDIR/usr/share/metainfo" "$APPDIR/usr/share/say-the-rest"
+  mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/256x256/apps" "$APPDIR/usr/share/metainfo" "$APPDIR/usr/share/sayit"
   cp -a "$STAGE/runtime" "$APPDIR/usr/bin/"
-  cp "$STAGE/say-the-rest" "$STAGE/say-the-rest-service" "$STAGE/say-the-rest-desktop" "$APPDIR/usr/bin/"
+  cp "$STAGE/sayit" "$STAGE/sayit-service" "$STAGE/sayit-desktop" "$APPDIR/usr/bin/"
   cp "$ROOT_DIR/packaging/linux-appimage/AppRun" "$APPDIR/AppRun"
-  cp "$ROOT_DIR/packaging/linux/say-the-rest.desktop" "$APPDIR/usr/share/applications/say-the-rest.desktop"
-  cp "$ROOT_DIR/apps/desktop/src-tauri/icons/icon.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/say-the-rest.png"
-  cp "$ROOT_DIR/packaging/linux/say-the-rest.metainfo.xml" \
-    "$APPDIR/usr/share/metainfo/sh.saytherest.desktop.metainfo.xml"
-  cp "$ROOT_DIR/packaging/linux-appimage/say-the-rest-appimage.service" "$APPDIR/usr/share/say-the-rest/"
-  cp "$ROOT_DIR/packaging/linux-appimage/say-the-rest-appimage-desktop.service" "$APPDIR/usr/share/say-the-rest/"
-  chmod 755 "$APPDIR/AppRun" "$APPDIR/usr/bin/"say-the-rest*
+  cp "$ROOT_DIR/packaging/linux/sayit.desktop" "$APPDIR/usr/share/applications/sayit.desktop"
+  cp "$ROOT_DIR/apps/desktop/src-tauri/icons/icon.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/sayit.png"
+  cp "$ROOT_DIR/packaging/linux/sayit.metainfo.xml" \
+    "$APPDIR/usr/share/metainfo/sh.sayit.desktop.metainfo.xml"
+  cp "$ROOT_DIR/packaging/linux-appimage/sayit-appimage.service" "$APPDIR/usr/share/sayit/"
+  cp "$ROOT_DIR/packaging/linux-appimage/sayit-appimage-desktop.service" "$APPDIR/usr/share/sayit/"
+  chmod 755 "$APPDIR/AppRun" "$APPDIR/usr/bin/"sayit*
   LINUXDEPLOY="$ROOT_DIR/dist/linuxdeploy-x86_64.AppImage"
   LINUXDEPLOY_SHA256=421ca71d5c69ea97c6309276232990d43df1dcece0edfaa26bbf926ff96ed12e
   curl --fail --location --retry 3 \
@@ -141,15 +144,15 @@ EOF
     --output "$APPIMAGETOOL"
   verify_sha256 "$APPIMAGETOOL_SHA256" "$APPIMAGETOOL"
   chmod +x "$APPIMAGETOOL"
-  APPIMAGE_OUTPUT="$ROOT_DIR/dist/SayTheRest-${VERSION}-x86_64.AppImage"
-  APPIMAGE_TEMP="$ROOT_DIR/dist/SayTheRest-${VERSION}-x86_64.new.AppImage"
+  APPIMAGE_OUTPUT="$ROOT_DIR/dist/sayIt-${VERSION}-x86_64.AppImage"
+  APPIMAGE_TEMP="$ROOT_DIR/dist/sayIt-${VERSION}-x86_64.new.AppImage"
   rm -f "$APPIMAGE_TEMP"
   APPIMAGE_EXTRACT_AND_RUN=1 \
     "$LINUXDEPLOY" --appdir "$APPDIR" \
-      --executable "$APPDIR/usr/bin/say-the-rest-desktop" \
-      --executable "$APPDIR/usr/bin/say-the-rest-service" \
-      --desktop-file "$APPDIR/usr/share/applications/say-the-rest.desktop" \
-      --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/say-the-rest.png"
+      --executable "$APPDIR/usr/bin/sayit-desktop" \
+      --executable "$APPDIR/usr/bin/sayit-service" \
+      --desktop-file "$APPDIR/usr/share/applications/sayit.desktop" \
+      --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/sayit.png"
   APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 \
     "$APPIMAGETOOL" "$APPDIR" "$APPIMAGE_TEMP"
   mv -f "$APPIMAGE_TEMP" "$APPIMAGE_OUTPUT"

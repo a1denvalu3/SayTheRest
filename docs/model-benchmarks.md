@@ -8,7 +8,7 @@ universal performance claim.
 
 - Hardware: Intel Core i7-1365U, 10 cores / 12 logical CPUs
 - Runtime: sherpa-onnx 1.13.4, CPU provider, four inference threads
-- Workload: “Say the Rest keeps your words private and reads them aloud locally.”
+- Workload: “sayIt keeps your words private and reads them aloud locally.”
 - Method: five process-cold iterations, including model initialization and output writing
 - Audio: 24 kHz, mono, 16-bit PCM
 
@@ -42,7 +42,7 @@ the packaged runtime directory; an actual Windows-device acceptance run is still
 
 Kitten Mini 0.8 and Kitten Nano 0.8 INT8 were run with the same sherpa-onnx 1.13.4 CPU runtime,
 four inference threads, and Jasper (speaker 1). Each row contains ten process-cold iterations of
-“Say the Rest measures local inference before recommending a model.”, including initialization
+“sayIt measures local inference before recommending a model.”, including initialization
 and WAV writing. Peak RSS is the observed high-water mark from a separate process-cold synthesis
 of comparable text.
 

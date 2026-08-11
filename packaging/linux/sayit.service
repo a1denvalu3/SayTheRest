@@ -1,0 +1,14 @@
+[Unit]
+Description=sayIt private local speech service
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/opt/sayit/sayit-service
+WorkingDirectory=/opt/sayit
+Environment=LD_LIBRARY_PATH=/opt/sayit/runtime/lib
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

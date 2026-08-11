@@ -1,6 +1,6 @@
 # Network policy
 
-Say the Rest performs inference and playback locally. It has no analytics, telemetry,
+sayIt performs inference and playback locally. It has no analytics, telemetry,
 crash-reporting, advertising, account, or cloud-inference integration. Installation itself
 does not contact the network.
 

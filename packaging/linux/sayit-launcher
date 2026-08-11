@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+if command -v systemctl >/dev/null 2>&1; then
+  SETTINGS_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/sayit/desktop-settings.json"
+  systemctl --user disable --now say-the-rest.service say-the-rest-desktop.service >/dev/null 2>&1 || true
+  if [ -f "$SETTINGS_FILE" ] && grep -q '"launch_at_login"[[:space:]]*:[[:space:]]*false' "$SETTINGS_FILE"; then
+    systemctl --user start sayit.service >/dev/null 2>&1 || true
+    export LD_LIBRARY_PATH="/opt/sayit/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    exec /opt/sayit/sayit-desktop "$@"
+  else
+    systemctl --user enable sayit.service sayit-desktop.service >/dev/null 2>&1 || true
+    systemctl --user stop sayit-desktop.service >/dev/null 2>&1 || true
+    pkill -TERM -u "$(id -u)" -f '/opt/sayit/sayit-desktop' >/dev/null 2>&1 || true
+    systemctl --user restart sayit.service sayit-desktop.service >/dev/null 2>&1 || true
+    exit 0
+  fi
+else
+  pgrep -u "$(id -u)" -f '/opt/sayit/sayit-service' >/dev/null 2>&1 || \
+    LD_LIBRARY_PATH=/opt/sayit/runtime/lib /opt/sayit/sayit-service >/dev/null 2>&1 &
+fi
+export LD_LIBRARY_PATH="/opt/sayit/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec /opt/sayit/sayit-desktop "$@"

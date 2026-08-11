@@ -1,10 +1,8 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::blocking::Client;
-use say_the_rest_core::{
-    BenchmarkRunner, EngineConfig, SherpaOnnxEngine, SynthesisRequest, TtsEngine,
-};
-use say_the_rest_protocol::{QueuePolicy, SpeechSource, SpeechSubmission};
+use sayit_core::{BenchmarkRunner, EngineConfig, SherpaOnnxEngine, SynthesisRequest, TtsEngine};
+use sayit_protocol::{QueuePolicy, SpeechSource, SpeechSubmission};
 use std::{
     io::{self, Read},
     path::PathBuf,
@@ -82,7 +80,7 @@ enum Command {
     /// Generate a WAV directly, bypassing the service (diagnostics).
     Synth {
         text: String,
-        #[arg(short, long, default_value = "say-the-rest.wav")]
+        #[arg(short, long, default_value = "sayit.wav")]
         output: PathBuf,
         #[arg(short, long)]
         config: Option<PathBuf>,
@@ -236,7 +234,7 @@ fn main() -> Result<()> {
                     speaking_pace: pace,
                 })
                 .send()
-                .context("cannot connect to Say the Rest service")?;
+                .context("cannot connect to sayIt service")?;
             print_response(response)?;
         }
         Command::Status => get_and_print(base, "state")?,
@@ -493,14 +491,14 @@ fn read_stdin() -> Result<String> {
 fn get_and_print(base: &str, resource: &str) -> Result<()> {
     let response = authorized(Client::new().get(format!("{base}/{resource}")))?
         .send()
-        .context("cannot connect to Say the Rest service")?;
+        .context("cannot connect to sayIt service")?;
     print_response(response)
 }
 
 fn get_json(base: &str, resource: &str) -> Result<serde_json::Value> {
     let response = authorized(Client::new().get(format!("{base}/{resource}")))?
         .send()
-        .context("cannot connect to Say the Rest service")?;
+        .context("cannot connect to sayIt service")?;
     let status = response.status();
     let body = response.text()?;
     if !status.is_success() {
@@ -516,7 +514,7 @@ fn post_and_print(base: &str, resource: &str, body: Option<serde_json::Value>) -
         None => request,
     }
     .send()
-    .context("cannot connect to Say the Rest service")?;
+    .context("cannot connect to sayIt service")?;
     let status = response.status();
     let text = response.text()?;
     if !status.is_success() {
@@ -531,7 +529,7 @@ fn post_and_print(base: &str, resource: &str, body: Option<serde_json::Value>) -
 fn delete_and_print(base: &str, resource: &str) -> Result<()> {
     let response = authorized(Client::new().delete(format!("{base}/{resource}")))?
         .send()
-        .context("cannot connect to Say the Rest service")?;
+        .context("cannot connect to sayIt service")?;
     let status = response.status();
     let text = response.text()?;
     if !status.is_success() {
@@ -557,10 +555,16 @@ fn print_response(response: reqwest::blocking::Response) -> Result<()> {
 fn load_engine(path: Option<PathBuf>) -> Result<SherpaOnnxEngine> {
     let path = match path {
         Some(path) => path,
+        None if PathBuf::from("sayit.json").is_file() => PathBuf::from("sayit.json"),
         None if PathBuf::from("say-the-rest.json").is_file() => PathBuf::from("say-the-rest.json"),
         None => std::env::current_exe()?
             .parent()
-            .map(|parent| parent.join("say-the-rest.json"))
+            .and_then(|parent| {
+                ["sayit.json", "say-the-rest.json"]
+                    .into_iter()
+                    .map(|name| parent.join(name))
+                    .find(|candidate| candidate.is_file())
+            })
             .ok_or_else(|| anyhow::anyhow!("cannot determine application directory"))?,
     };
     Ok(SherpaOnnxEngine::from_config(EngineConfig::from_path(
@@ -578,14 +582,14 @@ fn authorized(
 }
 
 fn load_api_token() -> Result<String> {
-    if let Ok(token) = std::env::var("SAY_THE_REST_TOKEN") {
+    if let Ok(token) = std::env::var("SAYIT_TOKEN").or_else(|_| std::env::var("SAY_THE_REST_TOKEN"))
+    {
         return Ok(token);
     }
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir)
-            .join("SayTheRest")
     } else {
         std::env::var_os("XDG_STATE_HOME")
             .map(PathBuf::from)
@@ -595,9 +599,19 @@ fn load_api_token() -> Result<String> {
                     .unwrap_or_else(std::env::temp_dir)
                     .join(".local/state")
             })
-            .join("say-the-rest")
     };
-    std::fs::read_to_string(base.join("api-token"))
+    let current = base.join("sayit");
+    let legacy = base.join(if cfg!(windows) {
+        "SayTheRest"
+    } else {
+        "say-the-rest"
+    });
+    let data_dir = if current.exists() || !legacy.exists() {
+        current
+    } else {
+        legacy
+    };
+    std::fs::read_to_string(data_dir.join("api-token"))
         .map(|token| token.trim().to_owned())
         .context("cannot read the local service token; start the service first or pass --token")
 }
@@ -609,26 +623,21 @@ mod tests {
     #[test]
     fn cli_parses_every_parity_command_family() {
         let cases: &[&[&str]] = &[
-            &["say-the-rest", "speak", "hello"],
-            &["say-the-rest", "status"],
-            &["say-the-rest", "jobs"],
-            &["say-the-rest", "models"],
-            &[
-                "say-the-rest",
-                "models",
-                "install",
-                "piper-en-us-lessac-medium",
-            ],
-            &["say-the-rest", "voices"],
-            &["say-the-rest", "history"],
-            &["say-the-rest", "pause"],
-            &["say-the-rest", "resume"],
-            &["say-the-rest", "stop"],
-            &["say-the-rest", "clear"],
-            &["say-the-rest", "seek", "12.5"],
-            &["say-the-rest", "skip", "-15"],
-            &["say-the-rest", "rate", "1.25"],
-            &["say-the-rest", "volume", "0.8"],
+            &["sayit", "speak", "hello"],
+            &["sayit", "status"],
+            &["sayit", "jobs"],
+            &["sayit", "models"],
+            &["sayit", "models", "install", "piper-en-us-lessac-medium"],
+            &["sayit", "voices"],
+            &["sayit", "history"],
+            &["sayit", "pause"],
+            &["sayit", "resume"],
+            &["sayit", "stop"],
+            &["sayit", "clear"],
+            &["sayit", "seek", "12.5"],
+            &["sayit", "skip", "-15"],
+            &["sayit", "rate", "1.25"],
+            &["sayit", "volume", "0.8"],
         ];
         for arguments in cases {
             Cli::try_parse_from(*arguments)
@@ -638,7 +647,7 @@ mod tests {
 
     #[test]
     fn bare_text_is_normalized_to_the_default_speak_command() {
-        let arguments = vec!["say-the-rest".into(), "Read this".into()];
+        let arguments = vec!["sayit".into(), "Read this".into()];
         let cli = Cli::try_parse_from(normalize_args(arguments)).unwrap();
         assert!(matches!(cli.command, Command::Speak { .. }));
     }

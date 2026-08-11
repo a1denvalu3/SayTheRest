@@ -441,17 +441,12 @@ mod tests {
             .set(vec![
                 ClipboardContent::Text("original plain text".into()),
                 ClipboardContent::Html("<b>original rich text</b>".into()),
-                ClipboardContent::Other(
-                    "application/x-say-the-rest-test".into(),
-                    vec![0, 1, 2, 255],
-                ),
+                ClipboardContent::Other("application/x-sayit-test".into(), vec![0, 1, 2, 255]),
             ])
             .unwrap();
         let expected_text = clipboard.get_text().unwrap();
         let expected_html = clipboard.get_html().unwrap();
-        let expected_custom = clipboard
-            .get_buffer("application/x-say-the-rest-test")
-            .unwrap();
+        let expected_custom = clipboard.get_buffer("application/x-sayit-test").unwrap();
         let selected = capture_selection_via_copy(|| {
             ClipboardContext::new()
                 .map_err(|error| error.to_string())?
@@ -464,9 +459,7 @@ mod tests {
         assert_eq!(restored.get_text().unwrap(), expected_text);
         assert_eq!(restored.get_html().unwrap(), expected_html);
         assert_eq!(
-            restored
-                .get_buffer("application/x-say-the-rest-test")
-                .unwrap(),
+            restored.get_buffer("application/x-sayit-test").unwrap(),
             expected_custom
         );
     }

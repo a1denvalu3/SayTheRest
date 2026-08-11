@@ -1,0 +1,15 @@
+[Unit]
+Description=sayIt shortcuts and tray
+After=graphical-session.target sayit.service
+Wants=sayit.service
+
+[Service]
+Type=simple
+ExecStart=/opt/sayit/sayit-desktop
+WorkingDirectory=/opt/sayit
+Environment=LD_LIBRARY_PATH=/opt/sayit/runtime/lib
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

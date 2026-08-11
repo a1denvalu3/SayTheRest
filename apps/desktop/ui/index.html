@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Say the Rest</title>
+  <title>sayIt</title>
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="player.css">
   <link rel="stylesheet" href="history.css">
@@ -12,7 +12,7 @@
 <body>
   <div class="grain" aria-hidden="true"></div>
   <aside>
-    <div class="brand"><span class="brand-mark">◖</span><span>Say the Rest</span></div>
+    <div class="brand"><span class="brand-mark">◖</span><span>sayIt</span></div>
     <nav aria-label="Application sections">
       <button class="nav-item active" data-view="player"><span>01</span>Now speaking</button>
       <button class="nav-item" data-view="models"><span>02</span>Models</button>
@@ -31,6 +31,10 @@
         <div class="quote-mark">“</div>
         <h2 id="now-title" class="now-title" hidden></h2>
         <p id="spoken-text" class="spoken-text">Select text anywhere, then use your shortcut. Your words will appear here as they’re spoken.</p>
+        <div id="generation-indicator" class="generation-indicator" role="status" aria-live="polite" hidden>
+          <span class="generation-wave" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+          <span><strong>Building the waveform</strong><small id="generation-detail">Generating speech locally</small></span>
+        </div>
         <label class="timeline" for="timeline"><span class="visually-hidden">Playback position</span><input id="timeline" type="range" min="0" max="0" value="0" step="0.1" aria-label="Playback position"></label>
         <div class="time-row"><span id="position">0:00</span><span id="duration">0:00</span></div>
         <p id="playback-status" class="playback-status" role="status">Ready for selected text</p>
@@ -63,7 +67,7 @@
           </form>
           <article class="studio-card update-card">
             <div class="card-heading"><span>03</span><div><h3>Application updates</h3><p>Checked only when you ask.</p></div></div>
-            <p>Say the Rest contacts the official GitHub releases page and never installs silently.</p>
+            <p>sayIt contacts the official GitHub releases page and never installs silently.</p>
             <div class="card-actions"><button id="check-updates" type="button" class="action secondary">Check for updates</button><button id="download-update" type="button" class="action" hidden>Open download</button></div>
             <p id="update-status" class="status-note" role="status">No update check has been made.</p>
           </article>

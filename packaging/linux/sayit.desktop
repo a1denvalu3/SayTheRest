@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Say the Rest
+Name=sayIt
 Comment=Private local text-to-speech from any application
-Exec=say-the-rest-desktop
-Icon=say-the-rest
+Exec=sayit-desktop
+Icon=sayit
 Terminal=false
 Categories=AudioVideo;Audio;
 StartupNotify=false

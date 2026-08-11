@@ -79,7 +79,7 @@ impl PlaybackController {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let thread_shared = shared.clone();
         thread::Builder::new()
-            .name("say-the-rest-audio".into())
+            .name("sayit-audio".into())
             .spawn(move || player_thread(rx, thread_shared))
             .expect("audio thread");
         Self { tx, shared }

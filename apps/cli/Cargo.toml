@@ -1,5 +1,5 @@
 [package]
-name = "say-the-rest"
+name = "sayit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,6 @@ anyhow.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
-say-the-rest-core = { path = "../../crates/core" }
-say-the-rest-protocol = { path = "../../crates/protocol" }
+sayit-core = { path = "../../crates/core" }
+sayit-protocol = { path = "../../crates/protocol" }
 uuid.workspace = true

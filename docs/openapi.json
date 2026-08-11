@@ -1,7 +1,7 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Say the Rest local service",
+    "title": "sayIt local service",
     "version": "1.0.0",
     "description": "Version 1 of the private localhost speech API. Health is public; every other operation requires a per-user bearer token."
   },

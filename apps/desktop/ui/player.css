@@ -92,6 +92,95 @@
   text-transform: uppercase;
 }
 
+.player-card::after {
+  content: "";
+  position: absolute;
+  inset: -1px -1px auto;
+  height: 3px;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform .25s ease;
+}
+
+.player-card.is-generating::after {
+  transform: scaleX(1);
+  animation: generation-scan 1.8s ease-in-out infinite;
+}
+
+.generation-indicator {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: fit-content;
+  margin: -36px 0 26px;
+  padding: 9px 12px 9px 10px;
+  border: 1px solid #e5a28f;
+  background: rgba(238, 83, 47, .055);
+  color: var(--ink);
+}
+
+.generation-indicator[hidden] {
+  display: none;
+}
+
+.generation-indicator > span:last-child {
+  display: grid;
+  gap: 2px;
+}
+
+.generation-indicator strong {
+  font: 500 9px/1.2 var(--mono);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.generation-indicator small {
+  color: var(--muted);
+  font: 11px/1.3 var(--serif);
+}
+
+.generation-wave {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--ink);
+}
+
+.generation-wave i {
+  width: 2px;
+  height: 5px;
+  background: var(--paper);
+  animation: generation-wave .72s ease-in-out infinite alternate;
+}
+
+.generation-wave i:nth-child(2) { height: 11px; animation-delay: -.48s; }
+.generation-wave i:nth-child(3) { height: 8px; animation-delay: -.24s; }
+.generation-wave i:nth-child(4) { animation-delay: -.6s; }
+
+@keyframes generation-wave {
+  to { height: 14px; background: var(--accent); }
+}
+
+@keyframes generation-scan {
+  0%, 100% { opacity: .42; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .player-card.is-generating::after,
+  .generation-wave i {
+    animation: none;
+  }
+
+  .generation-wave i:nth-child(2) { height: 12px; }
+  .generation-wave i:nth-child(3) { height: 9px; }
+}
+
 .transport button:disabled {
   cursor: default;
   opacity: .28;

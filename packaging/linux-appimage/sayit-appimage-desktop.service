@@ -1,7 +1,7 @@
 [Unit]
-Description=Say the Rest shortcuts and tray
-After=graphical-session.target say-the-rest.service
-Wants=say-the-rest.service
+Description=sayIt shortcuts and tray
+After=graphical-session.target sayit.service
+Wants=sayit.service
 
 [Service]
 Type=simple

@@ -1,11 +1,11 @@
 use anyhow::Result;
 use clap::Parser;
-use say_the_rest_service::{ServiceState, serve};
+use sayit_service::{ServiceState, serve};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::net::TcpListener;
 
 #[derive(Parser)]
-#[command(version, about = "Say the Rest per-user background service")]
+#[command(version, about = "sayIt per-user background service")]
 struct Args {
     #[arg(long, default_value_t = 55391)]
     port: u16,
@@ -24,16 +24,15 @@ async fn main() -> Result<()> {
     let config = args.config.or_else(default_config_path);
     let state = ServiceState::open(data_dir, config)?;
     state.start_worker();
-    println!("Say the Rest service listening on http://{address}/v1");
+    println!("sayIt service listening on http://{address}/v1");
     serve(listener, state).await
 }
 
 fn default_data_dir() -> std::path::PathBuf {
-    if cfg!(windows) {
+    let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(std::env::temp_dir)
-            .join("SayTheRest")
     } else {
         std::env::var_os("XDG_STATE_HOME")
             .map(std::path::PathBuf::from)
@@ -43,25 +42,29 @@ fn default_data_dir() -> std::path::PathBuf {
                     .unwrap_or_else(std::env::temp_dir)
                     .join(".local/state")
             })
-            .join("say-the-rest")
+    };
+    let current = base.join("sayit");
+    let legacy = base.join(if cfg!(windows) {
+        "SayTheRest"
+    } else {
+        "say-the-rest"
+    });
+    if !current.exists() && legacy.exists() && std::fs::rename(&legacy, &current).is_err() {
+        return legacy;
     }
+    current
 }
 
 fn default_config_path() -> Option<std::path::PathBuf> {
-    let local = std::path::PathBuf::from("say-the-rest.json");
-    if local.is_file() {
-        return Some(local);
+    for local in ["sayit.json", "say-the-rest.json"] {
+        let local = std::path::PathBuf::from(local);
+        if local.is_file() {
+            return Some(local);
+        }
     }
-    std::env::current_exe()
-        .ok()?
-        .parent()?
-        .join("say-the-rest.json")
-        .is_file()
-        .then(|| {
-            std::env::current_exe()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join("say-the-rest.json")
-        })
+    let parent = std::env::current_exe().ok()?.parent()?.to_owned();
+    ["sayit.json", "say-the-rest.json"]
+        .into_iter()
+        .map(|name| parent.join(name))
+        .find(|path| path.is_file())
 }

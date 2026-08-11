@@ -90,7 +90,7 @@ fn validate_release_url(candidate: &str) -> Result<(), String> {
 async fn check_for_updates() -> Result<UpdateInfo, String> {
     let releases = reqwest::Client::new()
         .get(RELEASES_API)
-        .header(reqwest::header::USER_AGENT, "SayTheRest desktop updater")
+        .header(reqwest::header::USER_AGENT, "sayIt desktop updater")
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await
@@ -207,10 +207,10 @@ fn gnome_shortcut_command(action: &str) -> Result<String, String> {
     let executable = std::env::var_os("APPIMAGE")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::current_exe().ok())
-        .ok_or("cannot locate the Say the Rest executable")?;
+        .ok_or("cannot locate the sayIt executable")?;
     let executable = executable
         .to_str()
-        .ok_or("the Say the Rest executable path is not valid UTF-8")?;
+        .ok_or("the sayIt executable path is not valid UTF-8")?;
     let quoted = format!("'{}'", executable.replace('\'', "'\\''"));
     let desktop_flag = std::env::var_os("APPIMAGE")
         .is_some()
@@ -270,11 +270,11 @@ fn register_gnome_wayland_shortcuts(settings: &DesktopSettings) -> Result<(), St
         .unwrap_or_default()
         .to_ascii_lowercase();
     if !desktop.contains("gnome") && !desktop.contains("ubuntu") {
-        return Err("this Wayland compositor does not provide the XDG GlobalShortcuts portal; configure Ctrl+Alt+S to run Say the Rest from your desktop keyboard settings".into());
+        return Err("this Wayland compositor does not provide the XDG GlobalShortcuts portal; configure Ctrl+Alt+S to run sayIt from your desktop keyboard settings".into());
     }
 
-    let selection_path = format!("{BASE}/say-the-rest-selection/");
-    let clipboard_path = format!("{BASE}/say-the-rest-clipboard/");
+    let selection_path = format!("{BASE}/sayit-selection/");
+    let clipboard_path = format!("{BASE}/sayit-clipboard/");
     let current = run_gsettings(&["get", SCHEMA, KEY])?;
     let current = current.strip_prefix("@as ").unwrap_or(&current);
     let mut paths = current
@@ -303,13 +303,13 @@ fn register_gnome_wayland_shortcuts(settings: &DesktopSettings) -> Result<(), St
     for (path, name, command, binding) in [
         (
             &selection_path,
-            "Say the Rest: read selection",
+            "sayIt: read selection",
             gnome_shortcut_command("read-selection")?,
             &settings.selection_shortcut,
         ),
         (
             &clipboard_path,
-            "Say the Rest: read clipboard",
+            "sayIt: read clipboard",
             gnome_shortcut_command("read-clipboard")?,
             &settings.clipboard_shortcut,
         ),
@@ -396,14 +396,14 @@ fn configure_launch_at_login(enabled: bool) -> Result<(), String> {
         .args([
             "--user",
             systemctl_action,
-            "say-the-rest.service",
-            "say-the-rest-desktop.service",
+            "sayit.service",
+            "sayit-desktop.service",
         ])
         .status()
         .map_err(|error| format!("cannot run systemctl: {error}"))?;
     if !status.success() {
         return Err(format!(
-            "cannot {systemctl_action} the per-user Say the Rest service"
+            "cannot {systemctl_action} the per-user sayIt service"
         ));
     }
     let autostart = std::env::var_os("XDG_CONFIG_HOME")
@@ -414,7 +414,7 @@ fn configure_launch_at_login(enabled: bool) -> Result<(), String> {
                 .unwrap_or_else(std::env::temp_dir)
                 .join(".config")
         })
-        .join("autostart/say-the-rest.desktop");
+        .join("autostart/sayit.desktop");
     std::fs::create_dir_all(autostart.parent().ok_or("invalid autostart path")?)
         .map_err(|error| format!("cannot create the autostart directory: {error}"))?;
     let contents = linux_autostart_entry(enabled)?;
@@ -425,7 +425,7 @@ fn configure_launch_at_login(enabled: bool) -> Result<(), String> {
 #[cfg(target_os = "linux")]
 fn linux_autostart_entry(enabled: bool) -> Result<String, String> {
     if !enabled {
-        return Ok("[Desktop Entry]\nType=Application\nName=Say the Rest\nHidden=true\n".into());
+        return Ok("[Desktop Entry]\nType=Application\nName=sayIt\nHidden=true\n".into());
     }
     let executable = std::env::var_os("APPIMAGE")
         .map(std::path::PathBuf::from)
@@ -436,14 +436,14 @@ fn linux_autostart_entry(enabled: bool) -> Result<String, String> {
         .ok_or("desktop executable path is not valid UTF-8")?;
     let quoted = executable.replace('\\', "\\\\").replace('"', "\\\"");
     Ok(format!(
-        "[Desktop Entry]\nType=Application\nName=Say the Rest\nComment=Global offline text-to-speech shortcuts\nExec=\"{quoted}\"\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
+        "[Desktop Entry]\nType=Application\nName=sayIt\nComment=Global offline text-to-speech shortcuts\nExec=\"{quoted}\"\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
     ))
 }
 
 #[cfg(windows)]
 fn configure_launch_at_login(enabled: bool) -> Result<(), String> {
     let action = if enabled { "/ENABLE" } else { "/DISABLE" };
-    for task in ["Say the Rest", "Say the Rest Desktop"] {
+    for task in ["sayIt", "sayIt Desktop"] {
         let status = std::process::Command::new("schtasks.exe")
             .args(["/Change", "/TN", task, action])
             .status()
@@ -456,7 +456,8 @@ fn configure_launch_at_login(enabled: bool) -> Result<(), String> {
 }
 
 fn api_token() -> Result<String, String> {
-    if let Ok(token) = std::env::var("SAY_THE_REST_TOKEN") {
+    if let Ok(token) = std::env::var("SAYIT_TOKEN").or_else(|_| std::env::var("SAY_THE_REST_TOKEN"))
+    {
         return Ok(token);
     }
     std::fs::read_to_string(default_data_dir().join("api-token"))
@@ -471,11 +472,10 @@ fn api_read_token() -> Result<String, String> {
 }
 
 fn default_data_dir() -> std::path::PathBuf {
-    if cfg!(windows) {
+    let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(std::env::temp_dir)
-            .join("SayTheRest")
     } else {
         std::env::var_os("XDG_STATE_HOME")
             .map(std::path::PathBuf::from)
@@ -485,8 +485,17 @@ fn default_data_dir() -> std::path::PathBuf {
                     .unwrap_or_else(std::env::temp_dir)
                     .join(".local/state")
             })
-            .join("say-the-rest")
+    };
+    let current = base.join("sayit");
+    let legacy = base.join(if cfg!(windows) {
+        "SayTheRest"
+    } else {
+        "say-the-rest"
+    });
+    if !current.exists() && legacy.exists() && std::fs::rename(&legacy, &current).is_err() {
+        return legacy;
     }
+    current
 }
 
 #[tauri::command]
@@ -545,7 +554,7 @@ fn discard_voice_recording(path: String) -> Result<(), String> {
     if candidate.parent() != Some(recordings.as_path())
         || candidate.extension().and_then(|value| value.to_str()) != Some("wav")
     {
-        return Err("only temporary Say the Rest recordings can be discarded".into());
+        return Err("only temporary sayIt recordings can be discarded".into());
     }
     match std::fs::remove_file(candidate) {
         Ok(()) => Ok(()),
@@ -577,7 +586,7 @@ fn desktop_diagnostics() -> Value {
     #[cfg(target_os = "linux")]
     let startup_active = startup_requested
         && std::process::Command::new("systemctl")
-            .args(["--user", "is-enabled", "--quiet", "say-the-rest.service"])
+            .args(["--user", "is-enabled", "--quiet", "sayit.service"])
             .status()
             .is_ok_and(|status| status.success());
     #[cfg(not(target_os = "linux"))]
@@ -1032,7 +1041,7 @@ fn main() {
                 false,
                 None::<&str>,
             )?;
-            let open = MenuItem::with_id(app, "open", "Open Say the Rest", true, None::<&str>)?;
+            let open = MenuItem::with_id(app, "open", "Open sayIt", true, None::<&str>)?;
             let read_selection =
                 MenuItem::with_id(app, "read-selection", "Read selection", true, None::<&str>)?;
             let read_clipboard =
@@ -1082,7 +1091,7 @@ fn main() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("failed to run Say the Rest desktop application");
+        .expect("failed to run sayIt desktop application");
 }
 
 #[cfg(test)]
@@ -1097,18 +1106,16 @@ mod tests {
 
     #[test]
     fn linux_packages_supervise_the_shortcut_host_separately() {
-        let appimage_unit = include_str!(
-            "../../../../packaging/linux-appimage/say-the-rest-appimage-desktop.service"
-        );
-        let installed_unit =
-            include_str!("../../../../packaging/linux/say-the-rest-desktop.service");
+        let appimage_unit =
+            include_str!("../../../../packaging/linux-appimage/sayit-appimage-desktop.service");
+        let installed_unit = include_str!("../../../../packaging/linux/sayit-desktop.service");
         let app_run = include_str!("../../../../packaging/linux-appimage/AppRun");
         for unit in [appimage_unit, installed_unit] {
             assert!(unit.contains("Restart=on-failure"));
-            assert!(unit.contains("Wants=say-the-rest.service"));
+            assert!(unit.contains("Wants=sayit.service"));
         }
         assert!(appimage_unit.contains("--desktop"));
-        assert!(app_run.contains("restart say-the-rest-desktop.service"));
+        assert!(app_run.contains("restart sayit-desktop.service"));
         assert!(app_run.contains("import-environment DISPLAY WAYLAND_DISPLAY"));
     }
 
@@ -1132,8 +1139,8 @@ mod tests {
                     "installer contains forbidden dependency or network operation: {forbidden}"
                 );
             }
-            assert!(setup.contains("say-the-rest-service"));
-            assert!(setup.contains("say-the-rest-desktop"));
+            assert!(setup.contains("sayit-service"));
+            assert!(setup.contains("sayit-desktop"));
         }
         assert!(windows.contains("-RestartCount 999"));
         assert!(windows.contains("-DontStopIfGoingOnBatteries"));
@@ -1195,26 +1202,26 @@ mod tests {
         assert!(newer_version("latest", "0.1.0").is_err());
         assert!(validate_release_url("https://github.com/a1denvalu3/SayTheRest/releases").is_ok());
         assert!(validate_release_url("http://github.com/a1denvalu3/SayTheRest").is_err());
-        assert!(validate_release_url("https://example.com/SayTheRest.exe").is_err());
+        assert!(validate_release_url("https://example.com/sayIt.exe").is_err());
     }
 
     #[test]
     fn updater_selects_a_native_release_package() {
         let assets = vec![
             GitHubReleaseAsset {
-                name: "say-the-rest-x86_64-pc-windows-msvc.zip".into(),
+                name: "sayit-x86_64-pc-windows-msvc.zip".into(),
                 browser_download_url: "https://github.com/example/windows.zip".into(),
             },
             GitHubReleaseAsset {
-                name: "SayTheRest-Setup-x64.exe".into(),
+                name: "sayIt-Setup-x64.exe".into(),
                 browser_download_url: "https://github.com/example/setup.exe".into(),
             },
             GitHubReleaseAsset {
-                name: "SayTheRest-0.2.0-x86_64.AppImage".into(),
+                name: "sayIt-0.2.0-x86_64.AppImage".into(),
                 browser_download_url: "https://github.com/example/appimage".into(),
             },
             GitHubReleaseAsset {
-                name: "say-the-rest_0.2.0_amd64.deb".into(),
+                name: "sayit_0.2.0_amd64.deb".into(),
                 browser_download_url: "https://github.com/example/deb".into(),
             },
         ];

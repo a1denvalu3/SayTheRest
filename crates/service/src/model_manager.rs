@@ -1,11 +1,11 @@
 use crate::qwen_runtime::QwenRuntimeManager;
 use anyhow::{Context, Result, bail};
 use bzip2::read::BzDecoder;
-use say_the_rest_core::{
+use sayit_core::{
     EngineConfig, KittenConfig, KokoroConfig, PocketConfig, Qwen3TtsConfig, Qwen3TtsMode,
     SherpaOnnxEngine, VitsConfig,
 };
-use say_the_rest_protocol::{
+use sayit_protocol::{
     DownloadSnapshot, DownloadState, ModelBenchmark, ModelCapabilities, ModelDescriptor,
     ModelPresetVoice,
 };
@@ -428,7 +428,7 @@ impl ModelManager {
                         long_form: true,
                     },
                     download: None,
-                    quality_note: "Community model — not tested by Say the Rest.".into(),
+                    quality_note: "Community model — not tested by sayIt.".into(),
                     speed_note: "Run the local benchmark before relying on this model.".into(),
                     benchmark: benchmarks.get(&entry.id).cloned(),
                     recommended: recommended == Some(entry.id.as_str()),
@@ -712,7 +712,7 @@ impl ModelManager {
             "revision contains unsupported characters"
         );
         let client = reqwest::blocking::Client::builder()
-            .user_agent("say-the-rest/0.1")
+            .user_agent("sayit/0.1")
             .build()?;
         let mut metadata_url = base_url.join("api/models/")?;
         metadata_url
@@ -893,7 +893,7 @@ impl ModelManager {
 
         let base_url = url::Url::parse("https://huggingface.co/")?;
         let client = reqwest::blocking::Client::builder()
-            .user_agent("say-the-rest/0.1")
+            .user_agent("sayit/0.1")
             .build()?;
         let mut metadata_url = base_url.join("api/models/")?;
         metadata_url
@@ -1412,7 +1412,7 @@ fn supports_voice_cloning(config: &EngineConfig) -> bool {
         || matches!(
             config,
             EngineConfig::Qwen3Tts(qwen)
-                if matches!(qwen.mode, say_the_rest_core::Qwen3TtsMode::VoiceClone)
+                if matches!(qwen.mode, sayit_core::Qwen3TtsMode::VoiceClone)
         )
 }
 
@@ -1741,7 +1741,7 @@ mod tests {
     #[ignore = "downloads the pinned Qwen runtime and 0.6B Base weights, then performs CPU inference"]
     fn qwen_base_installs_and_synthesizes_offline() {
         let acceptance_root =
-            PathBuf::from(std::env::var_os("SAY_THE_REST_QWEN_ACCEPTANCE_ROOT").unwrap());
+            PathBuf::from(std::env::var_os("SAYIT_QWEN_ACCEPTANCE_ROOT").unwrap());
         fs::create_dir_all(&acceptance_root).unwrap();
         let manager = ModelManager::new(acceptance_root.join("models"), None).unwrap();
         let entry = *CATALOG
@@ -1753,19 +1753,18 @@ mod tests {
         let EngineConfig::Qwen3Tts(config) = config else {
             panic!("Qwen install wrote the wrong engine config")
         };
-        let reference =
-            PathBuf::from(std::env::var_os("SAY_THE_REST_QWEN_REFERENCE_AUDIO").unwrap());
+        let reference = PathBuf::from(std::env::var_os("SAYIT_QWEN_REFERENCE_AUDIO").unwrap());
         let output = acceptance_root.join("qwen-acceptance.wav");
-        let mut engine = say_the_rest_core::ResidentQwenEngine::load(&config).unwrap();
+        let mut engine = sayit_core::ResidentQwenEngine::load(&config).unwrap();
         engine
-            .synthesize(&say_the_rest_core::SynthesisRequest {
-                text: "Say the Rest now runs Qwen voice cloning locally and offline.",
+            .synthesize(&sayit_core::SynthesisRequest {
+                text: "sayIt now runs Qwen voice cloning locally and offline.",
                 output: &output,
                 reference_audio: Some(&reference),
                 speaking_pace: 1.0,
             })
             .unwrap();
-        assert!(say_the_rest_core::wav_duration_seconds(&output).unwrap() > 1.0);
+        assert!(sayit_core::wav_duration_seconds(&output).unwrap() > 1.0);
     }
 
     #[test]

@@ -276,8 +276,8 @@ mod tests {
     #[test]
     #[ignore = "downloads the pinned managed Python and Qwen inference environment"]
     fn installs_self_contained_qwen_environment() {
-        let root = PathBuf::from(std::env::var_os("SAY_THE_REST_QWEN_RUNTIME_ROOT").unwrap());
-        let manifest = PathBuf::from(std::env::var_os("SAY_THE_REST_QWEN_MANIFEST_DIR").unwrap());
+        let root = PathBuf::from(std::env::var_os("SAYIT_QWEN_RUNTIME_ROOT").unwrap());
+        let manifest = PathBuf::from(std::env::var_os("SAYIT_QWEN_MANIFEST_DIR").unwrap());
         let manager = QwenRuntimeManager::new(root, manifest);
         manager.install().unwrap();
         let output = Command::new(manager.python())

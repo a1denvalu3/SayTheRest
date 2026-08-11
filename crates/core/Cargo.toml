@@ -1,5 +1,5 @@
 [package]
-name = "say-the-rest-core"
+name = "sayit-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

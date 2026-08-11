@@ -1,5 +1,5 @@
 [package]
-name = "say-the-rest-desktop"
+name = "sayit-desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

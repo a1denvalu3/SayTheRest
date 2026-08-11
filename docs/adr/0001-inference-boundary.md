@@ -4,7 +4,7 @@ Status: accepted for the first implementation slice
 
 ## Context
 
-Say It uses MLX Audio, which targets Apple silicon. Say the Rest targets Windows and Linux across CPUs and GPUs. Choosing a UI framework does not answer the harder deployment question: which model/runtime combination delivers acceptable first-audio latency, real-time factor, memory use, quality, and install size on representative hardware.
+Say It uses MLX Audio, which targets Apple silicon. sayIt targets Windows and Linux across CPUs and GPUs. Choosing a UI framework does not answer the harder deployment question: which model/runtime combination delivers acceptable first-audio latency, real-time factor, memory use, quality, and install size on representative hardware.
 
 ## Decision
 

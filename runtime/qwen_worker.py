@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Persistent, offline Qwen3-TTS worker for Say the Rest.
+"""Persistent, offline Qwen3-TTS worker for sayIt.
 
 The Rust service owns this process and exchanges one JSON object per line. Model
 paths and audio paths are always local; Hugging Face network access is disabled

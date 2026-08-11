@@ -432,8 +432,8 @@ mod tests {
     #[test]
     #[ignore = "requires extracted Kitten weights and a packaged sherpa runtime"]
     fn kitten_models_synthesize_through_resident_runtime() {
-        let models = PathBuf::from(std::env::var_os("SAY_THE_REST_KITTEN_TEST_ROOT").unwrap());
-        let executable = PathBuf::from(std::env::var_os("SAY_THE_REST_TTS_TEST_RUNTIME").unwrap());
+        let models = PathBuf::from(std::env::var_os("SAYIT_KITTEN_TEST_ROOT").unwrap());
+        let executable = PathBuf::from(std::env::var_os("SAYIT_TTS_TEST_RUNTIME").unwrap());
         for (directory, model) in [
             ("kitten-mini-en-v0_8", "model.onnx"),
             ("kitten-nano-en-v0_8-int8", "model.int8.onnx"),

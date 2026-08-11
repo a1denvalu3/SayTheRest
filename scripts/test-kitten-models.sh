@@ -27,16 +27,16 @@ fetch_and_extract \
 case "$TARGET" in
   *windows*)
     TEST_ROOT=$(cygpath -w "$MODEL_ROOT")
-    TEST_RUNTIME=$(cygpath -w "$ROOT_DIR/dist/say-the-rest-$TARGET/runtime/bin/sherpa-onnx-offline-tts.exe")
+    TEST_RUNTIME=$(cygpath -w "$ROOT_DIR/dist/sayit-$TARGET/runtime/bin/sherpa-onnx-offline-tts.exe")
     ;;
   *)
     TEST_ROOT=$MODEL_ROOT
-    TEST_RUNTIME="$ROOT_DIR/dist/say-the-rest-$TARGET/runtime/bin/sherpa-onnx-offline-tts"
+    TEST_RUNTIME="$ROOT_DIR/dist/sayit-$TARGET/runtime/bin/sherpa-onnx-offline-tts"
     ;;
 esac
 
-SAY_THE_REST_KITTEN_TEST_ROOT="$TEST_ROOT" \
-SAY_THE_REST_TTS_TEST_RUNTIME="$TEST_RUNTIME" \
-  cargo test -p say-the-rest-core --locked --target "$TARGET" \
+SAYIT_KITTEN_TEST_ROOT="$TEST_ROOT" \
+SAYIT_TTS_TEST_RUNTIME="$TEST_RUNTIME" \
+  cargo test -p sayit-core --locked --target "$TARGET" \
     resident::tests::kitten_models_synthesize_through_resident_runtime -- \
     --ignored --exact

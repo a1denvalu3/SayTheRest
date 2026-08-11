@@ -9,11 +9,11 @@ use axum::{
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
 };
-use say_the_rest_core::{
+use sayit_core::{
     BenchmarkRunner, EngineConfig, ResidentQwenEngine, ResidentSherpaEngine, SherpaOnnxEngine,
     SynthesisRequest, TextCleaningOptions, clean_text, wav_duration_seconds,
 };
-use say_the_rest_protocol::{
+use sayit_protocol::{
     Health, HistoryItem, HuggingFaceModelImportRequest, JobState, LocalModelImportRequest,
     ModelBenchmark, ModelDescriptor, PROTOCOL_VERSION, PinRequest, PlaybackSnapshot,
     PlaybackTextChunk, QueuePolicy, ServiceEvent, ServiceSettings, ServiceSettingsUpdate,
@@ -108,14 +108,14 @@ struct InnerState {
 
 impl Default for ServiceState {
     fn default() -> Self {
-        let root = std::env::temp_dir().join(format!("say-the-rest-test-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("sayit-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).expect("temporary test directory");
         let model = root.join("test-model.onnx");
         let tokens = root.join("test-tokens.txt");
         fs::write(&model, b"test").expect("temporary test model");
         fs::write(&tokens, b"test").expect("temporary test tokens");
         let config_path = root.join("test-config.json");
-        let config = EngineConfig::SherpaOnnxVits(say_the_rest_core::VitsConfig {
+        let config = EngineConfig::SherpaOnnxVits(sayit_core::VitsConfig {
             executable: "test-tts".into(),
             model,
             tokens,
@@ -1431,7 +1431,7 @@ async fn stop(State(state): State<ServiceState>) -> Result<StatusCode, (StatusCo
 
 async fn seek(
     State(state): State<ServiceState>,
-    Json(request): Json<say_the_rest_protocol::SecondsRequest>,
+    Json(request): Json<sayit_protocol::SecondsRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     if !request.seconds.is_finite() {
         return Err((
@@ -1446,7 +1446,7 @@ async fn seek(
 
 async fn set_rate(
     State(state): State<ServiceState>,
-    Json(request): Json<say_the_rest_protocol::PlaybackRateRequest>,
+    Json(request): Json<sayit_protocol::PlaybackRateRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     state.player.set_rate(request.rate).map_err(unprocessable)?;
     state.inner.write().await.settings.playback_rate = request.rate;
@@ -1458,7 +1458,7 @@ async fn set_rate(
 
 async fn set_volume(
     State(state): State<ServiceState>,
-    Json(request): Json<say_the_rest_protocol::VolumeRequest>,
+    Json(request): Json<sayit_protocol::VolumeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     state
         .player
@@ -1515,7 +1515,7 @@ async fn create_voice(
         && !matches!(
             &config,
             EngineConfig::Qwen3Tts(qwen)
-                if matches!(qwen.mode, say_the_rest_core::Qwen3TtsMode::VoiceClone)
+                if matches!(qwen.mode, sayit_core::Qwen3TtsMode::VoiceClone)
         )
     {
         return Err((
@@ -2382,7 +2382,7 @@ mod tests {
         let config_path = directory.path().join("pocket.json");
         let asset = directory.path().join("unused");
         fs::write(&asset, []).unwrap();
-        let config = EngineConfig::SherpaOnnxPocket(say_the_rest_core::PocketConfig {
+        let config = EngineConfig::SherpaOnnxPocket(sayit_core::PocketConfig {
             executable: asset.clone(),
             lm_flow: asset.clone(),
             lm_main: asset.clone(),
@@ -2591,7 +2591,7 @@ mod tests {
             history_retention_days: Some(90),
             long_text_confirmation_characters: Some(4_000),
             speaking_pace: Some(1.25),
-            text_cleaning: Some(say_the_rest_protocol::TextCleaningSettings {
+            text_cleaning: Some(sayit_protocol::TextCleaningSettings {
                 strip_code_blocks: false,
                 ..Default::default()
             }),
@@ -2772,7 +2772,7 @@ mod tests {
         fs::write(model_dir.join("tokens.txt"), []).unwrap();
         let config_path = state.models.config_path("piper-en-us-lessac-medium");
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        let config = EngineConfig::SherpaOnnxVits(say_the_rest_core::VitsConfig {
+        let config = EngineConfig::SherpaOnnxVits(sayit_core::VitsConfig {
             executable: "tts".into(),
             model: model_dir.join("model.onnx"),
             tokens: model_dir.join("tokens.txt"),
@@ -2805,7 +2805,7 @@ mod tests {
         let pocket_path = state.models.config_path("pocket-tts-int8");
         fs::create_dir_all(piper_path.parent().unwrap()).unwrap();
         fs::create_dir_all(pocket_path.parent().unwrap()).unwrap();
-        let piper = EngineConfig::SherpaOnnxVits(say_the_rest_core::VitsConfig {
+        let piper = EngineConfig::SherpaOnnxVits(sayit_core::VitsConfig {
             executable: "tts".into(),
             model: assets.join("model"),
             tokens: assets.join("tokens"),
@@ -2815,7 +2815,7 @@ mod tests {
             num_threads: 1,
             speaker_id: 0,
         });
-        let pocket = EngineConfig::SherpaOnnxPocket(say_the_rest_core::PocketConfig {
+        let pocket = EngineConfig::SherpaOnnxPocket(sayit_core::PocketConfig {
             executable: "tts".into(),
             lm_flow: assets.join("flow"),
             lm_main: assets.join("main"),

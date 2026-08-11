@@ -1,0 +1,4 @@
+interface:
+  display_name: "sayIt CLI"
+  short_description: "Generate speech and narrate agent progress"
+  default_prompt: "Use $sayit-cli to speak this response and keep me updated during the task."

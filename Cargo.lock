@@ -3633,20 +3633,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "say-the-rest"
+name = "sayit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "reqwest 0.12.28",
- "say-the-rest-core",
- "say-the-rest-protocol",
+ "sayit-core",
+ "sayit-protocol",
  "serde_json",
  "uuid",
 ]
 
 [[package]]
-name = "say-the-rest-core"
+name = "sayit-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3661,7 +3661,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "say-the-rest-desktop"
+name = "sayit-desktop"
 version = "0.1.0"
 dependencies = [
  "arboard",
@@ -3687,7 +3687,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "say-the-rest-protocol"
+name = "sayit-protocol"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -3696,7 +3696,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "say-the-rest-service"
+name = "sayit-service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3707,8 +3707,8 @@ dependencies = [
  "hound",
  "reqwest 0.12.28",
  "rminiaudio",
- "say-the-rest-core",
- "say-the-rest-protocol",
+ "sayit-core",
+ "sayit-protocol",
  "serde",
  "serde_json",
  "sha2",
@@ -3723,12 +3723,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "say-the-rest-service-app"
+name = "sayit-service-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "say-the-rest-service",
+ "sayit-service",
  "tokio",
 ]
 

@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Say the Rest",
+  "productName": "sayIt",
   "version": "0.1.0",
-  "identifier": "sh.saytherest.desktop",
+  "identifier": "sh.sayit.desktop",
   "build": {
     "frontendDist": "../ui"
   },
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Say the Rest",
+        "title": "sayIt",
         "width": 1040,
         "height": 720,
         "minWidth": 760,
