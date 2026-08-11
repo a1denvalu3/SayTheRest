@@ -1768,6 +1768,16 @@ async fn select_preset_voice(
         .models
         .select_preset_voice(&id, &voice_id)
         .map_err(unprocessable)?;
+    let config_path = state.models.config_path(&id);
+    {
+        let mut resident = state.resident_engine.lock().unwrap();
+        if resident
+            .as_ref()
+            .is_some_and(|slot| slot.config_path == config_path)
+        {
+            *resident = None;
+        }
+    }
     let mut inner = state.inner.write().await;
     if inner.settings.active_model_id.as_deref() == Some(id.as_str()) {
         inner.settings.active_voice_profile_id = None;

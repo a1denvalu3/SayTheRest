@@ -30,3 +30,216 @@
 .cleaning-options:has(input:disabled) {
   opacity: .45;
 }
+
+.settings-dashboard {
+  display: grid;
+  grid-template-columns: minmax(250px, .82fr) minmax(360px, 1.18fr);
+  gap: 14px;
+  align-items: start;
+  padding-bottom: 30px;
+}
+
+.settings-rail {
+  display: grid;
+  gap: 14px;
+}
+
+.settings-dashboard .studio-card {
+  margin: 0;
+  padding: 24px;
+  gap: 20px;
+}
+
+.settings-dashboard .settings-form {
+  grid-template-columns: 1fr;
+  margin-top: 0;
+}
+
+.settings-dashboard .behavior-settings {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 18px;
+  row-gap: 18px;
+}
+
+.behavior-settings > .card-heading,
+.behavior-settings > .settings-fieldset,
+.behavior-settings > .consent,
+.behavior-settings > .action {
+  grid-column: 1 / -1;
+}
+
+.card-heading {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 10px;
+  align-items: start;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.card-heading > span {
+  padding-top: 2px;
+  color: var(--accent);
+  font-size: 9px;
+}
+
+.card-heading h3,
+.diagnostics h3 {
+  margin: 0;
+  font: 500 12px/1.3 var(--mono);
+}
+
+.card-heading p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font: 13px/1.35 var(--serif);
+}
+
+.settings-form label small {
+  color: var(--muted);
+  font: 11px/1.4 var(--serif);
+  text-transform: none;
+}
+
+.field-note {
+  align-self: end;
+  margin: 0 0 2px;
+  color: var(--muted);
+  font: 13px/1.45 var(--serif);
+}
+
+.input-with-unit {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,.28);
+}
+
+.input-with-unit input {
+  min-width: 0;
+  border: 0 !important;
+  background: transparent !important;
+}
+
+.input-with-unit > span {
+  padding: 0 12px;
+  color: var(--muted);
+  font: 9px var(--mono);
+  text-transform: lowercase;
+}
+
+.update-card > p {
+  margin: 0;
+  color: var(--muted);
+  font: 14px/1.5 var(--serif);
+}
+
+.update-card .card-actions {
+  margin: 0;
+}
+
+.status-note {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font-size: 12px !important;
+}
+
+.settings-dashboard .diagnostics {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 24px;
+}
+
+.diagnostics dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 32px;
+  margin: 14px 0 0;
+}
+
+.diagnostics dl div:last-child,
+.diagnostics dl div:nth-last-child(2) {
+  border-bottom: 0;
+}
+
+@media (max-width: 950px) {
+  .settings-dashboard {
+    grid-template-columns: 1fr;
+  }
+
+  .diagnostics dl {
+    grid-template-columns: 1fr;
+  }
+
+  .diagnostics dl div:nth-last-child(2) {
+    border-bottom: 1px solid var(--line);
+  }
+}
+
+@media (max-width: 620px) {
+  .settings-dashboard .behavior-settings {
+    grid-template-columns: 1fr;
+  }
+
+  .field-note {
+    margin-top: -10px;
+  }
+
+  .diagnostics dl div {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+}
+
+/* Unified controls live here so settings.css can correct the legacy compact
+   form rules without changing model and voice card structure. */
+.studio-card input:not([type="checkbox"]):not([type="range"]),
+.studio-card select {
+  width: 100%;
+  min-height: 42px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  outline: none;
+  background: rgba(255,255,255,.28);
+  color: var(--ink);
+  font: 12px var(--mono);
+  transition: border-color .16s, background-color .16s, box-shadow .16s;
+}
+
+.studio-card input:not([type="checkbox"]):not([type="range"]):hover,
+.studio-card select:hover {
+  background: #fbf8f0;
+}
+
+.studio-card input:not([type="checkbox"]):not([type="range"]):focus,
+.studio-card select:focus {
+  border-color: var(--ink);
+  background: #fffdf7;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.studio-card input::placeholder { color: #999184; }
+.consent { align-items: start; }
+.consent input { margin: 2px 0 0; accent-color: var(--accent); }
+
+.action {
+  transition: transform .14s, background-color .14s, border-color .14s;
+}
+
+.action:not(:disabled):hover {
+  transform: translateY(-1px);
+  background: var(--accent-dark);
+}
+
+.action.secondary:not(:disabled):hover {
+  border-color: var(--ink);
+  background: var(--paper-2);
+}
+
+.action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

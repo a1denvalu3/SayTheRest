@@ -242,59 +242,18 @@ fn packaged_qwen_manifest_dir() -> PathBuf {
 }
 
 const KOKORO_VOICES: &[&str] = &[
-    "af_alloy",
-    "af_aoede",
-    "af_bella",
-    "af_heart",
-    "af_jessica",
-    "af_kore",
-    "af_nicole",
-    "af_nova",
-    "af_river",
-    "af_sarah",
-    "af_sky",
-    "am_adam",
-    "am_echo",
-    "am_eric",
-    "am_fenrir",
-    "am_liam",
-    "am_michael",
-    "am_onyx",
-    "am_puck",
-    "am_santa",
-    "bf_alice",
-    "bf_emma",
-    "bf_isabella",
-    "bf_lily",
-    "bm_daniel",
-    "bm_fable",
-    "bm_george",
-    "bm_lewis",
-    "ef_dora",
-    "em_alex",
-    "ff_siwis",
-    "hf_alpha",
-    "hf_beta",
-    "hm_omega",
-    "hm_psi",
-    "if_sara",
-    "im_nicola",
-    "jf_alpha",
-    "jf_gongitsune",
-    "jf_nezumi",
-    "jf_tebukuro",
-    "jm_kumo",
-    "pf_dora",
-    "pm_alex",
-    "pm_santa",
-    "zf_xiaobei",
-    "zf_xiaoni",
-    "zf_xiaoxiao",
-    "zf_xiaoyi",
-    "zm_yunjian",
-    "zm_yunxi",
-    "zm_yunxia",
-    "zm_yunyang",
+    "af_maple", "af_sol", "bf_vale", "zf_001", "zf_002", "zf_003", "zf_004", "zf_005", "zf_006",
+    "zf_007", "zf_008", "zf_017", "zf_018", "zf_019", "zf_021", "zf_022", "zf_023", "zf_024",
+    "zf_026", "zf_027", "zf_028", "zf_032", "zf_036", "zf_038", "zf_039", "zf_040", "zf_042",
+    "zf_043", "zf_044", "zf_046", "zf_047", "zf_048", "zf_049", "zf_051", "zf_059", "zf_060",
+    "zf_067", "zf_070", "zf_071", "zf_072", "zf_073", "zf_074", "zf_075", "zf_076", "zf_077",
+    "zf_078", "zf_079", "zf_083", "zf_084", "zf_085", "zf_086", "zf_087", "zf_088", "zf_090",
+    "zf_092", "zf_093", "zf_094", "zf_099", "zm_009", "zm_010", "zm_011", "zm_012", "zm_013",
+    "zm_014", "zm_015", "zm_016", "zm_020", "zm_025", "zm_029", "zm_030", "zm_031", "zm_033",
+    "zm_034", "zm_035", "zm_037", "zm_041", "zm_045", "zm_050", "zm_052", "zm_053", "zm_054",
+    "zm_055", "zm_056", "zm_057", "zm_058", "zm_061", "zm_062", "zm_063", "zm_064", "zm_065",
+    "zm_066", "zm_068", "zm_069", "zm_080", "zm_081", "zm_082", "zm_089", "zm_091", "zm_095",
+    "zm_096", "zm_097", "zm_098", "zm_100",
 ];
 
 impl ModelManager {
@@ -1751,9 +1710,17 @@ mod tests {
             .iter()
             .find(|model| model.id == "kokoro-int8-multi-lang-v1-1")
             .unwrap();
-        assert_eq!(kokoro.preset_voices.len(), 53);
-        assert_eq!(kokoro.preset_voices[3].id, "af_heart");
-        assert_eq!(kokoro.preset_voices[45].language, "zh-CN");
+        assert_eq!(kokoro.preset_voices.len(), 103);
+        assert_eq!(kokoro.preset_voices[0].id, "af_maple");
+        assert_eq!(kokoro.preset_voices[2].id, "bf_vale");
+        assert_eq!(kokoro.preset_voices[3].language, "zh-CN");
+        assert_eq!(kokoro.preset_voices[11].id, "zf_017");
+        assert!(
+            !kokoro
+                .preset_voices
+                .iter()
+                .any(|voice| voice.id == "am_adam")
+        );
         for id in ["kitten-mini-en-v0-8", "kitten-nano-en-v0-8-int8"] {
             let kitten = models.iter().find(|model| model.id == id).unwrap();
             assert_eq!(kitten.preset_voices.len(), 8);
@@ -1896,13 +1863,13 @@ mod tests {
         .unwrap();
         let manager = ModelManager::new(storage.path().into(), None).unwrap();
         manager
-            .select_preset_voice("kokoro-int8-multi-lang-v1-1", "bm_george")
+            .select_preset_voice("kokoro-int8-multi-lang-v1-1", "bf_vale")
             .unwrap();
         let selected = EngineConfig::from_path(&model_dir.join("config.json")).unwrap();
         let EngineConfig::SherpaOnnxKokoro(selected) = selected else {
             panic!("expected Kokoro config")
         };
-        assert_eq!(selected.speaker_id, 26);
+        assert_eq!(selected.speaker_id, 2);
         assert!(selected.lexicons[0].ends_with("lexicon-gb-en.txt"));
         let descriptor = manager
             .descriptors(Some("kokoro-int8-multi-lang-v1-1"), &HashMap::new())
@@ -1916,7 +1883,7 @@ mod tests {
                 .find(|voice| voice.selected)
                 .unwrap()
                 .id,
-            "bm_george"
+            "bf_vale"
         );
     }
 

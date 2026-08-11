@@ -8,6 +8,8 @@ let recordingStopping = false;
 let preparedRecordingPath = null;
 let scrubbing = false;
 let availableUpdate = null;
+let serviceEventTimer = null;
+const pendingServiceResources = new Set();
 
 document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => {
   document.querySelectorAll('.nav-item,.view').forEach(item => item.classList.remove('active'));
@@ -24,15 +26,15 @@ async function del(resource){ return invoke('service_delete',{resource}); }
 function toast(message){const el=$('#toast');el.textContent=message;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),2600)}
 function time(value=0){const seconds=Math.max(0,Math.floor(value));return `${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`}
 
-async function refresh(section='player'){
+async function refresh(section='player',loadDetails=true){
   try{
     snapshot=await get('state');
     $('#service-pill').classList.remove('offline');$('#service-pill').innerHTML='<i></i>Service ready';
     await renderPlayer(snapshot);
-    if(section==='models') renderModels(await get('models'));
-    if(section==='voices'){const [voices,settings,models]=await Promise.all([get('voices'),get('settings'),get('models')]);renderVoices(voices,settings,models)}
-    if(section==='history'){historyItems=await get('history');renderHistory(historyItems)}
-    if(section==='settings') await renderSettings(await get('settings'));
+    if(loadDetails&&section==='models') renderModels(await get('models'));
+    if(loadDetails&&section==='voices'){const [voices,settings,models]=await Promise.all([get('voices'),get('settings'),get('models')]);renderVoices(voices,settings,models)}
+    if(loadDetails&&section==='history'){historyItems=await get('history');renderHistory(historyItems)}
+    if(loadDetails&&section==='settings') await renderSettings(await get('settings'));
   }catch(error){$('#service-pill').classList.add('offline');$('#service-pill').innerHTML='<i></i>Service offline';console.error(error)}
 }
 
@@ -78,7 +80,11 @@ $('#download-update').onclick=()=>{if(availableUpdate?.download_url)invoke('open
 $('#shortcut-form').onsubmit=async event=>{event.preventDefault();const data=new FormData(event.target);try{const settings=await invoke('update_desktop_settings',{settings:{selection_shortcut:String(data.get('selection_shortcut')).trim().toLowerCase(),clipboard_shortcut:String(data.get('clipboard_shortcut')).trim().toLowerCase(),launch_at_login:data.get('launch_at_login')==='on'}});showShortcuts(settings);toast('Shortcut and startup settings updated')}catch(error){toast(String(error))}};
 $('#model-import-form').onsubmit=async event=>{event.preventDefault();const data=new FormData(event.target);try{await post('models/imports/local',{directory:data.get('directory'),display_name:data.get('display_name'),license:data.get('license'),license_url:data.get('license_url'),untested_model_and_license_review_confirmed:data.get('acknowledged')==='on'});event.target.reset();toast('Community model imported');refresh('models')}catch(error){toast(String(error))}};
 $('#hf-import-form').onsubmit=async event=>{event.preventDefault();const data=new FormData(event.target);try{toast('Resolving immutable repository revision…');await post('models/imports/huggingface',{repository:data.get('repository'),revision:data.get('revision')||null,display_name:data.get('display_name'),license:data.get('license'),license_url:data.get('license_url'),access_token:data.get('access_token')||null,untested_model_and_license_review_confirmed:data.get('acknowledged')==='on'});event.target.reset();toast('Hugging Face model imported');refresh('models')}catch(error){toast(String(error))}};
-invoke('desktop_settings').then(showShortcuts).catch(console.error);setInterval(()=>refresh(document.querySelector('.nav-item.active').dataset.view),1000);refresh();
+invoke('desktop_settings').then(showShortcuts).catch(console.error);
+setInterval(()=>refresh(document.querySelector('.nav-item.active').dataset.view,false),15000);
+setInterval(()=>{if(snapshot?.playback.state==='playing'&&!scrubbing){snapshot.playback.position_seconds=Math.min(snapshot.playback.duration_seconds||Infinity,(snapshot.playback.position_seconds||0)+1);renderPlayer(snapshot)}},1000);
+refresh();
+window.__TAURI__.event.listen('service-event',event=>{const resource=event.payload?.resource;if(resource)pendingServiceResources.add(resource);clearTimeout(serviceEventTimer);serviceEventTimer=setTimeout(()=>{const section=document.querySelector('.nav-item.active').dataset.view;const details=pendingServiceResources.has(section)||(section==='models'&&pendingServiceResources.has('models'))||(section==='voices'&&(pendingServiceResources.has('voices')||pendingServiceResources.has('models')||pendingServiceResources.has('settings')))||(section==='history'&&(pendingServiceResources.has('history')||pendingServiceResources.has('jobs')))||(section==='settings'&&(pendingServiceResources.has('settings')||pendingServiceResources.has('models')));pendingServiceResources.clear();refresh(section,details)},150)});
 window.__TAURI__.event.listen('capture-status',event=>{const status=event.payload;if(status.ok){toast(`${status.kind==='selection'?'Selection':'Clipboard'} sent to speech`);refresh()}else{toast(status.error||'Text could not be captured')}});
 window.__TAURI__.event.listen('desktop-action-status',event=>{toast(event.payload.message||'Desktop action completed');refresh()});
 window.__TAURI__.event.listen('long-text-request',async event=>{const request=event.payload;const confirmed=window.confirm(`This ${request.kind} contains ${request.characters.toLocaleString()} characters and may take a while to process. Read it aloud?`);if(!confirmed){toast('Long text was not queued');return}try{await post('jobs',{text:request.text,source:request.kind,queue_policy:'replace',confirmed_long_text:true});toast('Long text queued');refresh()}catch(error){toast(String(error))}});

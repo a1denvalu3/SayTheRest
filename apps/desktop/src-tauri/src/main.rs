@@ -464,6 +464,12 @@ fn api_token() -> Result<String, String> {
         .map_err(|error| format!("cannot read the local service token: {error}"))
 }
 
+fn api_read_token() -> Result<String, String> {
+    std::fs::read_to_string(default_data_dir().join("api-read-token"))
+        .map(|token| token.trim().to_owned())
+        .map_err(|error| format!("cannot read the local service read token: {error}"))
+}
+
 fn default_data_dir() -> std::path::PathBuf {
     if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA")
@@ -591,10 +597,14 @@ fn authorized(request: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilde
     Ok(request.bearer_auth(api_token()?))
 }
 
+fn authorized_read(request: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder, String> {
+    Ok(request.bearer_auth(api_read_token()?))
+}
+
 #[tauri::command]
 async fn service_get(resource: String) -> Result<Value, String> {
     let resource = safe_resource(&resource)?;
-    authorized(reqwest::Client::new().get(format!("{SERVICE}/{resource}")))?
+    authorized_read(reqwest::Client::new().get(format!("{SERVICE}/{resource}")))?
         .send()
         .await
         .map_err(|error| error.to_string())?
@@ -681,7 +691,7 @@ fn handle_capture(app: tauri::AppHandle, kind: CaptureKind) {
         let status = match result {
             Ok(text) => {
                 let client = reqwest::Client::new();
-                let threshold = match authorized(client.get(format!("{SERVICE}/settings"))) {
+                let threshold = match authorized_read(client.get(format!("{SERVICE}/settings"))) {
                     Ok(request) => match request.send().await {
                         Ok(response) => response
                             .json::<Value>()
@@ -785,15 +795,16 @@ fn handle_tray_playback(app: tauri::AppHandle, toggle: bool) {
     tauri::async_runtime::spawn(async move {
         let result = async {
             let resource = if toggle {
-                let state = authorized(reqwest::Client::new().get(format!("{SERVICE}/state")))?
-                    .send()
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .error_for_status()
-                    .map_err(|error| error.to_string())?
-                    .json::<Value>()
-                    .await
-                    .map_err(|error| error.to_string())?;
+                let state =
+                    authorized_read(reqwest::Client::new().get(format!("{SERVICE}/state")))?
+                        .send()
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .error_for_status()
+                        .map_err(|error| error.to_string())?
+                        .json::<Value>()
+                        .await
+                        .map_err(|error| error.to_string())?;
                 match state.pointer("/playback/state").and_then(Value::as_str) {
                     Some("paused") => "playback/resume",
                     Some("playing") => "playback/pause",
@@ -878,15 +889,16 @@ fn start_tray_status_poll(
 ) {
     tauri::async_runtime::spawn(async move {
         loop {
-            let state = match authorized(reqwest::Client::new().get(format!("{SERVICE}/state"))) {
-                Ok(request) => match request.send().await {
-                    Ok(response) if response.status().is_success() => {
-                        response.json::<Value>().await.ok()
-                    }
-                    _ => None,
-                },
-                Err(_) => None,
-            };
+            let state =
+                match authorized_read(reqwest::Client::new().get(format!("{SERVICE}/state"))) {
+                    Ok(request) => match request.send().await {
+                        Ok(response) if response.status().is_success() => {
+                            response.json::<Value>().await.ok()
+                        }
+                        _ => None,
+                    },
+                    Err(_) => None,
+                };
             let (status, pause, controls_enabled) = state
                 .as_ref()
                 .map(tray_status_text)
@@ -895,7 +907,53 @@ fn start_tray_status_poll(
             let _ = pause_item.set_text(pause);
             let _ = pause_item.set_enabled(controls_enabled);
             let _ = stop_item.set_enabled(controls_enabled);
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    });
+}
+
+fn start_service_event_bridge(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let response =
+                match authorized_read(reqwest::Client::new().get(format!("{SERVICE}/events"))) {
+                    Ok(request) => request.send().await,
+                    Err(error) => {
+                        eprintln!("service event stream unavailable: {error}");
+                        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                        continue;
+                    }
+                };
+            let Ok(mut response) = response else {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                continue;
+            };
+            if !response.status().is_success() {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                continue;
+            }
+            let mut pending = String::new();
+            loop {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => {
+                        pending.push_str(&String::from_utf8_lossy(&chunk));
+                        while let Some(end) = pending.find("\n\n") {
+                            let frame = pending[..end].to_owned();
+                            pending.drain(..end + 2);
+                            let data = frame
+                                .lines()
+                                .filter_map(|line| line.strip_prefix("data:"))
+                                .map(str::trim_start)
+                                .collect::<String>();
+                            if let Ok(event) = serde_json::from_str::<Value>(&data) {
+                                let _ = app.emit("service-event", event);
+                            }
+                        }
+                    }
+                    Ok(None) | Err(_) => break,
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     });
 }
@@ -1013,6 +1071,7 @@ fn main() {
                     _ => {}
                 })
                 .build(app)?;
+            start_service_event_bridge(app.handle().clone());
             start_tray_status_poll(status, pause_resume, stop);
             Ok(())
         })
