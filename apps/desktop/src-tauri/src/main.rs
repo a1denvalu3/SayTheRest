@@ -192,11 +192,147 @@ fn parsed_shortcuts(settings: &DesktopSettings) -> Result<(Shortcut, Shortcut), 
     Ok((selection, clipboard))
 }
 
+#[cfg(target_os = "linux")]
+fn is_wayland_session() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_wayland_session() -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn gnome_shortcut_command(action: &str) -> Result<String, String> {
+    let executable = std::env::var_os("APPIMAGE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_exe().ok())
+        .ok_or("cannot locate the Say the Rest executable")?;
+    let executable = executable
+        .to_str()
+        .ok_or("the Say the Rest executable path is not valid UTF-8")?;
+    let quoted = format!("'{}'", executable.replace('\'', "'\\''"));
+    let desktop_flag = std::env::var_os("APPIMAGE")
+        .is_some()
+        .then_some(" --desktop")
+        .unwrap_or("");
+    Ok(format!("{quoted}{desktop_flag} --{action}"))
+}
+
+#[cfg(target_os = "linux")]
+fn run_gsettings(args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("gsettings")
+        .args(args)
+        .output()
+        .map_err(|error| format!("cannot run gsettings: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "gsettings rejected the global shortcut: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn set_gsettings_string(schema: &str, key: &str, value: &str) -> Result<(), String> {
+    let value = serde_json::to_string(value).map_err(|error| error.to_string())?;
+    run_gsettings(&["set", schema, key, &value]).map(|_| ())
+}
+
+#[cfg(target_os = "linux")]
+fn gnome_accelerator(shortcut: &str) -> Result<String, String> {
+    let mut parts = shortcut.split('+').map(str::trim).collect::<Vec<_>>();
+    let key = parts.pop().ok_or("shortcut has no key")?;
+    if key.is_empty() {
+        return Err("shortcut has no key".into());
+    }
+    let mut accelerator = String::new();
+    for modifier in parts {
+        accelerator.push_str(match modifier.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => "<Control>",
+            "alt" => "<Alt>",
+            "shift" => "<Shift>",
+            "super" | "meta" => "<Super>",
+            _ => return Err(format!("unsupported GNOME shortcut modifier: {modifier}")),
+        });
+    }
+    accelerator.push_str(key);
+    Ok(accelerator)
+}
+
+#[cfg(target_os = "linux")]
+fn register_gnome_wayland_shortcuts(settings: &DesktopSettings) -> Result<(), String> {
+    const SCHEMA: &str = "org.gnome.settings-daemon.plugins.media-keys";
+    const KEY: &str = "custom-keybindings";
+    const BASE: &str = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings";
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !desktop.contains("gnome") && !desktop.contains("ubuntu") {
+        return Err("this Wayland compositor does not provide the XDG GlobalShortcuts portal; configure Ctrl+Alt+S to run Say the Rest from your desktop keyboard settings".into());
+    }
+
+    let selection_path = format!("{BASE}/say-the-rest-selection/");
+    let clipboard_path = format!("{BASE}/say-the-rest-clipboard/");
+    let current = run_gsettings(&["get", SCHEMA, KEY])?;
+    let current = current.strip_prefix("@as ").unwrap_or(&current);
+    let mut paths = current
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .map(|item| item.trim().trim_matches('\''))
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for path in [&selection_path, &clipboard_path] {
+        if !paths.contains(path) {
+            paths.push(path.clone());
+        }
+    }
+    let encoded = format!(
+        "[{}]",
+        paths
+            .iter()
+            .map(|path| format!("'{path}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    run_gsettings(&["set", SCHEMA, KEY, &encoded])?;
+
+    for (path, name, command, binding) in [
+        (
+            &selection_path,
+            "Say the Rest: read selection",
+            gnome_shortcut_command("read-selection")?,
+            &settings.selection_shortcut,
+        ),
+        (
+            &clipboard_path,
+            "Say the Rest: read clipboard",
+            gnome_shortcut_command("read-clipboard")?,
+            &settings.clipboard_shortcut,
+        ),
+    ] {
+        let schema =
+            format!("org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:{path}");
+        set_gsettings_string(&schema, "name", name)?;
+        set_gsettings_string(&schema, "command", &command)?;
+        let binding = gnome_accelerator(binding)?;
+        set_gsettings_string(&schema, "binding", &binding)?;
+    }
+    Ok(())
+}
+
 fn register_shortcuts(app: &tauri::AppHandle, settings: &DesktopSettings) -> Result<(), String> {
     let (selection, clipboard) = parsed_shortcuts(settings)?;
     app.global_shortcut()
         .unregister_all()
         .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "linux")]
+    if is_wayland_session() {
+        return register_gnome_wayland_shortcuts(settings);
+    }
     if let Err(error) = app
         .global_shortcut()
         .register_multiple([selection, clipboard])
@@ -766,7 +902,15 @@ fn start_tray_status_poll(
 
 fn main() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if args.iter().any(|arg| arg == "--read-selection") {
+                handle_capture(app.clone(), CaptureKind::Selection);
+                return;
+            }
+            if args.iter().any(|arg| arg == "--read-clipboard") {
+                handle_capture(app.clone(), CaptureKind::Clipboard);
+                return;
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
@@ -1032,5 +1176,16 @@ mod tests {
         let disabled = linux_autostart_entry(false).unwrap();
         assert!(disabled.contains("Hidden=true"));
         assert!(!disabled.contains("Exec="));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn converts_shortcuts_to_gnome_accelerators() {
+        assert_eq!(gnome_accelerator("ctrl+alt+s").unwrap(), "<Control><Alt>s");
+        assert_eq!(
+            gnome_accelerator("super+shift+F8").unwrap(),
+            "<Super><Shift>F8"
+        );
+        assert!(gnome_accelerator("hyper+s").is_err());
     }
 }
