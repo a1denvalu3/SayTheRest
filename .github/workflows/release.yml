@@ -36,11 +36,11 @@ jobs:
       - name: Test rich clipboard preservation on Linux display
         if: runner.os == 'Linux'
         shell: bash
-        run: env -u WAYLAND_DISPLAY xvfb-run -a cargo test -p say-the-rest-desktop --locked --target '${{ matrix.target }}' selection::tests::rich_clipboard_snapshot_restores_multiple_formats -- --ignored --exact
+        run: env -u WAYLAND_DISPLAY xvfb-run -a cargo test -p sayit-desktop --locked --target '${{ matrix.target }}' selection::tests::rich_clipboard_snapshot_restores_multiple_formats -- --ignored --exact
       - name: Test rich clipboard preservation on Windows desktop
         if: runner.os == 'Windows'
         shell: pwsh
-        run: cargo test -p say-the-rest-desktop --locked --target '${{ matrix.target }}' selection::tests::rich_clipboard_snapshot_restores_multiple_formats -- --ignored --exact
+        run: cargo test -p sayit-desktop --locked --target '${{ matrix.target }}' selection::tests::rich_clipboard_snapshot_restores_multiple_formats -- --ignored --exact
       - name: Package
         shell: bash
         run: ./scripts/package-release.sh '${{ matrix.target }}' '${{ matrix.runtime }}'
