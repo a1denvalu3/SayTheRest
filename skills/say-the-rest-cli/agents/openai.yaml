@@ -1,0 +1,4 @@
+interface:
+  display_name: "Say the Rest CLI"
+  short_description: "Generate speech and narrate agent progress"
+  default_prompt: "Use $say-the-rest-cli to speak this response and keep me updated during the task."
