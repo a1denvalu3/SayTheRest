@@ -16,7 +16,9 @@ class WorkerValidationTests(unittest.TestCase):
         self.assertEqual(WORKER.resource_thread_count(1), 1)
         self.assertEqual(WORKER.resource_thread_count(2), 1)
         self.assertEqual(WORKER.resource_thread_count(4), 2)
-        self.assertEqual(WORKER.resource_thread_count(64), 2)
+        self.assertEqual(WORKER.resource_thread_count(8), 4)
+        self.assertEqual(WORKER.resource_thread_count(12), 6)
+        self.assertEqual(WORKER.resource_thread_count(64), 8)
 
     def test_required_text_rejects_blank_and_non_string_values(self):
         for request in ({}, {"text": "  "}, {"text": 7}):

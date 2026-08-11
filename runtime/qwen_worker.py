@@ -18,13 +18,13 @@ from typing import Any
 
 
 MODES = {"custom-voice", "voice-design", "voice-clone"}
-MAX_CPU_THREADS = 2
+MAX_CPU_THREADS = 8
 
 
 def resource_thread_count(cpu_count: int | None = None) -> int:
-    """Leave CPU capacity for the desktop instead of letting Torch saturate it."""
+    """Use half the CPUs while leaving at least two available to the desktop."""
     count = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
-    return max(1, min(MAX_CPU_THREADS, count // 2))
+    return max(1, min(MAX_CPU_THREADS, count // 2, max(1, count - 2)))
 
 
 def configure_resource_limits() -> int:
