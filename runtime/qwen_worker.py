@@ -18,6 +18,43 @@ from typing import Any
 
 
 MODES = {"custom-voice", "voice-design", "voice-clone"}
+MAX_CPU_THREADS = 2
+
+
+def resource_thread_count(cpu_count: int | None = None) -> int:
+    """Leave CPU capacity for the desktop instead of letting Torch saturate it."""
+    count = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
+    return max(1, min(MAX_CPU_THREADS, count // 2))
+
+
+def configure_resource_limits() -> int:
+    threads = resource_thread_count()
+    for name in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+    ):
+        os.environ[name] = str(threads)
+    os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+
+    # Inference is background work. Lowering its scheduler priority keeps input,
+    # audio, and the desktop responsive when the CPU is under sustained load.
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            below_normal_priority_class = 0x00004000
+            ctypes.windll.kernel32.SetPriorityClass(
+                ctypes.windll.kernel32.GetCurrentProcess(),
+                below_normal_priority_class,
+            )
+        else:
+            os.nice(10)
+    except (AttributeError, OSError):
+        pass
+    return threads
 
 
 def parse_args() -> argparse.Namespace:
@@ -107,10 +144,14 @@ def main() -> int:
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["HF_DATASETS_OFFLINE"] = "1"
+    threads = configure_resource_limits()
 
     import soundfile
     import torch
     from qwen_tts import Qwen3TTSModel
+
+    torch.set_num_threads(threads)
+    torch.set_num_interop_threads(1)
 
     dtype = getattr(torch, args.dtype)
     model = Qwen3TTSModel.from_pretrained(
@@ -119,6 +160,7 @@ def main() -> int:
         dtype=dtype,
         local_files_only=True,
         attn_implementation="sdpa",
+        low_cpu_mem_usage=True,
     )
     print(json.dumps({"ready": True}), flush=True)
 
