@@ -444,6 +444,15 @@ impl ModelManager {
     }
 
     pub fn select_preset_voice(&self, id: &str, voice_id: &str) -> Result<()> {
+        let path = self.config_path(id);
+        let config = self.preset_voice_config(id, voice_id)?;
+        let temporary = path.with_extension("json.tmp");
+        fs::write(&temporary, serde_json::to_vec_pretty(&config)?)?;
+        fs::rename(temporary, path)?;
+        Ok(())
+    }
+
+    pub fn preset_voice_config(&self, id: &str, voice_id: &str) -> Result<EngineConfig> {
         let entry = CATALOG
             .iter()
             .find(|entry| entry.id == id)
@@ -453,8 +462,8 @@ impl ModelManager {
             .iter()
             .position(|candidate| *candidate == voice_id)
             .context("unknown preset voice for this model")? as u32;
-        let path = self.config_path(id);
-        let mut config = EngineConfig::from_path(&path).context("model is not installed")?;
+        let mut config =
+            EngineConfig::from_path(&self.config_path(id)).context("model is not installed")?;
         match &mut config {
             EngineConfig::SherpaOnnxVits(config) => config.speaker_id = speaker_id,
             EngineConfig::SherpaOnnxKokoro(config) => {
@@ -474,10 +483,7 @@ impl ModelManager {
             EngineConfig::SherpaOnnxPocket(_) => bail!("model does not provide preset voices"),
             EngineConfig::Qwen3Tts(config) => config.speaker = Some(voice_id.into()),
         }
-        let temporary = path.with_extension("json.tmp");
-        fs::write(&temporary, serde_json::to_vec_pretty(&config)?)?;
-        fs::rename(temporary, path)?;
-        Ok(())
+        Ok(config)
     }
 
     fn catalog_update_available(&self, entry: &CatalogEntry) -> bool {

@@ -11,7 +11,7 @@ use axum::{
 };
 use sayit_core::{
     BenchmarkRunner, EngineConfig, ResidentQwenEngine, ResidentSherpaEngine, SherpaOnnxEngine,
-    SynthesisRequest, TextCleaningOptions, clean_text, wav_duration_seconds,
+    SynthesisRequest, TextCleaningOptions, TtsEngine, clean_text, wav_duration_seconds,
 };
 use sayit_protocol::{
     Health, HistoryItem, HuggingFaceModelImportRequest, JobState, LocalModelImportRequest,
@@ -744,6 +744,10 @@ pub fn router(state: ServiceState) -> Router {
         .route(
             "/v1/models/{id}/voices/{voice_id}/select",
             post(select_preset_voice),
+        )
+        .route(
+            "/v1/models/{id}/voices/{voice_id}/preview",
+            post(preview_preset_voice),
         )
         .route("/v1/models/{id}/benchmark", post(benchmark_model))
         .route("/v1/models/{id}", axum::routing::delete(remove_model))
@@ -1799,6 +1803,65 @@ async fn select_preset_voice(
     state.emit("models");
     state.emit("settings");
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn preview_preset_voice(
+    State(state): State<ServiceState>,
+    RoutePath((id, voice_id)): RoutePath<(String, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if state.inner.read().await.settings.active_model_id.as_deref() != Some(id.as_str()) {
+        return Err((
+            StatusCode::CONFLICT,
+            "select this voice's model before previewing it".into(),
+        ));
+    }
+    let voice = state
+        .models
+        .descriptors(Some(&id), &HashMap::new())
+        .into_iter()
+        .find(|model| model.id == id)
+        .and_then(|model| {
+            model
+                .preset_voices
+                .into_iter()
+                .find(|voice| voice.id == voice_id)
+        })
+        .ok_or((StatusCode::NOT_FOUND, "preset voice not found".into()))?;
+    let config = state
+        .models
+        .preset_voice_config(&id, &voice_id)
+        .map_err(unprocessable)?;
+    let preview_id = Uuid::new_v4();
+    let output = state.audio_dir.join(format!("preview-{preview_id}.wav"));
+    let text = format!(
+        "Hello! This is a preview of {}. Choose the voice that makes listening feel effortless.",
+        voice.name
+    );
+    let speaking_pace = state.inner.read().await.settings.speaking_pace;
+    let synthesis_output = output.clone();
+    tokio::task::spawn_blocking(move || {
+        SherpaOnnxEngine::from_config(config).synthesize(&SynthesisRequest {
+            text: &text,
+            output: &synthesis_output,
+            reference_audio: None,
+            speaking_pace,
+        })
+    })
+    .await
+    .map_err(|error| internal_error(error.into()))?
+    .map_err(internal_error)?;
+    let (rate, volume) = {
+        let inner = state.inner.read().await;
+        (inner.settings.playback_rate, inner.settings.volume)
+    };
+    let playback = state
+        .player
+        .play(preview_id, output, rate, volume)
+        .map_err(unprocessable);
+    let _ = fs::remove_file(state.audio_dir.join(format!("preview-{preview_id}.wav")));
+    playback?;
+    state.emit("state");
+    Ok(StatusCode::ACCEPTED)
 }
 
 async fn remove_model(
