@@ -35,14 +35,14 @@ End users do not need Rust, Cargo, Python, or a separate inference-runtime insta
 On current Debian or Ubuntu releases with WebKitGTK 4.1, download the `.deb` and install it normally, then launch sayIt from the application menu:
 
 ```sh
-sudo apt install ./sayit_0.1.0_amd64.deb
+sudo apt install ./sayit_0.1.1_amd64.deb
 ```
 
 For other x86-64 Linux distributions, download the AppImage, make it executable, and run it. Its first launch registers and starts the per-user speech service:
 
 ```sh
-chmod +x sayIt-0.1.0-x86_64.AppImage
-./sayIt-0.1.0-x86_64.AppImage
+chmod +x sayIt-0.1.1-x86_64.AppImage
+./sayIt-0.1.1-x86_64.AppImage
 ```
 
 The portable Linux tarball remains available. Extract it and run its included setup once:

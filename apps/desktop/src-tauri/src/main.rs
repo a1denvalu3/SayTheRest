@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{str::FromStr, sync::RwLock};
+use std::{io::Write, str::FromStr, sync::RwLock};
 use tauri::{
     Emitter, Manager,
     image::Image,
@@ -28,6 +28,7 @@ struct GitHubRelease {
 struct GitHubReleaseAsset {
     name: String,
     browser_download_url: String,
+    size: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -36,6 +37,7 @@ struct UpdateInfo {
     latest_version: String,
     update_available: bool,
     package_name: Option<String>,
+    size_bytes: Option<u64>,
     download_url: String,
     release_url: String,
 }
@@ -107,6 +109,7 @@ async fn check_for_updates() -> Result<UpdateInfo, String> {
             latest_version: current.into(),
             update_available: false,
             package_name: None,
+            size_bytes: None,
             download_url: RELEASES_PAGE.into(),
             release_url: RELEASES_PAGE.into(),
         });
@@ -122,28 +125,126 @@ async fn check_for_updates() -> Result<UpdateInfo, String> {
         latest_version: release.tag_name.clone(),
         update_available: newer_version(&release.tag_name, current)?,
         package_name: asset.map(|asset| asset.name.clone()),
+        size_bytes: asset.map(|asset| asset.size),
         download_url: download_url.into(),
         release_url: release.html_url,
     })
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct UpdateProgress {
+    state: &'static str,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+}
+
+fn safe_update_name(name: &str) -> Result<&str, String> {
+    if name.is_empty()
+        || std::path::Path::new(name)
+            .file_name()
+            .and_then(|value| value.to_str())
+            != Some(name)
+    {
+        return Err("update package name is invalid".into());
+    }
+    Ok(name)
+}
+
 #[tauri::command]
-fn open_release_download(url: String) -> Result<(), String> {
-    validate_release_url(&url)?;
-    #[cfg(target_os = "linux")]
-    let mut command = std::process::Command::new("xdg-open");
-    #[cfg(target_os = "linux")]
-    command.arg(&url);
-    #[cfg(windows)]
-    let mut command = {
-        let mut command = std::process::Command::new("rundll32.exe");
-        command.args(["url.dll,FileProtocolHandler", &url]);
-        command
+async fn install_update(app: tauri::AppHandle, package_name: String) -> Result<(), String> {
+    let package_name = safe_update_name(&package_name)?;
+    let update = check_for_updates().await?;
+    if !update.update_available || update.package_name.as_deref() != Some(package_name) {
+        return Err("the requested package is not the current official update".into());
+    }
+    let url = update.download_url;
+    let expected_suffix = if cfg!(windows) {
+        "Setup-x64.exe"
+    } else {
+        "x86_64.AppImage"
     };
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("cannot open the release download: {error}"))
+    if !package_name.ends_with(expected_suffix) {
+        return Err(format!(
+            "automatic installation requires a {expected_suffix} package"
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    let current_appimage = std::env::var_os("APPIMAGE")
+        .map(std::path::PathBuf::from)
+        .ok_or("automatic installation is available when running the AppImage")?;
+    #[cfg(target_os = "linux")]
+    let download = current_appimage.with_extension("AppImage.download");
+    #[cfg(windows)]
+    let download = {
+        let update_dir = std::env::temp_dir().join(format!("sayit-update-{}", std::process::id()));
+        std::fs::create_dir_all(&update_dir)
+            .map_err(|error| format!("cannot prepare update directory: {error}"))?;
+        update_dir.join(package_name)
+    };
+    let response = reqwest::Client::new()
+        .get(url)
+        .header(reqwest::header::USER_AGENT, "sayIt desktop updater")
+        .send()
+        .await
+        .map_err(|error| format!("cannot download update: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("update download failed: {error}"))?;
+    let total = response.content_length().unwrap_or(0);
+    let mut file = std::fs::File::create(&download)
+        .map_err(|error| format!("cannot create update package: {error}"))?;
+    let mut response = response;
+    let mut downloaded = 0u64;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("update download was interrupted: {error}"))?
+    {
+        file.write_all(&chunk)
+            .map_err(|error| format!("cannot save update package: {error}"))?;
+        downloaded += chunk.len() as u64;
+        let _ = app.emit(
+            "update-progress",
+            UpdateProgress {
+                state: "downloading",
+                downloaded_bytes: downloaded,
+                total_bytes: total,
+            },
+        );
+    }
+    file.sync_all()
+        .map_err(|error| format!("cannot finish update package: {error}"))?;
+    if total > 0 && downloaded != total {
+        return Err("downloaded update size does not match the release asset".into());
+    }
+    let _ = app.emit(
+        "update-progress",
+        UpdateProgress {
+            state: "installing",
+            downloaded_bytes: downloaded,
+            total_bytes: total,
+        },
+    );
+
+    #[cfg(windows)]
+    {
+        std::process::Command::new(&download)
+            .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+            .spawn()
+            .map_err(|error| format!("cannot start update installer: {error}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&download, std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| format!("cannot make update executable: {error}"))?;
+        std::fs::rename(&download, &current_appimage)
+            .map_err(|error| format!("cannot replace current AppImage: {error}"))?;
+        std::process::Command::new(&current_appimage)
+            .spawn()
+            .map_err(|error| format!("cannot restart updated AppImage: {error}"))?;
+    }
+    app.exit(0);
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -996,7 +1097,7 @@ fn main() {
             desktop_settings,
             update_desktop_settings,
             check_for_updates,
-            open_release_download,
+            install_update,
             start_voice_recording,
             voice_recording_status,
             stop_voice_recording,
@@ -1214,18 +1315,22 @@ mod tests {
             GitHubReleaseAsset {
                 name: "sayit-x86_64-pc-windows-msvc.zip".into(),
                 browser_download_url: "https://github.com/example/windows.zip".into(),
+                size: 1,
             },
             GitHubReleaseAsset {
                 name: "sayIt-Setup-x64.exe".into(),
                 browser_download_url: "https://github.com/example/setup.exe".into(),
+                size: 1,
             },
             GitHubReleaseAsset {
                 name: "sayIt-0.2.0-x86_64.AppImage".into(),
                 browser_download_url: "https://github.com/example/appimage".into(),
+                size: 1,
             },
             GitHubReleaseAsset {
                 name: "sayit_0.2.0_amd64.deb".into(),
                 browser_download_url: "https://github.com/example/deb".into(),
+                size: 1,
             },
         ];
         let selected = preferred_release_asset(&assets).unwrap();

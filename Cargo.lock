@@ -3634,7 +3634,7 @@ dependencies = [
 
 [[package]]
 name = "sayit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3647,7 +3647,7 @@ dependencies = [
 
 [[package]]
 name = "sayit-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "hound",
@@ -3662,7 +3662,7 @@ dependencies = [
 
 [[package]]
 name = "sayit-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arboard",
  "ashpd",
@@ -3688,7 +3688,7 @@ dependencies = [
 
 [[package]]
 name = "sayit-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -3697,7 +3697,7 @@ dependencies = [
 
 [[package]]
 name = "sayit-service"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3724,7 +3724,7 @@ dependencies = [
 
 [[package]]
 name = "sayit-service-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",

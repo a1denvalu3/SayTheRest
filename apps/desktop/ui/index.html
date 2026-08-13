@@ -4,10 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>sayIt</title>
+  <script src="theme.js"></script>
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="player.css">
   <link rel="stylesheet" href="history.css">
   <link rel="stylesheet" href="settings.css">
+  <link rel="stylesheet" href="theme.css">
 </head>
 <body>
   <div class="grain" aria-hidden="true"></div>
@@ -59,21 +61,31 @@
       <div class="section-intro"><h2>Make it yours.</h2><p>Speech behavior, storage, and shortcuts.</p></div>
       <div class="settings-dashboard">
         <div class="settings-rail">
+          <article class="studio-card appearance-card">
+            <div class="card-heading"><span>01</span><div><h3>Appearance</h3><p>Paper by day, listening room by night.</p></div></div>
+            <fieldset class="theme-picker">
+              <legend>Color theme</legend>
+              <label><input type="radio" name="color_theme" value="system"><span><i class="theme-swatch system-swatch" aria-hidden="true"></i><strong>System</strong><small>Follow Windows</small></span></label>
+              <label><input type="radio" name="color_theme" value="light"><span><i class="theme-swatch light-swatch" aria-hidden="true"></i><strong>Light</strong><small>Warm paper</small></span></label>
+              <label><input type="radio" name="color_theme" value="dark"><span><i class="theme-swatch dark-swatch" aria-hidden="true"></i><strong>Dark</strong><small>Listening room</small></span></label>
+            </fieldset>
+          </article>
           <form id="shortcut-form" class="studio-card settings-form shortcut-settings">
-            <div class="card-heading"><span>01</span><div><h3>Global shortcuts</h3><p>Changes take effect immediately.</p></div></div>
+            <div class="card-heading"><span>02</span><div><h3>Global shortcuts</h3><p>Changes take effect immediately.</p></div></div>
             <label>Read selection<input name="selection_shortcut" type="text" autocomplete="off" required><small>For example: ctrl+alt+s</small></label>
             <label>Read clipboard<input name="clipboard_shortcut" type="text" autocomplete="off" required><small>For example: ctrl+alt+v</small></label>
             <button type="submit" class="action">Apply shortcuts</button>
           </form>
           <article class="studio-card update-card">
-            <div class="card-heading"><span>03</span><div><h3>Application updates</h3><p>Checked only when you ask.</p></div></div>
-            <p>sayIt contacts the official GitHub releases page and never installs silently.</p>
-            <div class="card-actions"><button id="check-updates" type="button" class="action secondary">Check for updates</button><button id="download-update" type="button" class="action" hidden>Open download</button></div>
-            <p id="update-status" class="status-note" role="status">No update check has been made.</p>
+            <div class="card-heading"><span>04</span><div><h3>Application updates</h3><p>Checked automatically. Installed only when you choose.</p></div></div>
+            <p>sayIt checks the official GitHub release and can replace this app in one step.</p>
+            <div id="update-progress" class="update-progress" hidden><div><span></span></div><small id="update-progress-label">Preparing update…</small></div>
+            <div class="card-actions"><button id="check-updates" type="button" class="action secondary">Check again</button><button id="install-update" type="button" class="action" hidden>Install update</button></div>
+            <p id="update-status" class="status-note" role="status">Checking for updates…</p>
           </article>
         </div>
         <form id="settings-form" class="studio-card settings-form behavior-settings">
-          <div class="card-heading"><span>02</span><div><h3>Speech &amp; storage</h3><p>Defaults for newly generated audio and local history.</p></div></div>
+          <div class="card-heading"><span>03</span><div><h3>Speech &amp; storage</h3><p>Defaults for newly generated audio and local history.</p></div></div>
           <label>Speaking pace<select name="speaking_pace"><option value="0.75">Slower · 0.75×</option><option value="0.9">Slow · 0.9×</option><option value="1">Natural · 1×</option><option value="1.1">Brisk · 1.1×</option><option value="1.25">Fast · 1.25×</option><option value="1.5">Faster · 1.5×</option></select></label>
           <p id="speaking-pace-note" class="field-note">Shapes phoneme timing. Playback speed remains an instant listening control.</p>
           <label>Unload inactive model after<span class="input-with-unit"><input name="model_timeout_minutes" type="number" min="1" max="1440" required><span>minutes</span></span></label>

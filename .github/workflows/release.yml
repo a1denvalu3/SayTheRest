@@ -51,14 +51,14 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          test -x dist/sayIt-0.1.0-x86_64.AppImage
-          test -f dist/sayit_0.1.0_amd64.deb
+          test -x dist/sayIt-0.1.1-x86_64.AppImage
+          test -f dist/sayit_0.1.1_amd64.deb
           test -f dist/sayit-x86_64-unknown-linux-gnu.tar.gz
           tar -tzf dist/sayit-x86_64-unknown-linux-gnu.tar.gz > "$RUNNER_TEMP/portable-files.txt"
           grep -q '/sayit-desktop$' "$RUNNER_TEMP/portable-files.txt"
           grep -q '/runtime/bin/sherpa-onnx-offline-tts$' "$RUNNER_TEMP/portable-files.txt"
           grep -q '/runtime/generative/qwen_worker.py$' "$RUNNER_TEMP/portable-files.txt"
-          dpkg-deb --contents dist/sayit_0.1.0_amd64.deb > "$RUNNER_TEMP/deb-files.txt"
+          dpkg-deb --contents dist/sayit_0.1.1_amd64.deb > "$RUNNER_TEMP/deb-files.txt"
           grep -q '/opt/sayit/sayit-service$' "$RUNNER_TEMP/deb-files.txt"
           grep -q '/usr/lib/systemd/user/sayit-desktop.service$' "$RUNNER_TEMP/deb-files.txt"
       - name: Audit Windows packages
