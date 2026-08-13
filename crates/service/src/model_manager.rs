@@ -228,6 +228,23 @@ const KITTEN_VOICES: &[&str] = &[
     "bella", "jasper", "luna", "bruno", "rosie", "hugo", "kiki", "leo",
 ];
 
+// sherpa-onnx writes the Kitten embeddings male-first, while Kitten's friendly
+// voice list is female-first. Keep the friendlier display order above and map
+// each name to its actual position in voices.bin here.
+const KITTEN_SPEAKER_IDS: &[u32] = &[1, 0, 3, 2, 5, 4, 7, 6];
+
+fn preset_voice_speaker_id(entry: &CatalogEntry, voice_id: &str) -> Option<u32> {
+    let position = entry
+        .preset_voices
+        .iter()
+        .position(|candidate| *candidate == voice_id)?;
+    if entry.preset_voices == KITTEN_VOICES {
+        KITTEN_SPEAKER_IDS.get(position).copied()
+    } else {
+        Some(position as u32)
+    }
+}
+
 fn packaged_qwen_manifest_dir() -> PathBuf {
     let packaged = std::env::current_exe().ok().and_then(|path| {
         path.parent()
@@ -392,12 +409,11 @@ impl ModelManager {
                     preset_voices: entry
                         .preset_voices
                         .iter()
-                        .enumerate()
-                        .map(|(speaker_id, id)| ModelPresetVoice {
+                        .map(|id| ModelPresetVoice {
                             id: (*id).into(),
                             name: preset_voice_name(id),
                             language: preset_voice_language(id).into(),
-                            selected: selected_speaker == Some(speaker_id as u32),
+                            selected: selected_speaker == preset_voice_speaker_id(entry, id),
                         })
                         .collect(),
                 }
@@ -457,11 +473,8 @@ impl ModelManager {
             .iter()
             .find(|entry| entry.id == id)
             .context("unknown curated model")?;
-        let speaker_id = entry
-            .preset_voices
-            .iter()
-            .position(|candidate| *candidate == voice_id)
-            .context("unknown preset voice for this model")? as u32;
+        let speaker_id = preset_voice_speaker_id(entry, voice_id)
+            .context("unknown preset voice for this model")?;
         let mut config =
             EngineConfig::from_path(&self.config_path(id)).context("model is not installed")?;
         match &mut config {
@@ -1889,6 +1902,54 @@ mod tests {
                 .unwrap()
                 .id,
             "bf_vale"
+        );
+    }
+
+    #[test]
+    fn kitten_friendly_names_map_to_sherpa_speaker_ids() {
+        let storage = tempfile::tempdir().unwrap();
+        let model_dir = storage.path().join("kitten-mini-en-v0-8");
+        fs::create_dir_all(model_dir.join("espeak-ng-data")).unwrap();
+        for name in ["model.onnx", "voices.bin", "tokens.txt"] {
+            fs::write(model_dir.join(name), b"test").unwrap();
+        }
+        let config = config_for(
+            "kitten-mini-en-v0-8",
+            &model_dir,
+            Path::new("stale-runtime"),
+        )
+        .unwrap();
+        fs::write(
+            model_dir.join("config.json"),
+            serde_json::to_vec_pretty(&config).unwrap(),
+        )
+        .unwrap();
+        let manager = ModelManager::new(storage.path().into(), None).unwrap();
+
+        let bella = manager
+            .preset_voice_config("kitten-mini-en-v0-8", "bella")
+            .unwrap();
+        let EngineConfig::SherpaOnnxKitten(bella) = bella else {
+            panic!("expected Kitten config")
+        };
+        assert_eq!(bella.speaker_id, 1);
+
+        manager
+            .select_preset_voice("kitten-mini-en-v0-8", "jasper")
+            .unwrap();
+        let descriptor = manager
+            .descriptors(Some("kitten-mini-en-v0-8"), &HashMap::new())
+            .into_iter()
+            .find(|model| model.id == "kitten-mini-en-v0-8")
+            .unwrap();
+        assert_eq!(
+            descriptor
+                .preset_voices
+                .iter()
+                .find(|voice| voice.selected)
+                .unwrap()
+                .id,
+            "jasper"
         );
     }
 
