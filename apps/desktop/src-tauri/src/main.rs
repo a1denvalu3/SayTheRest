@@ -1073,6 +1073,7 @@ fn start_service_event_bridge(app: tauri::AppHandle) {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if args.iter().any(|arg| arg == "--read-selection") {
                 handle_capture(app.clone(), CaptureKind::Selection);
