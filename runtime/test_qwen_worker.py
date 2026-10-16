@@ -1,7 +1,15 @@
+import contextlib
 import importlib.util
+import json
+import subprocess
+import sys
 import tempfile
 import unittest
+import wave
+import weakref
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -9,6 +17,26 @@ SPEC = importlib.util.spec_from_file_location(
 )
 WORKER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(WORKER)
+
+
+class WaveSamples(list):
+    pass
+
+
+class WaveWriter:
+    def __init__(self, path, *, mode, samplerate, channels, subtype):
+        self.samplerate = samplerate
+        self.writer = wave.open(path, "wb")
+        self.writer.setparams((channels, 2, samplerate, 0, "NONE", "NONE"))
+
+    def write(self, samples):
+        self.writer.writeframes(b"\0\0" * len(samples))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.writer.close()
 
 
 class WorkerValidationTests(unittest.TestCase):
@@ -44,6 +72,129 @@ class WorkerValidationTests(unittest.TestCase):
             output = Path(directory) / "nested" / "speech.wav"
             self.assertEqual(WORKER.output_file({"output": str(output)}), output)
             self.assertTrue(output.parent.is_dir())
+
+    def test_damaged_model_config_is_rejected_before_importing_inference_stack(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "config.json").write_text(json.dumps({"engine": "qwen3-tts"}))
+            # Isolated system Python needs none of the heavyweight dependencies:
+            # the damaged config must fail before their imports or allocations.
+            result = subprocess.run(
+                [sys.executable, "-I", SPEC.origin,
+                 "--model", directory, "--mode", "voice-clone"],
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("configuration is missing or damaged", result.stderr)
+            self.assertNotIn("ModuleNotFoundError", result.stderr)
+            self.assertEqual(result.stdout, "")
+
+    def test_pinned_architecture_is_a_valid_tts_config(self):
+        config = (
+            Path(__file__).resolve().parents[1]
+            / "crates/service/data/qwen3-tts-06b-base.config.json"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "config.json").write_bytes(config.read_bytes())
+            WORKER.validate_model_directory(Path(directory))
+
+    def test_text_chunks_preserve_content_and_bound_unbroken_and_multilingual_text(self):
+        for text in ("Hello world. " * 100, "字" * 1000, "x" * 1000, "\nOne.\nTwo!\n" * 100):
+            with self.subTest(text=text[:20]):
+                chunks = list(WORKER.text_chunks(text))
+                self.assertGreater(len(chunks), 1)
+                self.assertTrue(all(
+                    0 < len(chunk) <= WORKER.MAX_CHUNK_CHARACTERS for chunk in chunks
+                ))
+                self.assertEqual("".join("".join(chunks).split()), "".join(text.split()))
+
+
+class WorkerSynthesisTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        self.output = self.directory / "speech.wav"
+        self.reference = self.directory / "voice.wav"
+        self.reference.write_bytes(b"RIFF")
+        self.torch = SimpleNamespace(inference_mode=Mock(side_effect=contextlib.nullcontext))
+        self.soundfile = SimpleNamespace(
+            SoundFile=Mock(side_effect=WaveWriter),
+            info=Mock(return_value=SimpleNamespace(duration=14.5)),
+        )
+        self.model = Mock()
+        self.previous_samples = None
+
+    def generate(self, **options):
+        # Keep only a weak reference: every chunk must be released before the
+        # next inference call, instead of accumulating all waveforms in a list.
+        if self.previous_samples is not None:
+            self.assertIsNone(self.previous_samples())
+        samples = WaveSamples([0.0] * 24)
+        self.previous_samples = weakref.ref(samples)
+        return [samples], 24000
+
+    def request(self, **overrides):
+        return {
+            "text": "A short sentence. " * 30,
+            "output": str(self.output),
+            "reference_audio": str(self.reference),
+            "speaker": "Aiden",
+            "voice_description": "Calm and clear",
+            **overrides,
+        }
+
+    def test_all_modes_stream_bounded_chunks_to_one_wav(self):
+        for mode, method in (
+            ("voice-clone", "generate_voice_clone"),
+            ("voice-design", "generate_voice_design"),
+            ("custom-voice", "generate_custom_voice"),
+        ):
+            with self.subTest(mode=mode):
+                generate = getattr(self.model, method)
+                generate.side_effect = self.generate
+                request = self.request()
+                WORKER.synthesize(self.model, mode, request, self.torch, self.soundfile)
+                self.assertGreater(generate.call_count, 1)
+                for call in generate.call_args_list:
+                    self.assertLessEqual(len(call.kwargs["text"]), WORKER.MAX_CHUNK_CHARACTERS)
+                    self.assertEqual(call.kwargs["max_new_tokens"], WORKER.MAX_NEW_TOKENS)
+                with wave.open(str(self.output)) as reader:
+                    self.assertEqual(reader.getnframes(), generate.call_count * 24)
+                    self.assertEqual(reader.getframerate(), 24000)
+        self.assertEqual(self.model.create_voice_clone_prompt.call_count, 1)
+        prompt = self.model.create_voice_clone_prompt.return_value
+        for call in self.model.generate_voice_clone.call_args_list:
+            self.assertIs(call.kwargs["voice_clone_prompt"], prompt)
+        self.assertEqual(self.torch.inference_mode.call_count, 3)
+
+    def test_failed_chunk_does_not_publish_partial_audio_or_replace_existing_output(self):
+        self.output.write_bytes(b"existing audio")
+        self.model.generate_voice_clone.side_effect = [
+            self.generate(), RuntimeError("inference failed")
+        ]
+        with self.assertRaisesRegex(RuntimeError, "inference failed"):
+            WORKER.synthesize(self.model, "voice-clone", self.request(), self.torch, self.soundfile)
+        self.assertEqual(self.output.read_bytes(), b"existing audio")
+        self.assertEqual(
+            sorted(path.name for path in self.directory.iterdir()), ["speech.wav", "voice.wav"]
+        )
+
+    def test_long_reference_is_rejected_before_prompt_encoding(self):
+        self.soundfile.info.return_value.duration = 3600
+        with self.assertRaisesRegex(ValueError, "at most 15 seconds"):
+            WORKER.synthesize(self.model, "voice-clone", self.request(), self.torch, self.soundfile)
+        self.model.create_voice_clone_prompt.assert_not_called()
+        self.assertFalse(self.output.exists())
+
+    def test_reference_transcript_enables_icl_in_the_reused_prompt(self):
+        self.model.generate_voice_clone.side_effect = self.generate
+        WORKER.synthesize(
+            self.model, "voice-clone", self.request(reference_text="Reference transcript"),
+            self.torch, self.soundfile,
+        )
+        self.model.create_voice_clone_prompt.assert_called_once_with(
+            ref_audio=str(self.reference), ref_text="Reference transcript", x_vector_only_mode=False,
+        )
 
 
 if __name__ == "__main__":

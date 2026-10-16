@@ -349,6 +349,9 @@ impl ServiceState {
                 slot.config_path != config_path || slot.config_bytes != config_bytes
             });
             if reload {
+                // Release the previous model before the replacement allocates
+                // weights; assignment alone keeps both alive during loading.
+                *resident = None;
                 *resident = Some(ResidentEngineSlot {
                     config_path: config_path.clone(),
                     config_bytes,

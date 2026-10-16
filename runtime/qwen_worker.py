@@ -9,16 +9,25 @@ before importing the inference stack.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
+import re
 import sys
+import tempfile
 import traceback
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 
 MODES = {"custom-voice", "voice-design", "voice-clone"}
 MAX_CPU_THREADS = 8
+# The shipped generation_config permits 8192 codec frames (over ten minutes).
+# Bound each generation and write chunks to disk so text length does not set the
+# size of the KV cache, retained hidden states, or decoded waveform in memory.
+MAX_CHUNK_CHARACTERS = 160
+MAX_NEW_TOKENS = 512
 
 
 def resource_thread_count(cpu_count: int | None = None) -> int:
@@ -99,6 +108,40 @@ def output_file(request: dict[str, Any]) -> Path:
     return value
 
 
+def validate_model_directory(model_path: Path) -> None:
+    config = json.loads((model_path / "config.json").read_text(encoding="utf-8"))
+    if (
+        not isinstance(config, dict)
+        or config.get("model_type") != "qwen3_tts"
+        or not isinstance(config.get("talker_config"), dict)
+        or not config["talker_config"]
+    ):
+        # AutoConfig otherwise guesses from the directory name and can select a
+        # much larger generic Qwen3 language model. Reject before importing torch.
+        raise ValueError(
+            "Qwen model configuration is missing or damaged; update the model in sayIt "
+            "to restore its TTS architecture"
+        )
+
+
+def text_chunks(text: str) -> Iterator[str]:
+    remaining = text.strip()
+    while remaining:
+        if len(remaining) <= MAX_CHUNK_CHARACTERS:
+            yield remaining
+            return
+        prefix = remaining[:MAX_CHUNK_CHARACTERS]
+        boundaries = list(re.finditer(r"[.!?;](?:\s|$)|[。！？；]|\n", prefix))
+        end = boundaries[-1].end() if boundaries else 0
+        if not end:
+            spaces = list(re.finditer(r"\s+", prefix))
+            end = spaces[-1].end() if spaces else MAX_CHUNK_CHARACTERS
+        chunk = remaining[:end].strip()
+        if chunk:
+            yield chunk
+        remaining = remaining[end:].lstrip()
+
+
 def synthesize(model: Any, mode: str, request: dict[str, Any], torch: Any, soundfile: Any) -> None:
     text = require_text(request, "text")
     output = output_file(request)
@@ -109,30 +152,53 @@ def synthesize(model: Any, mode: str, request: dict[str, Any], torch: Any, sound
             raise ValueError("seed must be an unsigned 32-bit integer")
         torch.manual_seed(seed)
 
-    if mode == "custom-voice":
-        wavs, sample_rate = model.generate_custom_voice(
-            text=text,
-            language=language,
-            speaker=require_text(request, "speaker"),
-            instruct=optional_text(request, "voice_description") or "",
-        )
-    elif mode == "voice-design":
-        wavs, sample_rate = model.generate_voice_design(
-            text=text,
-            language=language,
-            instruct=require_text(request, "voice_description"),
-        )
-    else:
-        wavs, sample_rate = model.generate_voice_clone(
-            text=text,
-            language=language,
-            ref_audio=local_file(request, "reference_audio"),
-            ref_text=optional_text(request, "reference_text"),
-            x_vector_only_mode=optional_text(request, "reference_text") is None,
-        )
-    soundfile.write(str(output), wavs[0], sample_rate, subtype="PCM_16")
-    if not output.is_file() or output.stat().st_size <= 44:
-        raise RuntimeError("inference did not produce a valid WAV payload")
+    with torch.inference_mode(), tempfile.TemporaryDirectory(
+        prefix=".sayit-qwen-", dir=output.parent
+    ) as temporary, contextlib.ExitStack() as stack:
+        options: dict[str, Any] = {"language": language, "max_new_tokens": MAX_NEW_TOKENS}
+        if mode == "custom-voice":
+            generate = model.generate_custom_voice
+            options["speaker"] = require_text(request, "speaker")
+            options["instruct"] = optional_text(request, "voice_description") or ""
+        elif mode == "voice-design":
+            generate = model.generate_voice_design
+            options["instruct"] = require_text(request, "voice_description")
+        else:
+            generate = model.generate_voice_clone
+            reference = local_file(request, "reference_audio")
+            info = soundfile.info(reference)
+            if not 0 < info.duration <= 15:
+                raise ValueError("reference audio must contain at most 15 seconds of speech")
+            reference_text = optional_text(request, "reference_text")
+            # Reuse just this request's prompt, without retaining tensors from
+            # previous requests or re-encoding the reference for every chunk.
+            options["voice_clone_prompt"] = model.create_voice_clone_prompt(
+                ref_audio=reference,
+                ref_text=reference_text,
+                x_vector_only_mode=reference_text is None,
+            )
+
+        pending = Path(temporary) / "speech.wav"
+        writer = None
+        for chunk in text_chunks(text):
+            wavs, sample_rate = generate(text=chunk, **options)
+            if len(wavs) != 1 or len(wavs[0]) == 0:
+                raise RuntimeError("inference did not produce audio")
+            if writer is None:
+                writer = stack.enter_context(
+                    soundfile.SoundFile(
+                        str(pending), mode="w", samplerate=sample_rate,
+                        channels=1, subtype="PCM_16",
+                    )
+                )
+            elif sample_rate != writer.samplerate:
+                raise RuntimeError("inference changed the sample rate between chunks")
+            writer.write(wavs[0])
+            del wavs
+        stack.close()
+        if not pending.is_file() or pending.stat().st_size <= 44:
+            raise RuntimeError("inference did not produce a valid WAV payload")
+        pending.replace(output)
 
 
 def main() -> int:
@@ -140,28 +206,31 @@ def main() -> int:
     model_path = Path(args.model).expanduser().resolve(strict=True)
     if not model_path.is_dir():
         raise ValueError("model must be a local directory")
+    validate_model_directory(model_path)
 
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["HF_DATASETS_OFFLINE"] = "1"
     threads = configure_resource_limits()
 
-    import soundfile
-    import torch
-    from qwen_tts import Qwen3TTSModel
+    # Libraries occasionally print to stdout; reserve it for the JSON protocol.
+    with contextlib.redirect_stdout(sys.stderr):
+        import soundfile
+        import torch
+        from qwen_tts import Qwen3TTSModel
 
-    torch.set_num_threads(threads)
-    torch.set_num_interop_threads(1)
+        torch.set_num_threads(threads)
+        torch.set_num_interop_threads(1)
 
-    dtype = getattr(torch, args.dtype)
-    model = Qwen3TTSModel.from_pretrained(
-        str(model_path),
-        device_map=args.device,
-        dtype=dtype,
-        local_files_only=True,
-        attn_implementation="sdpa",
-        low_cpu_mem_usage=True,
-    )
+        dtype = getattr(torch, args.dtype)
+        model = Qwen3TTSModel.from_pretrained(
+            str(model_path),
+            device_map=args.device,
+            dtype=dtype,
+            local_files_only=True,
+            attn_implementation="sdpa",
+            low_cpu_mem_usage=True,
+        )
     print(json.dumps({"ready": True}), flush=True)
 
     for line in sys.stdin:
@@ -169,7 +238,8 @@ def main() -> int:
             request = json.loads(line)
             if not isinstance(request, dict):
                 raise ValueError("request must be a JSON object")
-            synthesize(model, args.mode, request, torch, soundfile)
+            with contextlib.redirect_stdout(sys.stderr):
+                synthesize(model, args.mode, request, torch, soundfile)
             print(json.dumps({"ok": True}), flush=True)
         except Exception as error:  # Keep the loaded model alive after a bad request.
             print(

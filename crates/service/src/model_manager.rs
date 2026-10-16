@@ -22,6 +22,13 @@ use std::{
     },
 };
 
+const SAYIT_CONFIG: &str = "sayit-config.json";
+const QWEN_BASE_REVISION: &str = "5d83992436eae1d760afd27aff78a71d676296fc";
+// Original config.json from the immutable catalog revision. Older installers
+// overwrote this architecture with EngineConfig, so repair must work offline.
+// https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/blob/5d83992436eae1d760afd27aff78a71d676296fc/config.json
+const QWEN_BASE_CONFIG: &[u8] = include_bytes!("../data/qwen3-tts-06b-base.config.json");
+
 #[derive(Clone)]
 pub struct ModelManager {
     root: PathBuf,
@@ -204,7 +211,7 @@ const CATALOG: &[CatalogEntry] = &[
         name: "Qwen3 TTS 0.6B Base",
         archive_root: "",
         url: "",
-        sha256: "5d83992436eae1d760afd27aff78a71d676296fc",
+        sha256: QWEN_BASE_REVISION,
         size: 2_516_106_051,
         languages: &[
             "auto", "zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it",
@@ -220,7 +227,7 @@ const CATALOG: &[CatalogEntry] = &[
         },
         preset_voices: &[],
         hf_repository: Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base"),
-        hf_revision: Some("5d83992436eae1d760afd27aff78a71d676296fc"),
+        hf_revision: Some(QWEN_BASE_REVISION),
     },
 ];
 
@@ -310,8 +317,45 @@ impl ModelManager {
             community: Arc::new(Mutex::new(community)),
             qwen_runtime,
         };
+        manager.repair_legacy_qwen_config()?;
         manager.rebind_installed_runtime_paths()?;
         Ok(manager)
+    }
+
+    fn repair_legacy_qwen_config(&self) -> Result<()> {
+        let entry = CATALOG
+            .iter()
+            .find(|entry| entry.id == "qwen3-tts-06b-base")
+            .context("missing Qwen Base catalog entry")?;
+        let directory = self.root.join(entry.id);
+        let path = directory.join("config.json");
+        let Ok(bytes) = fs::read(&path) else {
+            return Ok(());
+        };
+        let Ok(EngineConfig::Qwen3Tts(_)) = serde_json::from_slice::<EngineConfig>(&bytes) else {
+            return Ok(());
+        };
+        let manifest = fs::read(directory.join("catalog-install.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<CatalogInstallManifest>(&bytes).ok());
+        if !manifest.is_some_and(|manifest| {
+            manifest.id == entry.id && Some(manifest.sha256.as_str()) == entry.hf_revision
+        }) {
+            return Ok(());
+        }
+
+        // Preserve the user's settings first. If interrupted here, the next
+        // startup can finish restoring the architecture without losing them.
+        let settings = directory.join(SAYIT_CONFIG);
+        if !settings.is_file() {
+            let temporary = settings.with_extension("json.tmp");
+            fs::write(&temporary, &bytes)?;
+            fs::rename(temporary, &settings)?;
+        }
+        let temporary = directory.join("config.json.repair");
+        fs::write(&temporary, QWEN_BASE_CONFIG)?;
+        fs::rename(temporary, path)?;
+        Ok(())
     }
 
     fn rebind_installed_runtime_paths(&self) -> Result<()> {
@@ -320,7 +364,7 @@ impl ModelManager {
             if !entry.file_type()?.is_dir() {
                 continue;
             }
-            let path = entry.path().join("config.json");
+            let path = self.config_path(&entry.file_name().to_string_lossy());
             if !path.is_file() {
                 continue;
             }
@@ -456,7 +500,13 @@ impl ModelManager {
     }
 
     pub fn config_path(&self, id: &str) -> PathBuf {
-        self.root.join(id).join("config.json")
+        let directory = self.root.join(id);
+        let settings = directory.join(SAYIT_CONFIG);
+        if settings.is_file() {
+            settings
+        } else {
+            directory.join("config.json")
+        }
     }
 
     pub fn select_preset_voice(&self, id: &str, voice_id: &str) -> Result<()> {
@@ -986,21 +1036,7 @@ impl ModelManager {
             }
             self.set_progress(entry.id, DownloadState::Verifying, downloaded, total, None);
             let destination = self.root.join(entry.id);
-            let config = EngineConfig::Qwen3Tts(Qwen3TtsConfig {
-                python: self.qwen_runtime.python(),
-                worker: self.qwen_runtime.worker(),
-                model: destination.clone(),
-                mode: Qwen3TtsMode::VoiceClone,
-                device: "cpu".into(),
-                dtype: "float32".into(),
-                language: "Auto".into(),
-                speaker: None,
-                voice_description: None,
-            });
-            fs::write(
-                staging.join("config.json"),
-                serde_json::to_vec_pretty(&config)?,
-            )?;
+            self.write_qwen_engine_config(&staging, &destination)?;
             fs::write(
                 staging.join("catalog-install.json"),
                 serde_json::to_vec_pretty(&CatalogInstallManifest {
@@ -1009,7 +1045,7 @@ impl ModelManager {
                 })?,
             )?;
             replace_model_directory(&staging, &destination)?;
-            EngineConfig::from_path(&destination.join("config.json"))?;
+            EngineConfig::from_path(&self.config_path(entry.id))?;
             self.set_progress(entry.id, DownloadState::Installed, total, total, None);
             Ok(())
         })();
@@ -1017,6 +1053,31 @@ impl ModelManager {
             let _ = fs::remove_dir_all(staging);
         }
         result
+    }
+
+    fn write_qwen_engine_config(&self, staging: &Path, destination: &Path) -> Result<()> {
+        let architecture: serde_json::Value =
+            serde_json::from_slice(&fs::read(staging.join("config.json"))?)?;
+        anyhow::ensure!(
+            architecture["model_type"] == "qwen3_tts" && architecture["talker_config"].is_object(),
+            "Qwen model is missing its TTS architecture configuration"
+        );
+        let config = EngineConfig::Qwen3Tts(Qwen3TtsConfig {
+            python: self.qwen_runtime.python(),
+            worker: self.qwen_runtime.worker(),
+            model: destination.to_owned(),
+            mode: Qwen3TtsMode::VoiceClone,
+            device: "cpu".into(),
+            dtype: "float32".into(),
+            language: "Auto".into(),
+            speaker: None,
+            voice_description: None,
+        });
+        fs::write(
+            staging.join(SAYIT_CONFIG),
+            serde_json::to_vec_pretty(&config)?,
+        )?;
+        Ok(())
     }
 
     fn install_from(
@@ -1709,6 +1770,126 @@ fn config_for(id: &str, root: &Path, executable: &Path) -> Result<EngineConfig> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn qwen_fixture(storage: &Path) -> (ModelManager, PathBuf) {
+        let manager = ModelManager::new(storage.join("models"), None).unwrap();
+        let directory = manager.root.join("qwen3-tts-06b-base");
+        fs::create_dir_all(&directory).unwrap();
+        let python = manager.qwen_runtime.python();
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        fs::write(python, b"test runtime").unwrap();
+        fs::write(directory.join("config.json"), QWEN_BASE_CONFIG).unwrap();
+        manager
+            .write_qwen_engine_config(&directory, &directory)
+            .unwrap();
+        fs::write(
+            directory.join("catalog-install.json"),
+            serde_json::to_vec(&CatalogInstallManifest {
+                id: "qwen3-tts-06b-base".into(),
+                sha256: QWEN_BASE_REVISION.into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        (manager, directory)
+    }
+
+    #[test]
+    fn qwen_install_preserves_the_upstream_architecture_and_resolves_separate_settings() {
+        let storage = tempfile::tempdir().unwrap();
+        let (manager, directory) = qwen_fixture(storage.path());
+        assert_eq!(
+            fs::read(directory.join("config.json")).unwrap(),
+            QWEN_BASE_CONFIG
+        );
+        let settings = manager.config_path("qwen3-tts-06b-base");
+        assert_eq!(settings, directory.join(SAYIT_CONFIG));
+        let EngineConfig::Qwen3Tts(config) = EngineConfig::from_path(&settings).unwrap() else {
+            panic!("expected Qwen config")
+        };
+        assert_eq!(config.model, directory);
+
+        // Rebinding runtime paths must also write only to the settings sidecar.
+        let mut stale = config;
+        stale.worker = settings.clone(); // A valid file, but not the packaged worker.
+        fs::write(
+            &settings,
+            serde_json::to_vec(&EngineConfig::Qwen3Tts(stale)).unwrap(),
+        )
+        .unwrap();
+        let manager = ModelManager::new(storage.path().join("models"), None).unwrap();
+        let EngineConfig::Qwen3Tts(rebound) = EngineConfig::from_path(&settings).unwrap() else {
+            panic!("expected Qwen config")
+        };
+        assert_eq!(rebound.worker, manager.qwen_runtime.worker());
+        assert_eq!(
+            fs::read(directory.join("config.json")).unwrap(),
+            QWEN_BASE_CONFIG
+        );
+    }
+
+    #[test]
+    fn startup_repairs_overwritten_qwen_architecture_offline_without_changing_weights() {
+        let storage = tempfile::tempdir().unwrap();
+        let (_, directory) = qwen_fixture(storage.path());
+        let settings = directory.join(SAYIT_CONFIG);
+        let legacy = fs::read(&settings).unwrap();
+        fs::remove_file(&settings).unwrap();
+        fs::write(directory.join("config.json"), &legacy).unwrap();
+        fs::write(directory.join("model.safetensors"), b"existing weights").unwrap();
+        for _ in 0..2 {
+            let manager = ModelManager::new(storage.path().join("models"), None).unwrap();
+            assert_eq!(manager.config_path("qwen3-tts-06b-base"), settings);
+            assert_eq!(fs::read(&settings).unwrap(), legacy);
+            assert_eq!(
+                fs::read(directory.join("config.json")).unwrap(),
+                QWEN_BASE_CONFIG
+            );
+            assert_eq!(
+                fs::read(directory.join("model.safetensors")).unwrap(),
+                b"existing weights"
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_qwen_repair_preserves_existing_sidecar_settings() {
+        let storage = tempfile::tempdir().unwrap();
+        let (_, directory) = qwen_fixture(storage.path());
+        let settings = directory.join(SAYIT_CONFIG);
+        let legacy = fs::read(&settings).unwrap();
+        let mut changed: EngineConfig = serde_json::from_slice(&legacy).unwrap();
+        if let EngineConfig::Qwen3Tts(ref mut config) = changed {
+            config.language = "Spanish".into();
+        }
+        let changed = serde_json::to_vec(&changed).unwrap();
+        fs::write(&settings, &changed).unwrap();
+        fs::write(directory.join("config.json"), legacy).unwrap();
+        ModelManager::new(storage.path().join("models"), None).unwrap();
+        assert_eq!(fs::read(settings).unwrap(), changed);
+        assert_eq!(
+            fs::read(directory.join("config.json")).unwrap(),
+            QWEN_BASE_CONFIG
+        );
+    }
+
+    #[test]
+    fn qwen_repair_does_not_guess_the_architecture_of_an_unknown_revision() {
+        let storage = tempfile::tempdir().unwrap();
+        let (_, directory) = qwen_fixture(storage.path());
+        let settings = directory.join(SAYIT_CONFIG);
+        let legacy = fs::read(&settings).unwrap();
+        fs::remove_file(&settings).unwrap();
+        fs::write(directory.join("config.json"), &legacy).unwrap();
+        fs::write(
+            directory.join("catalog-install.json"),
+            br#"{"id":"qwen3-tts-06b-base","sha256":"other-revision"}"#,
+        )
+        .unwrap();
+        ModelManager::new(storage.path().join("models"), None).unwrap();
+        assert!(!settings.exists());
+        assert_eq!(fs::read(directory.join("config.json")).unwrap(), legacy);
+    }
 
     #[test]
     fn catalog_contains_preset_and_cloning_models() {

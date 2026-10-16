@@ -62,21 +62,24 @@ impl ResidentQwenEngine {
             .spawn()
             .with_context(|| format!("failed to start {}", config.python.display()))?;
         let stdin = child.stdin.take().context("Qwen worker has no stdin")?;
-        let mut stdout = BufReader::new(child.stdout.take().context("Qwen worker has no stdout")?);
+        let stdout = BufReader::new(child.stdout.take().context("Qwen worker has no stdout")?);
+        // Own the child before reading its startup response so every failure
+        // below runs Drop and cannot leave an orphan allocating model memory.
+        let mut engine = Self {
+            child,
+            stdin,
+            stdout,
+            config: config.clone(),
+        };
         let mut line = String::new();
         anyhow::ensure!(
-            stdout.read_line(&mut line)? > 0,
+            engine.stdout.read_line(&mut line)? > 0,
             "Qwen worker exited before loading the model"
         );
         let ready: ReadyResponse = serde_json::from_str(&line)
             .context("Qwen worker returned an invalid ready response")?;
         anyhow::ensure!(ready.ready, "Qwen worker did not become ready");
-        Ok(Self {
-            child,
-            stdin,
-            stdout,
-            config: config.clone(),
-        })
+        Ok(engine)
     }
 
     pub fn synthesize(&mut self, request: &SynthesisRequest<'_>) -> Result<()> {
@@ -161,6 +164,36 @@ mod tests {
             voice_description: Some("A calm documentary narrator".into()),
         };
         assert!(matches!(config.mode, Qwen3TtsMode::VoiceDesign));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_startup_kills_and_reaps_the_worker() {
+        let temporary = tempfile::tempdir().unwrap();
+        let worker = temporary.path().join("bad-worker.py");
+        let pid_file = temporary.path().join("pid");
+        std::fs::write(
+            &worker,
+            format!(
+                "import os, pathlib, time\npathlib.Path({:?}).write_text(str(os.getpid()))\nprint('unexpected library output', flush=True)\ntime.sleep(30)\n",
+                pid_file.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let config = Qwen3TtsConfig {
+            python: "/usr/bin/python3".into(),
+            worker,
+            model: temporary.path().into(),
+            mode: Qwen3TtsMode::VoiceClone,
+            device: "cpu".into(),
+            dtype: "float32".into(),
+            language: "English".into(),
+            speaker: None,
+            voice_description: None,
+        };
+        assert!(ResidentQwenEngine::load(&config).is_err());
+        let pid = std::fs::read_to_string(pid_file).unwrap();
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
     }
 
     #[cfg(target_os = "linux")]

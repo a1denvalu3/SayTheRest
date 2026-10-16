@@ -22,6 +22,17 @@ Scoped localhost API ───────────────────�
 - `sayit` is a service client. Direct, one-shot model execution remains available only as a development/diagnostic command.
 - The desktop shell owns the tray, onboarding, windows, global shortcuts, and platform selection adapters. It does not load models. Linux packages supervise it independently from the speech service so a shortcut-host crash is restarted without interrupting synthesis or losing the resident model.
 
+Qwen installations preserve Hugging Face's `config.json` as the model architecture
+and keep sayIt's engine settings in `sayit-config.json`. Startup repairs older
+catalog installations whose architecture was overwritten, using the configuration
+bundled for their exact pinned revision without downloading the weights again.
+The worker checks the architecture before importing the inference stack: otherwise
+Transformers can infer a much larger generic language model from the directory name.
+Generation runs serially in text chunks of at most 160 characters, with at most 512
+new codec frames per chunk, and writes audio incrementally to a temporary WAV.
+Only completed output replaces the destination file. The service releases the old
+resident model before loading its replacement and reaps workers after startup errors.
+
 The desktop toolkit will be selected after a tray/hotkey/accessibility spike passes on Windows, X11, GNOME Wayland, and KDE Wayland. The UI is a compact, editorial audio instrument: typography-led, restrained monochrome surfaces, a single warm playback accent, and a waveform/progress ribbon as its recognizable element. Accessibility, keyboard operation, reduced motion, and high contrast are acceptance requirements.
 
 ## Protocol
