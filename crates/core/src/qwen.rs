@@ -35,6 +35,8 @@ struct WorkerRequest<'a> {
     voice_description: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reference_audio: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reference_text: Option<&'a str>,
 }
 
 impl ResidentQwenEngine {
@@ -98,6 +100,7 @@ impl ResidentQwenEngine {
             reference_audio: request
                 .reference_audio
                 .map(|path| path.to_string_lossy().into_owned()),
+            reference_text: request.reference_text,
         };
         serde_json::to_writer(&mut self.stdin, &payload)?;
         self.stdin.write_all(b"\n")?;
@@ -144,10 +147,12 @@ mod tests {
             speaker: Some("Aiden"),
             voice_description: None,
             reference_audio: None,
+            reference_text: None,
         };
         let value = serde_json::to_value(request).unwrap();
         assert_eq!(value["speaker"], "Aiden");
         assert!(value.get("reference_audio").is_none());
+        assert!(value.get("reference_text").is_none());
     }
 
     #[test]
@@ -233,6 +238,7 @@ for line in sys.stdin:
                     text: "hello",
                     output: &output,
                     reference_audio: None,
+                    reference_text: None,
                     speaking_pace: 1.0,
                 })
                 .unwrap();

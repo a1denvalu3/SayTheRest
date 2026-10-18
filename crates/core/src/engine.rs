@@ -8,6 +8,7 @@ pub struct SynthesisRequest<'a> {
     pub text: &'a str,
     pub output: &'a Path,
     pub reference_audio: Option<&'a Path>,
+    pub reference_text: Option<&'a str>,
     pub speaking_pace: f64,
 }
 
@@ -180,6 +181,7 @@ mod tests {
             text: "hello; still text",
             output: Path::new("out file.wav"),
             reference_audio: None,
+            reference_text: None,
             speaking_pace: 1.25,
         };
         let args = engine.command_args(&request).unwrap();
@@ -208,6 +210,7 @@ mod tests {
             text: "hello",
             output: Path::new("out.wav"),
             reference_audio: None,
+            reference_text: None,
             speaking_pace: 1.0,
         };
         assert!(
@@ -237,6 +240,7 @@ mod tests {
                 text: "hello",
                 output: Path::new("out.wav"),
                 reference_audio: None,
+                reference_text: None,
                 speaking_pace: 1.25,
             })
             .unwrap();
@@ -262,6 +266,7 @@ mod tests {
                 text: "hello",
                 output: Path::new("out.wav"),
                 reference_audio: None,
+                reference_text: None,
                 speaking_pace: 1.25,
             })
             .unwrap();

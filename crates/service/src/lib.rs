@@ -18,7 +18,7 @@ use sayit_protocol::{
     ModelBenchmark, ModelDescriptor, PROTOCOL_VERSION, PinRequest, PlaybackSnapshot,
     PlaybackTextChunk, QueuePolicy, ServiceEvent, ServiceSettings, ServiceSettingsUpdate,
     ServiceSnapshot, SpeechJob, SpeechSource, SpeechSubmission, VoiceCloneRequest, VoiceProfile,
-    VoiceQuality, VoiceRenameRequest, VoiceTuningRequest,
+    VoiceQuality, VoiceRenameRequest, VoiceTranscriptRequest, VoiceTuningRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -322,13 +322,14 @@ impl ServiceState {
             return;
         };
         let output = self.audio_dir.join(format!("{}.wav", job.id));
-        let (reference_audio, speaking_pace, refinement_steps) = {
+        let (reference_audio, reference_text, speaking_pace, refinement_steps) = {
             let inner = self.inner.read().await;
             let voice = job
                 .voice_profile_id
                 .and_then(|id| inner.voices.iter().find(|voice| voice.id == id));
             (
                 voice.map(|voice| PathBuf::from(&voice.reference_audio_path)),
+                voice.and_then(|voice| voice.reference_text.clone()),
                 job.speaking_pace.unwrap_or(inner.settings.speaking_pace),
                 voice.map(|voice| voice.refinement_steps),
             )
@@ -366,6 +367,7 @@ impl ServiceState {
                 text: &text,
                 output: &output,
                 reference_audio: reference_audio.as_deref(),
+                reference_text: reference_text.as_deref(),
                 speaking_pace,
             })?;
             slot.last_used = Instant::now();
@@ -759,6 +761,7 @@ pub fn router(state: ServiceState) -> Router {
         .route("/v1/voices/{id}/select", post(select_voice))
         .route("/v1/voices/{id}/preview", post(preview_voice))
         .route("/v1/voices/{id}/rename", post(rename_voice))
+        .route("/v1/voices/{id}/transcript", post(update_voice_transcript))
         .route("/v1/voices/{id}/tune", post(tune_voice))
         .route("/v1/voices/{id}", axum::routing::delete(delete_voice))
         .route("/v1/history", get(history))
@@ -1362,6 +1365,39 @@ async fn rename_voice(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn validate_reference_text(value: Option<&str>) -> Result<Option<String>, (StatusCode, String)> {
+    let text = value.map(str::trim).filter(|text| !text.is_empty());
+    if text.is_some_and(|text| text.chars().count() > 2000) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "reference transcript must contain at most 2000 characters".into(),
+        ));
+    }
+    Ok(text.map(str::to_owned))
+}
+
+async fn update_voice_transcript(
+    State(state): State<ServiceState>,
+    RoutePath(id): RoutePath<Uuid>,
+    Json(request): Json<VoiceTranscriptRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let reference_text = validate_reference_text(Some(&request.reference_text))?.ok_or((
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "enter the exact words spoken in the reference recording".into(),
+    ))?;
+    let mut inner = state.inner.write().await;
+    let voice = inner
+        .voices
+        .iter_mut()
+        .find(|voice| voice.id == id)
+        .ok_or((StatusCode::NOT_FOUND, "voice profile not found".into()))?;
+    voice.reference_text = Some(reference_text);
+    drop(inner);
+    state.persist().await.map_err(internal_error)?;
+    state.emit("voices");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn tune_voice(
     State(state): State<ServiceState>,
     RoutePath(id): RoutePath<Uuid>,
@@ -1541,6 +1577,13 @@ async fn create_voice(
             "the selected model does not support voice cloning".into(),
         ));
     }
+    let reference_text = validate_reference_text(request.reference_text.as_deref())?;
+    if matches!(&config, EngineConfig::Qwen3Tts(_)) && reference_text.is_none() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Qwen voice cloning requires the exact transcript of the reference recording".into(),
+        ));
+    }
     let name = request.name.trim();
     if name.is_empty() || name.chars().count() > 80 {
         return Err((
@@ -1558,6 +1601,7 @@ async fn create_voice(
         name: name.to_owned(),
         model_id,
         reference_audio_path: destination.display().to_string(),
+        reference_text,
         reference_duration_seconds: quality.trimmed_duration_seconds,
         created_at: chrono::Utc::now(),
         quality,
@@ -1565,6 +1609,7 @@ async fn create_voice(
     };
     state.inner.write().await.voices.push(profile.clone());
     state.persist().await.map_err(internal_error)?;
+    state.emit("voices");
     Ok((StatusCode::CREATED, Json(profile)))
 }
 
@@ -1847,6 +1892,7 @@ async fn preview_preset_voice(
             text: &text,
             output: &synthesis_output,
             reference_audio: None,
+            reference_text: None,
             speaking_pace,
         })
     })
@@ -2446,11 +2492,226 @@ mod tests {
         let request = VoiceCloneRequest {
             name: "Someone else".into(),
             reference_audio_path: "missing.wav".into(),
+            reference_text: None,
             speaker_permission_confirmed: false,
         };
         let error = create_voice(State(state), Json(request)).await.unwrap_err();
         assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(error.1.contains("permission"));
+    }
+
+    fn qwen_voice_test_state(directory: &Path) -> ServiceState {
+        let worker = directory.join("worker.py");
+        fs::write(
+            &worker,
+            r#"import json, pathlib, sys, wave
+print(json.dumps({"ready": True}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    output = pathlib.Path(request["output"])
+    output.with_suffix(".json").write_text(json.dumps(request))
+    with wave.open(str(output), "wb") as wav:
+        wav.setparams((1, 2, 16000, 0, "NONE", "NONE"))
+        wav.writeframes(b"\0\0" * 160)
+    print(json.dumps({"ok": True}), flush=True)
+"#,
+        )
+        .unwrap();
+        let config_path = directory.join("qwen.json");
+        let config = EngineConfig::Qwen3Tts(sayit_core::Qwen3TtsConfig {
+            python: if cfg!(target_os = "linux") {
+                "/usr/bin/python3".into()
+            } else {
+                worker.clone()
+            },
+            worker,
+            model: directory.into(),
+            mode: sayit_core::Qwen3TtsMode::VoiceClone,
+            device: "cpu".into(),
+            dtype: "float32".into(),
+            language: "Auto".into(),
+            speaker: None,
+            voice_description: None,
+        });
+        fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let state = ServiceState::open(directory.join("data"), Some(config_path)).unwrap();
+        state.inner.try_write().unwrap().settings.active_model_id = Some("qwen3-tts".into());
+        write_persisted_state(&state.store_path, &state.inner.try_read().unwrap(), false).unwrap();
+        state
+    }
+
+    #[tokio::test]
+    async fn qwen_voice_creation_requires_a_bounded_nonempty_transcript() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = qwen_voice_test_state(directory.path());
+        // Older clients omit reference_text. They get an actionable validation
+        // error rather than silently creating a less faithful Qwen profile.
+        let request: VoiceCloneRequest = serde_json::from_value(serde_json::json!({
+            "name": "My voice", "reference_audio_path": "missing.wav",
+            "speaker_permission_confirmed": true
+        }))
+        .unwrap();
+        for reference_text in [None, Some(" \n ".into()), Some("字".repeat(2001))] {
+            let error = create_voice(
+                State(state.clone()),
+                Json(VoiceCloneRequest {
+                    reference_text,
+                    ..request.clone()
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+            assert!(error.1.contains("transcript"), "{}", error.1);
+        }
+        assert!(state.inner.read().await.voices.is_empty());
+        assert_eq!(fs::read_dir(&state.voices_dir).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn voice_transcripts_survive_creation_restart_and_editing_legacy_profiles() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = qwen_voice_test_state(directory.path());
+        let source = directory.path().join("reference.wav");
+        let mut writer = hound::WavWriter::create(
+            &source,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for _ in 0..64_000 {
+            writer.write_sample(1000i16).unwrap();
+        }
+        writer.finalize().unwrap();
+        let (_, Json(voice)) = create_voice(
+            State(state.clone()),
+            Json(VoiceCloneRequest {
+                name: "My voice".into(),
+                reference_audio_path: source.display().to_string(),
+                reference_text: Some("  Buenos días. Esta es mi voz.\n ".into()),
+                speaker_permission_confirmed: true,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            voice.reference_text.as_deref(),
+            Some("Buenos días. Esta es mi voz.")
+        );
+        let reopened = ServiceState::open(directory.path().join("data"), None).unwrap();
+        assert_eq!(
+            reopened.inner.read().await.voices[0].reference_text,
+            voice.reference_text
+        );
+
+        // Existing installations have profiles without the new field.
+        let mut legacy = serde_json::to_value(&*reopened.inner.read().await).unwrap();
+        legacy["voices"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("reference_text");
+        fs::write(&state.store_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let legacy_state = ServiceState::open(directory.path().join("data"), None).unwrap();
+        assert!(
+            legacy_state.inner.read().await.voices[0]
+                .reference_text
+                .is_none()
+        );
+        for text in [" \n ".into(), "字".repeat(2001)] {
+            let error = update_voice_transcript(
+                State(legacy_state.clone()),
+                RoutePath(voice.id),
+                Json(VoiceTranscriptRequest {
+                    reference_text: text,
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        let response = router(legacy_state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/voices/{}/transcript", voice.id))
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", legacy_state.api_token),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"reference_text":"  Esta es mi voz original.  "}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let edited = ServiceState::open(directory.path().join("data"), None).unwrap();
+        assert_eq!(
+            edited.inner.read().await.voices[0]
+                .reference_text
+                .as_deref(),
+            Some("Esta es mi voz original.")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn saved_voice_transcript_reaches_qwen_worker_and_does_not_leak_between_profiles() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = qwen_voice_test_state(directory.path());
+        let id = Uuid::new_v4();
+        state.inner.write().await.voices.push(VoiceProfile {
+            id,
+            name: "My voice".into(),
+            model_id: "qwen3-tts".into(),
+            reference_audio_path: "reference.wav".into(),
+            reference_text: Some("Mi voz, con su transcripción exacta.".into()),
+            reference_duration_seconds: 4.0,
+            created_at: chrono::Utc::now(),
+            quality: VoiceQuality::default(),
+            refinement_steps: 5,
+        });
+        state.persist().await.unwrap();
+        let state = ServiceState::open(directory.path().join("data"), None).unwrap();
+        // Startup rebinds packaged runtimes. Restore the test worker instead
+        // of starting the production worker or loading any model weights.
+        fs::copy(
+            directory.path().join("qwen.json"),
+            state.models.config_path("qwen3-tts"),
+        )
+        .unwrap();
+        for transcript in [Some("Mi voz, con su transcripción exacta."), None] {
+            state.inner.write().await.voices[0].reference_text = transcript.map(str::to_owned);
+            let job = SpeechJob {
+                id: Uuid::new_v4(),
+                text: "Text to generate, different from the reference transcript.".into(),
+                source: SpeechSource::Desktop,
+                state: JobState::Synthesizing,
+                created_at: chrono::Utc::now(),
+                error: None,
+                voice_profile_id: Some(id),
+                speaking_pace: None,
+            };
+            // Keep this synthesis out of the playback queue so the test never
+            // opens an audio device. The normal synthesis path still runs.
+            state.process_job(job.clone()).await;
+            let payload: serde_json::Value = serde_json::from_slice(
+                &fs::read(state.audio_dir.join(format!("{}.json", job.id))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(payload["text"], job.text);
+            assert_eq!(payload["reference_audio"], "reference.wav");
+            assert_eq!(
+                payload.get("reference_text").and_then(|v| v.as_str()),
+                transcript
+            );
+        }
     }
 
     #[tokio::test]
@@ -2503,6 +2764,7 @@ mod tests {
             name: "Tunable".into(),
             model_id: "pocket-tts-int8".into(),
             reference_audio_path: "voice.wav".into(),
+            reference_text: None,
             reference_duration_seconds: 4.0,
             created_at: chrono::Utc::now(),
             quality: VoiceQuality::default(),
@@ -2915,6 +3177,7 @@ mod tests {
                 name: "Remembered".into(),
                 model_id: "pocket-tts-int8".into(),
                 reference_audio_path: directory.path().join("voice.wav").display().to_string(),
+                reference_text: None,
                 reference_duration_seconds: 4.0,
                 created_at: chrono::Utc::now(),
                 quality: VoiceQuality::default(),

@@ -196,6 +196,18 @@ class WorkerSynthesisTests(unittest.TestCase):
             ref_audio=str(self.reference), ref_text="Reference transcript", x_vector_only_mode=False,
         )
 
+    def test_legacy_profile_without_transcript_uses_embedding_only_after_icl_request(self):
+        self.model.generate_voice_clone.side_effect = self.generate
+        WORKER.synthesize(
+            self.model, "voice-clone", self.request(reference_text="Exact reference words."),
+            self.torch, self.soundfile,
+        )
+        WORKER.synthesize(self.model, "voice-clone", self.request(), self.torch, self.soundfile)
+        self.assertEqual(self.model.create_voice_clone_prompt.call_count, 2)
+        self.assertEqual(self.model.create_voice_clone_prompt.call_args.kwargs, {
+            "ref_audio": str(self.reference), "ref_text": None, "x_vector_only_mode": True,
+        })
+
 
 if __name__ == "__main__":
     unittest.main()

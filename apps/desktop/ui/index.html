@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="player.css">
   <link rel="stylesheet" href="history.css">
   <link rel="stylesheet" href="settings.css">
+  <link rel="stylesheet" href="voices.css">
   <link rel="stylesheet" href="theme.css">
 </head>
 <body>
@@ -55,7 +56,24 @@
     </section>
 
     <section class="view" id="models-view"><div class="section-intro"><h2>Choose the engine.</h2><p>Download once. Synthesize privately, even offline.</p></div><div id="model-list" class="card-list"></div><details class="community-import"><summary>Import compatible local model</summary><form id="model-import-form" class="studio-card settings-form"><label>Model directory or archive<input name="directory" required placeholder="Folder, .tar.bz2, or .tbz2 containing config.json"></label><p>Archives are unpacked locally with path, file-count, and size checks. Nothing is uploaded.</p><label>Display name<input name="display_name" required maxlength="100"></label><label>License identifier<input name="license" required placeholder="MIT, Apache-2.0, or source terms"></label><label>License URL<input name="license_url" type="url" required placeholder="https://..."></label><label class="consent"><input name="acknowledged" type="checkbox" required><span>I understand this community model is untested and I reviewed its license.</span></label><button type="submit" class="action">Validate and import</button></form></details><details class="community-import"><summary>Import from Hugging Face</summary><form id="hf-import-form" class="studio-card settings-form"><label>Repository ID<input name="repository" required placeholder="namespace/model"></label><label>Revision<input name="revision" placeholder="main or commit/tag"></label><label>Display name<input name="display_name" required maxlength="100"></label><label>License identifier<input name="license" required></label><label>License URL<input name="license_url" type="url" required placeholder="https://huggingface.co/..."></label><label>Access token (only for this request)<input name="access_token" type="password" autocomplete="off"></label><label class="consent"><input name="acknowledged" type="checkbox" required><span>I understand this model is untested and I reviewed its model card and license.</span></label><button type="submit" class="action">Resolve, validate, and import</button></form></details></section>
-    <section class="view" id="voices-view"><div class="section-intro"><h2>A voice, held locally.</h2><p>Record or import a clean 3–15 second sample from a speaker who gave permission.</p></div><form id="voice-form" class="studio-card"><label>Name<input name="name" required maxlength="80" placeholder="Warm narrator"></label><div class="voice-recorder"><div><strong id="recording-time">0.0 sec</strong><span id="recording-state">Use your default microphone</span></div><div class="card-actions"><button id="record-start" type="button" class="action">Record</button><button id="record-stop" type="button" class="action secondary" disabled>Use recording</button><button id="record-cancel" type="button" class="action secondary" disabled>Cancel</button></div></div><label>Or import a reference WAV<input name="path" placeholder="C:\recordings\voice.wav or /home/me/voice.wav"></label><label class="consent"><input name="consent" type="checkbox" required><span>I confirm that the speaker gave permission for their voice to be cloned.</span></label><button type="submit" class="action">Create voice profile</button></form><div id="voice-list" class="card-list compact"></div></section>
+    <section class="view" id="voices-view">
+      <div class="section-intro"><h2>A voice, held locally.</h2><p>Record or import a clean 3–15 second sample from a speaker who gave permission.</p></div>
+      <form id="voice-form" class="studio-card">
+        <label>Name<input name="name" required maxlength="80" placeholder="Warm narrator"></label>
+        <div class="recording-passage" aria-labelledby="recording-passage-title">
+          <strong id="recording-passage-title">Read this passage aloud when recording</strong>
+          <p id="voice-recording-script">The morning light filled the room. I opened the window, took a deep breath, and began reading in my usual voice.</p>
+          <small>Speak naturally and stop after the last word. The microphone records up to 15 seconds.</small>
+        </div>
+        <div class="voice-recorder"><div><strong id="recording-time">0.0 sec</strong><span id="recording-state">Use your default microphone</span></div><div class="card-actions"><button id="record-start" type="button" class="action">Record</button><button id="record-stop" type="button" class="action secondary" disabled>Use recording</button><button id="record-cancel" type="button" class="action secondary" disabled>Cancel</button></div></div>
+        <label>Or import a reference WAV<input name="path" placeholder="C:\recordings\voice.wav or /home/me/voice.wav"></label>
+        <label for="voice-reference-text">Words in the recording<textarea id="voice-reference-text" name="reference_text" rows="4" maxlength="2000" aria-describedby="voice-transcript-note" placeholder="For imported audio, enter exactly what the speaker said, in the same language."></textarea></label>
+        <p id="voice-transcript-note" class="voice-field-note">After recording, check that this text matches what you actually said. For imported audio, enter its exact transcript.</p>
+        <label class="consent"><input name="consent" type="checkbox" required><span>I confirm that the speaker gave permission for their voice to be cloned.</span></label>
+        <button type="submit" class="action">Create voice profile</button>
+      </form>
+      <div id="voice-list" class="card-list compact"></div>
+    </section>
     <section class="view" id="history-view"><div class="section-intro"><h2>What you heard.</h2><p>Your local listening history, ready to revisit.</p></div><label class="search-field">Search history<input id="history-search" type="search" placeholder="Find spoken text"></label><div id="history-list" class="card-list compact"></div></section>
     <section class="view" id="settings-view">
       <div class="section-intro"><h2>Make it yours.</h2><p>Speech behavior, storage, and shortcuts.</p></div>
@@ -99,6 +117,14 @@
     </section>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
   </main>
+  <dialog id="voice-transcript-dialog">
+    <form id="voice-transcript-form" class="studio-card">
+      <h2>Reference transcript</h2>
+      <p class="voice-field-note">Enter the exact words spoken in this profile’s original recording, in the same language. The transcript will be used for newly generated speech.</p>
+      <label for="edit-voice-transcript">Words in the recording<textarea id="edit-voice-transcript" name="reference_text" rows="5" maxlength="2000" required></textarea></label>
+      <div class="card-actions"><button type="submit" class="action">Save transcript</button><button id="cancel-voice-transcript" type="button" class="action secondary">Cancel</button></div>
+    </form>
+  </dialog>
   <dialog id="onboarding"><form method="dialog"><p class="eyebrow">WELCOME</p><h2>Your computer can speak for itself.</h2><ol><li>Choose and download a model. Piper is the quick preset; PocketTTS enables local voice cloning.</li><li>Select text in another app and press <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>S</kbd>.</li><li>Use <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>V</kbd> only when you intentionally want to read the clipboard.</li></ol><p>Everything is processed locally. Voice cloning requires permission from the recorded speaker.</p><button class="action" value="ready">Get started</button></form></dialog>
   <script src="app.js"></script>
 </body>

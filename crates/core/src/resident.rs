@@ -458,6 +458,7 @@ mod tests {
                     text: "Kitten speech runs through the resident native engine.",
                     output: &output,
                     reference_audio: None,
+                    reference_text: None,
                     speaking_pace: 1.0,
                 })
                 .unwrap();

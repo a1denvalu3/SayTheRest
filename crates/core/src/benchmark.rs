@@ -45,6 +45,7 @@ impl BenchmarkRunner {
                 text,
                 output,
                 reference_audio,
+                reference_text: None,
                 speaking_pace: 1.0,
             })?;
             let elapsed = started.elapsed().as_secs_f64();

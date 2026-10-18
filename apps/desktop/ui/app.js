@@ -7,6 +7,8 @@ let historyItems = [];
 let recordingTimer = null;
 let recordingStopping = false;
 let preparedRecordingPath = null;
+let recordingTranscriptAutofilled = false;
+let voiceProfiles = [];
 let scrubbing = false;
 let availableUpdate = null;
 let serviceEventTimer = null;
@@ -77,9 +79,69 @@ function renderModels(models){modelsLoaded=true;modelDownloadActive=models.some(
 async function pollModelProgress(){if(!modelDownloadActive||modelRefreshInFlight||document.querySelector('.nav-item.active')?.dataset.view!=='models')return;modelRefreshInFlight=true;try{renderModels(await get('models'))}catch(error){console.error(error)}finally{modelRefreshInFlight=false}}
 async function modelAction(button){const {model,action}=button.dataset;try{button.disabled=true;if(action==='remove')await del(`models/${model}`);else await post(`models/${model}/${action}`);if(action==='select'){const [models,settings]=await Promise.all([get('models'),get('settings')]);const selected=models.find(candidate=>candidate.id===model);if(selected?.capabilities.voice_cloning&&!settings.active_voice_profile_id){toast('Model selected · choose or create its voice');document.querySelector('[data-view="voices"]').click();return}}toast(action==='install'?'Download started':action==='update'?'Model update started':action==='cancel'?'Download cancellation requested':action==='remove'?'Model removed':action==='unload'?'Model unloaded':action==='benchmark'?'Local benchmark complete':'Model selected');refresh('models')}catch(error){button.disabled=false;toast(String(error))}}
 
-function renderVoices(voices,settings,models){const selected=settings.active_voice_profile_id;const model=models.find(candidate=>candidate.selected);const builtIns=(model?.preset_voices||[]).map(voice=>{const active=!selected&&voice.selected;return `<article class="data-card"><header><h3>${escapeHtml(voice.name)}</h3><div><span class="tag">${escapeHtml(voice.language)}</span>${active?' <span class="tag accent">Selected</span>':''}</div></header><p>Built into ${escapeHtml(model.name)} · processed locally.</p><div class="card-actions"><button class="action" data-preset-model="${escapeHtml(model.id)}" data-preset-voice="${escapeHtml(voice.id)}" data-preset-action="preview">Preview</button>${active?'<button class="action secondary" disabled>In use</button>':`<button class="action secondary" data-preset-model="${escapeHtml(model.id)}" data-preset-voice="${escapeHtml(voice.id)}" data-preset-action="select">Use this voice</button>`}</div></article>`}).join('');const noVoice=!builtIns&&!voices.length?'<p class="empty">This model needs a cloned voice. Record or import a permitted reference sample below.</p>':'';const clones=voices.map(voice=>{const active=voice.id===selected;const quality=voice.quality||{};const issues=(quality.issues||[]).map(issue=>`<li>${escapeHtml(issue)}</li>`).join('');return `<article class="data-card"><header><h3>${escapeHtml(voice.name)}</h3><div><span>${voice.reference_duration_seconds.toFixed(1)} sec</span>${active?' <span class="tag accent">Selected</span>':''}</div></header><p>Local reference profile · created ${new Date(voice.created_at).toLocaleDateString()} · refinement ${voice.refinement_steps||5}/8</p>${quality.sample_rate?`<div class="voice-quality"><strong>${quality.quality_score}/100</strong><span>${Math.round(quality.sample_rate/1000)} kHz · RMS ${quality.rms_dbfs.toFixed(1)} dBFS · clipped ${quality.clipped_sample_percent.toFixed(2)}%</span></div>${issues?`<ul class="quality-issues">${issues}</ul>`:''}`:''}<div class="card-actions"><button class="action" data-voice="${voice.id}" data-voice-action="preview">Preview</button>${active?'<button class="action secondary" disabled>In use</button>':`<button class="action secondary" data-voice="${voice.id}" data-voice-action="select">Use this voice</button>`}<button class="action secondary" data-voice="${voice.id}" data-voice-action="tune" data-refinement-steps="${voice.refinement_steps||5}">Tune</button><button class="action secondary" data-voice="${voice.id}" data-voice-action="rename" data-voice-name="${escapeHtml(voice.name)}">Rename</button>${active?'':`<button class="action secondary danger" data-voice="${voice.id}" data-voice-action="delete">Delete</button>`}</div></article>`}).join('');$('#voice-list').innerHTML=builtIns+noVoice+clones;document.querySelectorAll('[data-voice]').forEach(button=>button.onclick=()=>voiceAction(button));document.querySelectorAll('[data-preset-voice]').forEach(button=>button.onclick=()=>presetVoiceAction(button))}
+function renderVoices(voices,settings,models){
+  voiceProfiles=voices;
+  const selected=settings.active_voice_profile_id;
+  const model=models.find(candidate=>candidate.selected);
+  const usesTranscript=Boolean(model?.id.startsWith('qwen3-tts'));
+  $('#voice-form').elements.reference_text.required=usesTranscript;
+  $('#voice-transcript-note').textContent=usesTranscript
+    ?'Required for Qwen voice cloning. Check every word against your recording. For imported audio, enter its exact transcript in the original language.'
+    :'After recording, check that this text matches what you actually said. A transcript is optional for PocketTTS.';
+  const builtIns=(model?.preset_voices||[]).map(voice=>{
+    const active=!selected&&voice.selected;
+    return `<article class="data-card"><header><h3>${escapeHtml(voice.name)}</h3><div><span class="tag">${escapeHtml(voice.language)}</span>${active?' <span class="tag accent">Selected</span>':''}</div></header><p>Built into ${escapeHtml(model.name)} · processed locally.</p><div class="card-actions"><button class="action" data-preset-model="${escapeHtml(model.id)}" data-preset-voice="${escapeHtml(voice.id)}" data-preset-action="preview">Preview</button>${active?'<button class="action secondary" disabled>In use</button>':`<button class="action secondary" data-preset-model="${escapeHtml(model.id)}" data-preset-voice="${escapeHtml(voice.id)}" data-preset-action="select">Use this voice</button>`}</div></article>`;
+  }).join('');
+  const noVoice=!builtIns&&!voices.length?'<p class="empty">This model needs a cloned voice. Record or import a permitted reference sample below.</p>':'';
+  const clones=voices.map(voice=>{
+    const active=voice.id===selected;
+    const quality=voice.quality||{};
+    const issues=(quality.issues||[]).map(issue=>`<li>${escapeHtml(issue)}</li>`).join('');
+    const transcriptStatus=usesTranscript?`<p>${voice.reference_text?'Transcript saved · used for voice cloning.':'Add the transcript of this recording to improve voice similarity.'}</p>`:'';
+    const tuning=usesTranscript
+      ?`<button class="action secondary" data-voice="${voice.id}" data-voice-action="transcript">${voice.reference_text?'Edit':'Add'} transcript</button>`
+      :`<button class="action secondary" data-voice="${voice.id}" data-voice-action="tune" data-refinement-steps="${voice.refinement_steps||5}">Tune</button>`;
+    return `<article class="data-card"><header><h3>${escapeHtml(voice.name)}</h3><div><span>${voice.reference_duration_seconds.toFixed(1)} sec</span>${active?' <span class="tag accent">Selected</span>':''}</div></header><p>Local reference profile · created ${new Date(voice.created_at).toLocaleDateString()}${usesTranscript?'':` · refinement ${voice.refinement_steps||5}/8`}</p>${transcriptStatus}${quality.sample_rate?`<div class="voice-quality"><strong>${quality.quality_score}/100</strong><span>${Math.round(quality.sample_rate/1000)} kHz · RMS ${quality.rms_dbfs.toFixed(1)} dBFS · clipped ${quality.clipped_sample_percent.toFixed(2)}%</span></div>${issues?`<ul class="quality-issues">${issues}</ul>`:''}`:''}<div class="card-actions"><button class="action" data-voice="${voice.id}" data-voice-action="preview">Preview</button>${active?'<button class="action secondary" disabled>In use</button>':`<button class="action secondary" data-voice="${voice.id}" data-voice-action="select">Use this voice</button>`}${tuning}<button class="action secondary" data-voice="${voice.id}" data-voice-action="rename" data-voice-name="${escapeHtml(voice.name)}">Rename</button>${active?'':`<button class="action secondary danger" data-voice="${voice.id}" data-voice-action="delete">Delete</button>`}</div></article>`;
+  }).join('');
+  $('#voice-list').innerHTML=builtIns+noVoice+clones;
+  document.querySelectorAll('[data-voice]').forEach(button=>button.onclick=()=>voiceAction(button));
+  document.querySelectorAll('[data-preset-voice]').forEach(button=>button.onclick=()=>presetVoiceAction(button));
+}
 async function refreshVoices(){const [voices,settings,models]=await Promise.all([get('voices'),get('settings'),get('models')]);renderVoices(voices,settings,models)}
-async function voiceAction(button){const {voice:id,voiceAction:action,voiceName,refinementSteps}=button.dataset;try{if(action==='delete')await del(`voices/${id}`);else if(action==='rename'){const name=window.prompt('Voice name',voiceName);if(!name)return;await post(`voices/${id}/rename`,{name})}else if(action==='tune'){const steps=window.prompt('Refinement steps (3–8). Higher can improve quality but takes longer.',refinementSteps||'5');if(steps===null)return;await post(`voices/${id}/tune`,{refinement_steps:Number(steps)})}else await post(`voices/${id}/${action}`);toast(action==='preview'?'Voice preview queued':action==='tune'?'Voice refinement saved':'Voice profiles updated');await refreshVoices()}catch(error){toast(String(error))}}
+async function voiceAction(button){
+  const {voice:id,voiceAction:action,voiceName,refinementSteps}=button.dataset;
+  try{
+    if(action==='transcript'){
+      const voice=voiceProfiles.find(voice=>voice.id===id);
+      const form=$('#voice-transcript-form');
+      form.dataset.voiceId=id;
+      form.elements.reference_text.value=voice?.reference_text||'';
+      $('#voice-transcript-dialog').showModal();
+      return;
+    }
+    if(action==='delete')await del(`voices/${id}`);
+    else if(action==='rename'){const name=window.prompt('Voice name',voiceName);if(!name)return;await post(`voices/${id}/rename`,{name})}
+    else if(action==='tune'){const steps=window.prompt('Refinement steps (3–8). Higher can improve quality but takes longer.',refinementSteps||'5');if(steps===null)return;await post(`voices/${id}/tune`,{refinement_steps:Number(steps)})}
+    else await post(`voices/${id}/${action}`);
+    toast(action==='preview'?'Voice preview queued':action==='tune'?'Voice refinement saved':'Voice profiles updated');
+    await refreshVoices();
+  }catch(error){toast(String(error))}
+}
+$('#cancel-voice-transcript').onclick=()=>$('#voice-transcript-dialog').close();
+$('#voice-transcript-form').onsubmit=async event=>{
+  event.preventDefault();
+  const form=event.target;
+  const referenceText=form.elements.reference_text.value.trim();
+  if(!referenceText){toast('Enter the exact words spoken in the recording');return}
+  const button=form.querySelector('[type="submit"]');
+  button.disabled=true;
+  try{
+    await post(`voices/${form.dataset.voiceId}/transcript`,{reference_text:referenceText});
+    $('#voice-transcript-dialog').close();
+    toast('Transcript saved · preview the voice to hear the change');
+    await refreshVoices();
+  }catch(error){toast(String(error))}finally{button.disabled=false}
+};
 async function presetVoiceAction(button){const action=button.dataset.presetAction;try{button.disabled=true;button.textContent=action==='preview'?'Generating…':button.textContent;await post(`models/${button.dataset.presetModel}/voices/${button.dataset.presetVoice}/${action}`);toast(action==='preview'?'Voice preview playing':'Built-in voice selected');if(action==='select')await refreshVoices();else{button.disabled=false;button.textContent='Preview'}}catch(error){button.disabled=false;if(action==='preview')button.textContent='Preview';toast(String(error))}}
 function renderHistory(items){const query=$('#history-search').value.trim().toLocaleLowerCase();const filtered=query?items.filter(item=>item.job.text.toLocaleLowerCase().includes(query)):items;$('#history-list').innerHTML=filtered.length?filtered.map(item=>`<article class="data-card"><header><h3>${item.pinned?'◆ ':''}${escapeHtml(item.job.text.slice(0,96))}${item.job.text.length>96?'…':''}</h3><span>${time(item.duration_seconds)}</span></header><p>${new Date(item.job.created_at).toLocaleString()} · ${escapeHtml(item.job.source)}</p><div class="card-actions"><button class="action" data-history="${item.job.id}" data-history-action="replay" ${item.audio_path?'':'disabled'}>Replay</button><button class="action secondary" data-history="${item.job.id}" data-history-action="regenerate">Regenerate</button><button class="action secondary" data-history="${item.job.id}" data-history-action="export" ${item.audio_path?'':'disabled'}>Export WAV</button><button class="action secondary" data-history="${item.job.id}" data-history-action="pin" data-pinned="${item.pinned}">${item.pinned?'Unpin':'Pin'}</button><button class="action secondary danger" data-history="${item.job.id}" data-history-action="delete">Delete</button></div></article>`).join(''):`<p class="empty">${query?'No history matches your search.':'Your listening history is empty.'}</p>`;document.querySelectorAll('[data-history]').forEach(button=>button.onclick=()=>historyAction(button))}
 async function historyAction(button){const {history:id,historyAction:action,pinned}=button.dataset;try{if(action==='delete')await del(`history/${id}`);else if(action==='pin')await post(`history/${id}/pin`,{pinned:pinned!=='true'});else if(action==='export'){const item=historyItems.find(entry=>entry.job.id===id);const destination=await saveFile({defaultPath:`sayit-${id}.wav`,filters:[{name:'WAV audio',extensions:['wav']}]});if(!destination)return;await invoke('export_history',{source:item.audio_path,destination})}else await post(`history/${id}/${action}`);toast(action==='replay'?'Replaying archived audio':action==='regenerate'?'Fresh audio queued':action==='export'?'WAV exported':'History updated');historyItems=await get('history');renderHistory(historyItems)}catch(error){toast(String(error))}}
@@ -99,13 +161,89 @@ $('#timeline').onchange=async event=>{try{await post('playback/seek',{seconds:Nu
 $('#timeline').onblur=()=>{scrubbing=false};
 $('#rate').onchange=event=>post('playback/rate',{rate:Number(event.target.value)}).catch(error=>toast(String(error)));
 $('#volume').onchange=event=>post('playback/volume',{volume:Number(event.target.value)}).catch(error=>toast(String(error)));
-function setRecordingUi(status){const active=status.recording;$('#record-start').disabled=active;$('#record-stop').disabled=!active;$('#record-cancel').disabled=!active;$('#recording-time').textContent=`${status.elapsed_seconds.toFixed(1)} sec`;$('#recording-state').textContent=active?'Recording locally… speak one or two natural sentences':'Use your default microphone'}
+function setRecordingUi(status){
+  const active=status.recording;
+  $('#record-start').disabled=active;
+  $('#record-stop').disabled=!active;
+  $('#record-cancel').disabled=!active;
+  $('#voice-form').elements.path.readOnly=active;
+  $('#voice-form').elements.reference_text.readOnly=active;
+  $('#voice-form').querySelector('[type="submit"]').disabled=active;
+  $('#recording-time').textContent=`${status.elapsed_seconds.toFixed(1)} sec`;
+  $('#recording-state').textContent=active?'Recording locally… read the passage above':'Use your default microphone';
+}
 async function pollRecording(){try{const status=await invoke('voice_recording_status');setRecordingUi(status);if(status.recording&&status.elapsed_seconds>=status.maximum_seconds-.1)await finishRecording()}catch(error){clearInterval(recordingTimer);recordingTimer=null;toast(String(error))}}
-async function finishRecording(){if(recordingStopping)return;recordingStopping=true;try{const result=await invoke('stop_voice_recording');clearInterval(recordingTimer);recordingTimer=null;preparedRecordingPath=result.path;$('#voice-form').elements.path.value=result.path;setRecordingUi({recording:false,elapsed_seconds:result.duration_seconds});$('#record-cancel').disabled=false;$('#record-cancel').textContent='Discard';$('#recording-state').textContent='Recording ready · create the voice profile to analyze it';toast('Recording ready for quality analysis')}catch(error){toast(String(error))}finally{recordingStopping=false}}
-$('#record-start').onclick=async()=>{try{if(preparedRecordingPath)await invoke('discard_voice_recording',{path:preparedRecordingPath});const status=await invoke('start_voice_recording');preparedRecordingPath=null;$('#record-cancel').textContent='Cancel';$('#voice-form').elements.path.value='';setRecordingUi(status);recordingTimer=setInterval(pollRecording,100)}catch(error){toast(String(error))}};
+async function finishRecording(){
+  if(recordingStopping)return;
+  recordingStopping=true;
+  try{
+    const result=await invoke('stop_voice_recording');
+    clearInterval(recordingTimer);recordingTimer=null;
+    preparedRecordingPath=result.path;
+    $('#voice-form').elements.path.value=result.path;
+    setRecordingUi({recording:false,elapsed_seconds:result.duration_seconds});
+    $('#record-cancel').disabled=false;$('#record-cancel').textContent='Discard';
+    $('#recording-state').textContent=result.duration_seconds>=14.9
+      ?'15-second limit reached · make sure the transcript only includes words captured'
+      :'Recording ready · check the transcript matches what you said';
+    toast('Recording ready · review the transcript before saving');
+  }catch(error){toast(String(error))}finally{recordingStopping=false}
+}
+$('#record-start').onclick=async()=>{
+  try{
+    if(preparedRecordingPath)await invoke('discard_voice_recording',{path:preparedRecordingPath});
+    const status=await invoke('start_voice_recording');
+    preparedRecordingPath=null;
+    $('#record-cancel').textContent='Cancel';
+    $('#voice-form').elements.path.value='';
+    $('#voice-form').elements.reference_text.value=$('#voice-recording-script').textContent.trim();
+    recordingTranscriptAutofilled=true;
+    setRecordingUi(status);
+    recordingTimer=setInterval(pollRecording,100);
+  }catch(error){toast(String(error))}
+};
 $('#record-stop').onclick=finishRecording;
-$('#record-cancel').onclick=async()=>{try{if(preparedRecordingPath){await invoke('discard_voice_recording',{path:preparedRecordingPath});preparedRecordingPath=null;$('#voice-form').elements.path.value=''}else await invoke('cancel_voice_recording');clearInterval(recordingTimer);recordingTimer=null;$('#record-cancel').textContent='Cancel';setRecordingUi({recording:false,elapsed_seconds:0});toast('Recording discarded')}catch(error){toast(String(error))}};
-$('#voice-form').onsubmit=async event=>{event.preventDefault();const data=new FormData(event.target);const path=String(data.get('path')).trim();if(!path){toast('Record a sample or choose a reference WAV first');return}try{await post('voices',{name:data.get('name'),reference_audio_path:path,speaker_permission_confirmed:data.get('consent')==='on'});if(path===preparedRecordingPath)invoke('discard_voice_recording',{path}).catch(console.error);preparedRecordingPath=null;event.target.reset();setRecordingUi({recording:false,elapsed_seconds:0});toast('Voice profile created');await refreshVoices()}catch(error){toast(String(error))}};
+$('#voice-form').elements.reference_text.oninput=()=>{recordingTranscriptAutofilled=false};
+$('#voice-form').elements.path.oninput=event=>{
+  if(recordingTranscriptAutofilled&&event.target.value.trim()!==preparedRecordingPath){
+    $('#voice-form').elements.reference_text.value='';
+    recordingTranscriptAutofilled=false;
+  }
+};
+$('#record-cancel').onclick=async()=>{
+  try{
+    if(preparedRecordingPath){await invoke('discard_voice_recording',{path:preparedRecordingPath});preparedRecordingPath=null}
+    else await invoke('cancel_voice_recording');
+    $('#voice-form').elements.path.value='';
+    $('#voice-form').elements.reference_text.value='';
+    recordingTranscriptAutofilled=false;
+    clearInterval(recordingTimer);recordingTimer=null;
+    $('#record-cancel').textContent='Cancel';
+    setRecordingUi({recording:false,elapsed_seconds:0});
+    toast('Recording discarded');
+  }catch(error){toast(String(error))}
+};
+$('#voice-form').onsubmit=async event=>{
+  event.preventDefault();
+  const form=event.target;
+  const data=new FormData(form);
+  const path=String(data.get('path')).trim();
+  const referenceText=String(data.get('reference_text')).trim();
+  if(!path){toast('Record a sample or choose a reference WAV first');return}
+  if(form.elements.reference_text.required&&!referenceText){toast('Enter the exact words spoken in the recording');return}
+  const button=form.querySelector('[type="submit"]');
+  button.disabled=true;
+  try{
+    await post('voices',{name:data.get('name'),reference_audio_path:path,reference_text:referenceText||null,speaker_permission_confirmed:data.get('consent')==='on'});
+    if(preparedRecordingPath)invoke('discard_voice_recording',{path:preparedRecordingPath}).catch(console.error);
+    preparedRecordingPath=null;
+    recordingTranscriptAutofilled=false;
+    form.reset();
+    setRecordingUi({recording:false,elapsed_seconds:0});
+    toast('Voice profile created · choose “Use this voice” to select it');
+    await refreshVoices();
+  }catch(error){toast(String(error))}finally{button.disabled=false}
+};
 $('#history-search').oninput=()=>renderHistory(historyItems);
 $('#settings-form').onsubmit=async event=>{event.preventDefault();const data=new FormData(event.target);try{const settings=await post('settings',{speaking_pace:event.target.elements.speaking_pace.disabled?null:Number(data.get('speaking_pace')),model_unload_delay_seconds:Number(data.get('model_timeout_minutes'))*60,history_retention_days:Number(data.get('history_retention_days')),history_quota_bytes:Number(data.get('history_quota_mb'))*1048576,long_text_confirmation_characters:Number(data.get('long_text_characters')),text_cleaning:{enabled:data.get('cleaning_enabled')==='on',strip_markdown:data.get('strip_markdown')==='on',strip_html:data.get('strip_html')==='on',strip_code_blocks:data.get('strip_code_blocks')==='on',strip_special_characters:data.get('strip_special_characters')==='on',normalize_whitespace:data.get('normalize_whitespace')==='on'}});renderSettings(settings);toast('Settings saved')}catch(error){toast(String(error))}};
 async function checkForUpdates(manual=false){const button=$('#check-updates');button.disabled=true;if(manual)$('#update-status').textContent='Checking the official GitHub release…';try{availableUpdate=await invoke('check_for_updates');const install=$('#install-update');install.hidden=!availableUpdate.update_available;if(availableUpdate.update_available){install.textContent=`Install ${availableUpdate.latest_version}`;$('#update-status').textContent=`${availableUpdate.latest_version} is ready${availableUpdate.size_bytes?` · ${Math.round(availableUpdate.size_bytes/1048576)} MB`:''}.`}else{$('#update-status').textContent=`You are up to date · version ${availableUpdate.current_version}.`}}catch(error){availableUpdate=null;$('#install-update').hidden=true;$('#update-status').textContent=`Automatic check failed · ${String(error)}`;if(manual)toast('Update check failed')}finally{button.disabled=false}}

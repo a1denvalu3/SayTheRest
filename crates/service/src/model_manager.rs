@@ -1961,6 +1961,7 @@ mod tests {
                 text: "sayIt now runs Qwen voice cloning locally and offline.",
                 output: &output,
                 reference_audio: Some(&reference),
+                reference_text: None,
                 speaking_pace: 1.0,
             })
             .unwrap();

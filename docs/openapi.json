@@ -12,6 +12,23 @@
       "controlToken": { "type": "http", "scheme": "bearer", "description": "Read/write per-user token." }
     },
     "schemas": {
+      "VoiceCloneRequest": {
+        "type": "object",
+        "required": ["name", "reference_audio_path", "speaker_permission_confirmed"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "reference_audio_path": { "type": "string", "description": "Local 16-bit PCM WAV containing 3–15 seconds of speech after silence trimming." },
+          "reference_text": { "type": ["string", "null"], "maxLength": 2000, "description": "Exact words spoken in the reference audio, in its original language. Required and nonblank for new Qwen profiles; optional for PocketTTS. Stored locally with the profile and supplied to Qwen for full audio-and-text conditioning." },
+          "speaker_permission_confirmed": { "type": "boolean", "const": true }
+        }
+      },
+      "VoiceTranscriptRequest": {
+        "type": "object",
+        "required": ["reference_text"],
+        "properties": {
+          "reference_text": { "type": "string", "minLength": 1, "maxLength": 2000, "description": "Exact transcript of this profile's original recording. Must be nonblank; surrounding whitespace is trimmed. Applies to future generations. Older profiles without this field continue to use embedding-only Qwen cloning until a transcript is added." }
+        }
+      },
       "ServiceSettingsUpdate": {
         "type": "object",
         "additionalProperties": false,
@@ -62,8 +79,9 @@
     "/models/{id}": { "delete": { "security": [{ "controlToken": [] }], "summary": "Remove a model", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Removed" } } } },
     "/voices": {
       "get": { "summary": "List local voice profiles", "responses": { "200": { "description": "Voices" } } },
-      "post": { "security": [{ "controlToken": [] }], "summary": "Clone a voice with affirmative speaker permission", "responses": { "201": { "description": "Created" } } }
+      "post": { "security": [{ "controlToken": [] }], "summary": "Create a voice profile with speaker permission and a matching reference transcript", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VoiceCloneRequest" } } } }, "responses": { "201": { "description": "Created profile, including reference_text" }, "422": { "description": "Invalid reference audio, permission, or transcript; Qwen requires a nonblank transcript" } } }
     },
+    "/voices/{id}/transcript": { "post": { "security": [{ "controlToken": [] }], "summary": "Add or correct a saved voice profile's reference transcript", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string", "format": "uuid" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VoiceTranscriptRequest" } } } }, "responses": { "204": { "description": "Transcript saved for future generations" }, "404": { "description": "Voice profile not found" }, "422": { "description": "Transcript is blank or too long" } } } },
     "/voices/{id}/{action}": { "post": { "security": [{ "controlToken": [] }], "summary": "Select, preview, rename, or tune a voice", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string" } }, { "in": "path", "name": "action", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Applied" }, "202": { "description": "Preview queued" } } } },
     "/voices/{id}": { "delete": { "security": [{ "controlToken": [] }], "summary": "Delete a voice profile", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Deleted" } } } },
     "/history": { "get": { "summary": "List local history", "responses": { "200": { "description": "History" } } } },

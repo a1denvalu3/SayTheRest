@@ -168,6 +168,9 @@ enum VoiceAction {
     Clone {
         name: String,
         reference_wav: PathBuf,
+        /// Exact words spoken in the reference WAV (required for Qwen cloning).
+        #[arg(long)]
+        reference_text: Option<String>,
         /// Confirm the recorded speaker granted permission for voice cloning.
         #[arg(long)]
         speaker_permission_confirmed: bool,
@@ -181,6 +184,11 @@ enum VoiceAction {
     Rename {
         id: uuid::Uuid,
         name: String,
+    },
+    /// Add or correct the transcript of an existing voice's reference audio.
+    Transcript {
+        id: uuid::Uuid,
+        reference_text: String,
     },
     Tune {
         id: uuid::Uuid,
@@ -314,6 +322,7 @@ fn main() -> Result<()> {
                 Some(VoiceAction::Clone {
                     name,
                     reference_wav,
+                    reference_text,
                     speaker_permission_confirmed,
                 }),
         } => post_and_print(
@@ -322,6 +331,7 @@ fn main() -> Result<()> {
             Some(serde_json::json!({
                 "name": name,
                 "reference_audio_path": reference_wav,
+                "reference_text": reference_text,
                 "speaker_permission_confirmed": speaker_permission_confirmed
             })),
         )?,
@@ -337,6 +347,13 @@ fn main() -> Result<()> {
             base,
             &format!("voices/{id}/rename"),
             Some(serde_json::json!({"name": name})),
+        )?,
+        Command::Voices {
+            action: Some(VoiceAction::Transcript { id, reference_text }),
+        } => post_and_print(
+            base,
+            &format!("voices/{id}/transcript"),
+            Some(serde_json::json!({"reference_text": reference_text})),
         )?,
         Command::Voices {
             action:
@@ -418,6 +435,7 @@ fn main() -> Result<()> {
                 text: &text,
                 output: &output,
                 reference_audio: None,
+                reference_text: None,
                 speaking_pace: pace,
             })?;
             println!("{}", output.display());
@@ -629,6 +647,23 @@ mod tests {
             &["sayit", "models"],
             &["sayit", "models", "install", "piper-en-us-lessac-medium"],
             &["sayit", "voices"],
+            &[
+                "sayit",
+                "voices",
+                "clone",
+                "My voice",
+                "voice.wav",
+                "--reference-text",
+                "The exact words in the recording.",
+                "--speaker-permission-confirmed",
+            ],
+            &[
+                "sayit",
+                "voices",
+                "transcript",
+                "00000000-0000-0000-0000-000000000001",
+                "The corrected reference transcript.",
+            ],
             &["sayit", "history"],
             &["sayit", "pause"],
             &["sayit", "resume"],

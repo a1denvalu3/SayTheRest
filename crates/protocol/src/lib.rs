@@ -304,6 +304,8 @@ pub struct DownloadSnapshot {
 pub struct VoiceCloneRequest {
     pub name: String,
     pub reference_audio_path: String,
+    #[serde(default)]
+    pub reference_text: Option<String>,
     pub speaker_permission_confirmed: bool,
 }
 
@@ -314,6 +316,8 @@ pub struct VoiceProfile {
     #[serde(default)]
     pub model_id: String,
     pub reference_audio_path: String,
+    #[serde(default)]
+    pub reference_text: Option<String>,
     pub reference_duration_seconds: f64,
     pub created_at: DateTime<Utc>,
     #[serde(default)]
@@ -341,6 +345,11 @@ pub struct VoiceQuality {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct VoiceRenameRequest {
     pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct VoiceTranscriptRequest {
+    pub reference_text: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
