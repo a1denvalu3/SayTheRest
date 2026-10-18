@@ -13,6 +13,13 @@ regex.workspace = true
 unicode-normalization.workspace = true
 libloading.workspace = true
 hound.workspace = true
+bzip2.workspace = true
+flate2.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+zip.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

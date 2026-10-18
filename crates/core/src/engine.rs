@@ -1,5 +1,6 @@
 use crate::EngineConfig;
 use anyhow::{Context, Result, bail};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -15,16 +16,28 @@ pub struct SynthesisRequest<'a> {
 pub trait TtsEngine {
     fn synthesize(&self, request: &SynthesisRequest<'_>) -> Result<()>;
     fn name(&self) -> &'static str;
+    fn startup_ms(&self) -> f64 {
+        0.0
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct SherpaOnnxEngine {
     config: EngineConfig,
+    environment: Vec<(OsString, OsString)>,
 }
 
 impl SherpaOnnxEngine {
     pub fn from_config(config: EngineConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            environment: Vec::new(),
+        }
+    }
+
+    pub fn with_environment(mut self, environment: Vec<(OsString, OsString)>) -> Self {
+        self.environment = environment;
+        self
     }
 
     fn arg(name: &str, path: &Path) -> String {
@@ -133,12 +146,25 @@ impl TtsEngine for SherpaOnnxEngine {
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         let executable = self.executable();
-        let status = Command::new(&executable)
+        let result = Command::new(&executable)
             .args(self.command_args(request)?)
-            .status()
+            .envs(self.environment.iter().cloned())
+            .output()
             .with_context(|| format!("failed to start {}", executable.display()))?;
-        if !status.success() {
-            bail!("sherpa-onnx exited with {status}");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        eprint!("{stderr}");
+        if !result.status.success() {
+            bail!(
+                "sherpa-onnx exited with {}: {}",
+                result.status,
+                stderr.trim()
+            );
+        }
+        if self.config.provider() == "cuda" && stderr.to_lowercase().contains("fallback to cpu") {
+            bail!(
+                "CUDA execution provider fell back to CPU: {}",
+                stderr.trim()
+            );
         }
         if !request.output.is_file() {
             bail!(
@@ -163,6 +189,30 @@ impl TtsEngine for SherpaOnnxEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn successful_cuda_process_that_reports_cpu_fallback_is_not_advertised_as_gpu() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("fake-tts");
+        std::fs::write(&executable, "#!/bin/sh\necho 'Available providers: CPUExecutionProvider. Fallback to cpu!' >&2\nexit 0\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config: EngineConfig = serde_json::from_value(serde_json::json!({
+            "engine": "sherpa-onnx-vits", "executable": executable, "model": "model", "tokens": "tokens", "provider": "cuda"
+        })).unwrap();
+        let output = directory.path().join("speech.wav");
+        let error = SherpaOnnxEngine::from_config(config)
+            .synthesize(&SynthesisRequest {
+                text: "Hello",
+                output: &output,
+                reference_audio: None,
+                reference_text: None,
+                speaking_pace: 1.0,
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("fell back to CPU"));
+    }
     use crate::{KittenConfig, KokoroConfig, PocketConfig, VitsConfig};
 
     #[test]

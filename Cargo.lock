@@ -3674,14 +3674,20 @@ name = "sayit-core"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "bzip2",
+ "flate2",
  "hound",
  "html-escape",
  "libloading 0.8.9",
  "regex",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
+ "tar",
  "tempfile",
  "unicode-normalization",
+ "zip",
 ]
 
 [[package]]

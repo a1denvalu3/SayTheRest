@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail};
 use bzip2::read::BzDecoder;
 use sayit_core::{
     EngineConfig, KittenConfig, KokoroConfig, PocketConfig, Qwen3TtsConfig, Qwen3TtsMode,
-    SherpaOnnxEngine, VitsConfig,
+    SherpaOnnxEngine, TorchFlavor, VitsConfig,
 };
 use sayit_protocol::{
     DownloadSnapshot, DownloadState, ModelBenchmark, ModelCapabilities, ModelDescriptor,
@@ -196,7 +196,7 @@ const CATALOG: &[CatalogEntry] = &[
         license: "Apache-2.0",
         license_url: "https://huggingface.co/KittenML/kitten-tts-nano-0.8-fp32",
         quality_note: "Extremely compact English speech with eight voices; quality is intentionally modest.",
-        speed_note: "INT8 CPU model optimized for the smallest download and memory footprint.",
+        speed_note: "INT8 model optimized for the smallest download and memory footprint.",
         capabilities: ModelCapabilitiesStatic {
             preset_voices: true,
             voice_cloning: false,
@@ -219,7 +219,7 @@ const CATALOG: &[CatalogEntry] = &[
         license: "Apache-2.0",
         license_url: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base",
         quality_note: "Expressive multilingual zero-shot voice cloning and random voice sampling.",
-        speed_note: "Large generative model; installs a managed CPU inference runtime and should be benchmarked locally.",
+        speed_note: "Large generative model; automatically selects compatible GPU acceleration and should be benchmarked locally.",
         capabilities: ModelCapabilitiesStatic {
             preset_voices: false,
             voice_cloning: true,
@@ -423,6 +423,7 @@ impl ModelManager {
                         EngineConfig::Qwen3Tts(_) => None,
                     });
                 ModelDescriptor {
+                    inference_device: None,
                     id: entry.id.into(),
                     name: entry.name.into(),
                     languages: entry
@@ -469,6 +470,7 @@ impl ModelManager {
                 .unwrap()
                 .iter()
                 .map(|entry| ModelDescriptor {
+                    inference_device: None,
                     id: entry.id.clone(),
                     name: entry.name.clone(),
                     languages: Vec::new(),
@@ -953,8 +955,10 @@ impl ModelManager {
             .hf_revision
             .context("missing immutable Hugging Face revision")?;
         self.set_progress(entry.id, DownloadState::Installing, 0, entry.size, None);
-        if !self.qwen_runtime.is_installed() {
-            self.qwen_runtime.install()?;
+        // Always retain a small working CPU baseline. GPU preparation follows
+        // the user's inference policy at first use, not at model download.
+        if !self.qwen_runtime.is_installed_for(TorchFlavor::Cpu) {
+            self.qwen_runtime.install_for(TorchFlavor::Cpu)?;
         }
         if cancelled.load(Ordering::Relaxed) {
             bail!("download cancelled");
@@ -1063,12 +1067,12 @@ impl ModelManager {
             "Qwen model is missing its TTS architecture configuration"
         );
         let config = EngineConfig::Qwen3Tts(Qwen3TtsConfig {
-            python: self.qwen_runtime.python(),
+            python: self.qwen_runtime.python_for(TorchFlavor::Cpu),
             worker: self.qwen_runtime.worker(),
             model: destination.to_owned(),
             mode: Qwen3TtsMode::VoiceClone,
-            device: "cpu".into(),
-            dtype: "float32".into(),
+            device: "auto".into(),
+            dtype: "auto".into(),
             language: "Auto".into(),
             speaker: None,
             voice_description: None,
@@ -1775,7 +1779,7 @@ mod tests {
         let manager = ModelManager::new(storage.join("models"), None).unwrap();
         let directory = manager.root.join("qwen3-tts-06b-base");
         fs::create_dir_all(&directory).unwrap();
-        let python = manager.qwen_runtime.python();
+        let python = manager.qwen_runtime.python_for(TorchFlavor::Cpu);
         fs::create_dir_all(python.parent().unwrap()).unwrap();
         fs::write(python, b"test runtime").unwrap();
         fs::write(directory.join("config.json"), QWEN_BASE_CONFIG).unwrap();

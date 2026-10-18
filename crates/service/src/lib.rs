@@ -10,15 +10,16 @@ use axum::{
     routing::{get, post},
 };
 use sayit_core::{
-    BenchmarkRunner, EngineConfig, ResidentQwenEngine, ResidentSherpaEngine, SherpaOnnxEngine,
-    SynthesisRequest, TextCleaningOptions, TtsEngine, clean_text, wav_duration_seconds,
+    BenchmarkRunner, EngineConfig, InferenceRuntime, ManagedEngine, SynthesisRequest,
+    TextCleaningOptions, TtsEngine, clean_text, wav_duration_seconds,
 };
 use sayit_protocol::{
-    Health, HistoryItem, HuggingFaceModelImportRequest, JobState, LocalModelImportRequest,
-    ModelBenchmark, ModelDescriptor, PROTOCOL_VERSION, PinRequest, PlaybackSnapshot,
-    PlaybackTextChunk, QueuePolicy, ServiceEvent, ServiceSettings, ServiceSettingsUpdate,
-    ServiceSnapshot, SpeechJob, SpeechSource, SpeechSubmission, VoiceCloneRequest, VoiceProfile,
-    VoiceQuality, VoiceRenameRequest, VoiceTranscriptRequest, VoiceTuningRequest,
+    Health, HistoryItem, HuggingFaceModelImportRequest, InferenceDeviceStatus, JobState,
+    LocalModelImportRequest, ModelBenchmark, ModelDescriptor, PROTOCOL_VERSION, PinRequest,
+    PlaybackSnapshot, PlaybackTextChunk, QueuePolicy, ServiceEvent, ServiceSettings,
+    ServiceSettingsUpdate, ServiceSnapshot, SpeechJob, SpeechSource, SpeechSubmission,
+    VoiceCloneRequest, VoiceProfile, VoiceQuality, VoiceRenameRequest, VoiceTranscriptRequest,
+    VoiceTuningRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -61,35 +62,24 @@ pub struct ServiceState {
     events: broadcast::Sender<ServiceEvent>,
     event_sequence: Arc<AtomicU64>,
     resident_engine: Arc<Mutex<Option<ResidentEngineSlot>>>,
+    inference_runtime: InferenceRuntime,
+    last_inference_device: Arc<Mutex<Option<InferenceDeviceStatus>>>,
 }
 
 struct ResidentEngineSlot {
     config_path: PathBuf,
     config_bytes: Vec<u8>,
-    engine: ResidentEngine,
+    engine: ManagedEngine,
     last_used: Instant,
 }
 
-enum ResidentEngine {
-    Sherpa(ResidentSherpaEngine),
-    Qwen(ResidentQwenEngine),
-}
-
-impl ResidentEngine {
-    fn load(config: &EngineConfig) -> Result<Self> {
-        match config {
-            EngineConfig::Qwen3Tts(config) => {
-                ResidentQwenEngine::load(config).map(ResidentEngine::Qwen)
-            }
-            _ => ResidentSherpaEngine::load(config).map(ResidentEngine::Sherpa),
-        }
-    }
-
-    fn synthesize(&mut self, request: &SynthesisRequest<'_>) -> Result<()> {
-        match self {
-            Self::Sherpa(engine) => engine.synthesize(request),
-            Self::Qwen(engine) => engine.synthesize(request),
-        }
+fn inference_device(engine: &ManagedEngine) -> InferenceDeviceStatus {
+    let device = engine.device();
+    InferenceDeviceStatus {
+        provider: device.provider,
+        device: device.device,
+        dtype: device.dtype,
+        fallback_reason: device.fallback_reason,
     }
 }
 
@@ -232,6 +222,8 @@ impl ServiceState {
         }
         let (events, _) = broadcast::channel(256);
         Ok(Self {
+            inference_runtime: InferenceRuntime::new(&data_dir),
+            last_inference_device: Arc::new(Mutex::new(None)),
             inner: Arc::new(RwLock::new(inner)),
             notify: Arc::new(Notify::new()),
             store_path,
@@ -263,7 +255,9 @@ impl ServiceState {
             interval.tick().await;
             let timeout =
                 Duration::from_secs(self.inner.read().await.settings.model_unload_delay_seconds);
-            let mut resident = self.resident_engine.lock().unwrap();
+            let Ok(mut resident) = self.resident_engine.try_lock() else {
+                continue;
+            };
             if resident
                 .as_ref()
                 .is_some_and(|slot| slot.last_used.elapsed() >= timeout)
@@ -322,7 +316,7 @@ impl ServiceState {
             return;
         };
         let output = self.audio_dir.join(format!("{}.wav", job.id));
-        let (reference_audio, reference_text, speaking_pace, refinement_steps) = {
+        let (reference_audio, reference_text, speaking_pace, refinement_steps, prefer_gpu) = {
             let inner = self.inner.read().await;
             let voice = job
                 .voice_profile_id
@@ -332,10 +326,13 @@ impl ServiceState {
                 voice.and_then(|voice| voice.reference_text.clone()),
                 job.speaking_pace.unwrap_or(inner.settings.speaking_pace),
                 voice.map(|voice| voice.refinement_steps),
+                inner.settings.compute_device != "cpu",
             )
         };
         let text = job.text.clone();
         let resident_engine = self.resident_engine.clone();
+        let runtime = self.inference_runtime.clone();
+        let last_device = self.last_inference_device.clone();
         let synthesis = tokio::task::spawn_blocking(move || -> Result<(PathBuf, f64)> {
             let mut config = EngineConfig::from_path(&config_path)?;
             if let (EngineConfig::SherpaOnnxPocket(pocket), Some(steps)) =
@@ -345,6 +342,7 @@ impl ServiceState {
             }
             let mut config_bytes = fs::read(&config_path)?;
             config_bytes.extend_from_slice(&refinement_steps.unwrap_or_default().to_le_bytes());
+            config_bytes.push(u8::from(prefer_gpu));
             let mut resident = resident_engine.lock().unwrap();
             let reload = resident.as_ref().is_none_or(|slot| {
                 slot.config_path != config_path || slot.config_bytes != config_bytes
@@ -356,20 +354,22 @@ impl ServiceState {
                 *resident = Some(ResidentEngineSlot {
                     config_path: config_path.clone(),
                     config_bytes,
-                    engine: ResidentEngine::load(&config)?,
+                    engine: ManagedEngine::load(&config, &runtime, prefer_gpu)?,
                     last_used: Instant::now(),
                 });
             }
             let slot = resident
                 .as_mut()
                 .context("resident engine was not loaded")?;
-            slot.engine.synthesize(&SynthesisRequest {
+            let result = slot.engine.synthesize(&SynthesisRequest {
                 text: &text,
                 output: &output,
                 reference_audio: reference_audio.as_deref(),
                 reference_text: reference_text.as_deref(),
                 speaking_pace,
-            })?;
+            });
+            *last_device.lock().unwrap() = Some(inference_device(&slot.engine));
+            result?;
             slot.last_used = Instant::now();
             let duration = wav_duration_seconds(&output)?;
             Ok((output, duration))
@@ -878,6 +878,7 @@ async fn snapshot(State(state): State<ServiceState>) -> Json<ServiceSnapshot> {
     let current_title = speech_title(&spoken_text);
     let spoken_chunks = playback_text_chunks(&spoken_text, player.duration_seconds);
     Json(ServiceSnapshot {
+        inference_device: state.last_inference_device.lock().unwrap().clone(),
         protocol_version: PROTOCOL_VERSION,
         active_model_id: inner.settings.active_model_id.clone(),
         queue_depth: inner
@@ -1145,6 +1146,16 @@ async fn update_settings(
     Json(update): Json<ServiceSettingsUpdate>,
 ) -> Result<Json<ServiceSettings>, (StatusCode, String)> {
     if update
+        .compute_device
+        .as_deref()
+        .is_some_and(|device| !matches!(device, "auto" | "cpu"))
+    {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "compute device must be auto or cpu".into(),
+        ));
+    }
+    if update
         .playback_rate
         .is_some_and(|value| !(0.5..=3.0).contains(&value))
     {
@@ -1208,6 +1219,13 @@ async fn update_settings(
         ));
     }
     let mut inner = state.inner.write().await;
+    let compute_changed = update
+        .compute_device
+        .as_ref()
+        .is_some_and(|value| *value != inner.settings.compute_device);
+    if let Some(value) = update.compute_device {
+        inner.settings.compute_device = value;
+    }
     if let Some(value) = update.playback_rate {
         inner.settings.playback_rate = value;
     }
@@ -1234,6 +1252,13 @@ async fn update_settings(
     }
     let settings = inner.settings.clone();
     drop(inner);
+    if compute_changed {
+        if let Ok(mut resident) = state.resident_engine.try_lock() {
+            *resident = None;
+        }
+        *state.last_inference_device.lock().unwrap() = None;
+        state.inference_runtime.reset_failures();
+    }
     state
         .player
         .set_rate(settings.playback_rate)
@@ -1415,7 +1440,9 @@ async fn tune_voice(
     };
     voice.refinement_steps = request.refinement_steps;
     drop(inner);
-    *state.resident_engine.lock().unwrap() = None;
+    if let Ok(mut resident) = state.resident_engine.try_lock() {
+        *resident = None;
+    }
     state.persist().await.map_err(internal_error)?;
     state.emit("voices");
     Ok(StatusCode::NO_CONTENT)
@@ -1594,7 +1621,12 @@ async fn create_voice(
     let source = PathBuf::from(&request.reference_audio_path);
     let id = Uuid::new_v4();
     let destination = state.voices_dir.join(format!("{id}.wav"));
-    let quality = analyze_and_trim_voice(&source, &destination)
+    let maximum_seconds = if matches!(&config, EngineConfig::Qwen3Tts(_)) {
+        45.0
+    } else {
+        15.0
+    };
+    let quality = analyze_and_trim_voice(&source, &destination, maximum_seconds)
         .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
     let profile = VoiceProfile {
         id,
@@ -1619,14 +1651,14 @@ async fn models(State(state): State<ServiceState>) -> Json<Vec<ModelDescriptor>>
         .models
         .descriptors(inner.settings.active_model_id.as_deref(), &inner.benchmarks);
     drop(inner);
-    let resident_path = state
-        .resident_engine
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|slot| slot.config_path.clone());
+    let resident = state.resident_engine.try_lock().ok();
     for model in &mut models {
-        model.resident = resident_path.as_ref() == Some(&state.models.config_path(&model.id));
+        if let Some(slot) = resident.as_deref().and_then(Option::as_ref)
+            && slot.config_path == state.models.config_path(&model.id)
+        {
+            model.resident = true;
+            model.inference_device = Some(inference_device(&slot.engine));
+        }
     }
     Json(models)
 }
@@ -1712,30 +1744,56 @@ async fn benchmark_model(
 ) -> Result<Json<ModelBenchmark>, (StatusCode, String)> {
     let config_path = state.models.config_path(&id);
     let config = EngineConfig::from_path(&config_path).map_err(unprocessable)?;
-    let reference = {
+    let (reference, reference_text, prefer_gpu) = {
         let inner = state.inner.read().await;
-        inner
+        let voice_id = inner
             .settings
-            .active_voice_profile_id
-            .and_then(|voice_id| inner.voices.iter().find(|voice| voice.id == voice_id))
-            .map(|voice| PathBuf::from(&voice.reference_audio_path))
+            .voice_profile_by_model
+            .get(&id)
+            .copied()
+            .flatten()
+            .or_else(|| {
+                (inner.settings.active_model_id.as_deref() == Some(id.as_str()))
+                    .then_some(inner.settings.active_voice_profile_id)
+                    .flatten()
+            });
+        let voice = voice_id.and_then(|voice_id| {
+            inner
+                .voices
+                .iter()
+                .find(|voice| voice.id == voice_id && voice.model_id == id)
+        });
+        (
+            voice.map(|voice| PathBuf::from(&voice.reference_audio_path)),
+            voice.and_then(|voice| voice.reference_text.clone()),
+            inner.settings.compute_device != "cpu",
+        )
     };
-    if matches!(&config, EngineConfig::SherpaOnnxPocket(_)) && reference.is_none() {
+    let requires_reference = matches!(&config, EngineConfig::SherpaOnnxPocket(_))
+        || matches!(&config, EngineConfig::Qwen3Tts(qwen) if matches!(qwen.mode, sayit_core::Qwen3TtsMode::VoiceClone));
+    if requires_reference && reference.is_none() {
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
-            "select a cloned voice before benchmarking PocketTTS".into(),
+            "select a cloned voice before benchmarking this model".into(),
         ));
     }
     let output = state.audio_dir.join(format!("benchmark-{id}.wav"));
+    let runtime = state.inference_runtime.clone();
+    let last_device = state.last_inference_device.clone();
+    let resident_engine = state.resident_engine.clone();
     let report = tokio::task::spawn_blocking(move || {
-        let engine = SherpaOnnxEngine::from_config(config);
+        let mut resident = resident_engine.lock().unwrap();
+        *resident = None;
+        let engine = ManagedEngine::load(&config, &runtime, prefer_gpu)?;
         let result = BenchmarkRunner::run_with_reference(
             &engine,
             "The quick brown fox jumps over the lazy dog.",
             &output,
             3,
             reference.as_deref(),
+            reference_text.as_deref(),
         );
+        *last_device.lock().unwrap() = Some(inference_device(&engine));
         let _ = fs::remove_file(&output);
         result
     })
@@ -1785,7 +1843,9 @@ async fn select_model(
     let config = state.models.config_path(&id);
     EngineConfig::from_path(&config).map_err(unprocessable)?;
     *state.engine_config_path.write().await = Some(config);
-    *state.resident_engine.lock().unwrap() = None;
+    if let Ok(mut resident) = state.resident_engine.try_lock() {
+        *resident = None;
+    }
     let mut inner = state.inner.write().await;
     inner.settings.active_model_id = Some(id.clone());
     let selected = inner
@@ -1811,7 +1871,12 @@ async fn unload_model(
     RoutePath(id): RoutePath<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let config = state.models.config_path(&id);
-    let mut resident = state.resident_engine.lock().unwrap();
+    let mut resident = state.resident_engine.try_lock().map_err(|_| {
+        (
+            StatusCode::CONFLICT,
+            "inference is busy; stop playback or wait before unloading".into(),
+        )
+    })?;
     if resident
         .as_ref()
         .is_some_and(|slot| slot.config_path == config)
@@ -1833,10 +1898,10 @@ async fn select_preset_voice(
         .map_err(unprocessable)?;
     let config_path = state.models.config_path(&id);
     {
-        let mut resident = state.resident_engine.lock().unwrap();
-        if resident
-            .as_ref()
-            .is_some_and(|slot| slot.config_path == config_path)
+        if let Ok(mut resident) = state.resident_engine.try_lock()
+            && resident
+                .as_ref()
+                .is_some_and(|slot| slot.config_path == config_path)
         {
             *resident = None;
         }
@@ -1886,15 +1951,24 @@ async fn preview_preset_voice(
         voice.name
     );
     let speaking_pace = state.inner.read().await.settings.speaking_pace;
+    let prefer_gpu = state.inner.read().await.settings.compute_device != "cpu";
+    let runtime = state.inference_runtime.clone();
+    let last_device = state.last_inference_device.clone();
+    let resident_engine = state.resident_engine.clone();
     let synthesis_output = output.clone();
     tokio::task::spawn_blocking(move || {
-        SherpaOnnxEngine::from_config(config).synthesize(&SynthesisRequest {
+        let mut resident = resident_engine.lock().unwrap();
+        *resident = None;
+        let engine = ManagedEngine::load(&config, &runtime, prefer_gpu)?;
+        let result = engine.synthesize(&SynthesisRequest {
             text: &text,
             output: &synthesis_output,
             reference_audio: None,
             reference_text: None,
             speaking_pace,
-        })
+        });
+        *last_device.lock().unwrap() = Some(inference_device(&engine));
+        result
     })
     .await
     .map_err(|error| internal_error(error.into()))?
@@ -2055,6 +2129,7 @@ async fn submit_job(
 fn analyze_and_trim_voice(
     source: &std::path::Path,
     destination: &std::path::Path,
+    maximum_seconds: f64,
 ) -> Result<VoiceQuality> {
     let mut reader = hound::WavReader::open(source).context("cannot read reference WAV")?;
     let spec = reader.spec();
@@ -2089,8 +2164,8 @@ fn analyze_and_trim_voice(
     let trimmed = &mono[start..end];
     let trimmed_duration = trimmed.len() as f64 / spec.sample_rate as f64;
     anyhow::ensure!(
-        (3.0..=15.0).contains(&trimmed_duration),
-        "usable speech after silence trimming must be 3 to 15 seconds; received {trimmed_duration:.2} seconds"
+        (3.0..=maximum_seconds).contains(&trimmed_duration),
+        "usable speech after silence trimming must be 3 to {maximum_seconds:.0} seconds; received {trimmed_duration:.2} seconds"
     );
     let scale = i16::MAX as f64;
     let peak = trimmed
@@ -2509,7 +2584,7 @@ print(json.dumps({"ready": True}), flush=True)
 for line in sys.stdin:
     request = json.loads(line)
     output = pathlib.Path(request["output"])
-    output.with_suffix(".json").write_text(json.dumps(request))
+    pathlib.Path(sys.argv[sys.argv.index("--model") + 1], "last-request.json").write_text(json.dumps(request))
     with wave.open(str(output), "wb") as wav:
         wav.setparams((1, 2, 16000, 0, "NONE", "NONE"))
         wav.writeframes(b"\0\0" * 160)
@@ -2702,7 +2777,7 @@ for line in sys.stdin:
             // opens an audio device. The normal synthesis path still runs.
             state.process_job(job.clone()).await;
             let payload: serde_json::Value = serde_json::from_slice(
-                &fs::read(state.audio_dir.join(format!("{}.json", job.id))).unwrap(),
+                &fs::read(directory.path().join("last-request.json")).unwrap(),
             )
             .unwrap();
             assert_eq!(payload["text"], job.text);
@@ -2712,6 +2787,57 @@ for line in sys.stdin:
                 transcript
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn benchmark_uses_its_models_saved_reference_without_switching_active_model() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = qwen_voice_test_state(directory.path());
+        let id = Uuid::new_v4();
+        {
+            let mut inner = state.inner.write().await;
+            inner.settings.active_model_id = Some("piper-en-us-lessac-medium".into());
+            inner.settings.active_voice_profile_id = None;
+            inner
+                .settings
+                .voice_profile_by_model
+                .insert("qwen3-tts".into(), Some(id));
+            inner.voices.push(VoiceProfile {
+                id,
+                name: "Reference".into(),
+                model_id: "qwen3-tts".into(),
+                reference_audio_path: "reference.wav".into(),
+                reference_text: Some("Exact reference words.".into()),
+                reference_duration_seconds: 4.0,
+                created_at: chrono::Utc::now(),
+                quality: VoiceQuality::default(),
+                refinement_steps: 5,
+            });
+        }
+        let Json(report) = benchmark_model(State(state.clone()), RoutePath("qwen3-tts".into()))
+            .await
+            .unwrap();
+        assert_eq!(report.iterations, 3);
+        let request: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.path().join("last-request.json")).unwrap())
+                .unwrap();
+        assert_eq!(request["reference_audio"], "reference.wav");
+        assert_eq!(request["reference_text"], "Exact reference words.");
+        assert_eq!(
+            state.inner.read().await.settings.active_model_id.as_deref(),
+            Some("piper-en-us-lessac-medium")
+        );
+        assert_eq!(
+            state
+                .last_inference_device
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .provider,
+            "cpu"
+        );
     }
 
     #[tokio::test]
@@ -2813,7 +2939,7 @@ for line in sys.stdin:
             writer.write_sample(sample).unwrap();
         }
         writer.finalize().unwrap();
-        let quality = analyze_and_trim_voice(&source, &destination).unwrap();
+        let quality = analyze_and_trim_voice(&source, &destination, 15.0).unwrap();
         assert!(destination.is_file());
         assert!((4.1..=4.3).contains(&quality.trimmed_duration_seconds));
         assert_eq!(quality.sample_rate, 16_000);
@@ -2926,6 +3052,7 @@ for line in sys.stdin:
         let directory = tempfile::tempdir().unwrap();
         let state = ServiceState::open(directory.path().to_owned(), None).unwrap();
         let update = ServiceSettingsUpdate {
+            compute_device: Some("cpu".into()),
             history_quota_bytes: Some(64 * 1_048_576),
             history_retention_days: Some(90),
             long_text_confirmation_characters: Some(4_000),
@@ -2943,7 +3070,59 @@ for line in sys.stdin:
         assert_eq!(settings.history_retention_days, 90);
         assert_eq!(settings.long_text_confirmation_characters, 4_000);
         assert_eq!(settings.speaking_pace, 1.25);
+        assert_eq!(settings.compute_device, "cpu");
         assert!(!settings.text_cleaning.strip_code_blocks);
+    }
+
+    #[tokio::test]
+    async fn invalid_compute_device_is_rejected_without_changing_policy() {
+        let state = ServiceState::default();
+        let error = update_settings(
+            State(state.clone()),
+            Json(ServiceSettingsUpdate {
+                compute_device: Some("invented-gpu".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(state.inner.read().await.settings.compute_device, "auto");
+    }
+
+    #[test]
+    fn longer_qwen_references_preserve_pocket_limits_and_remain_bounded() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("reference.wav");
+        let destination = directory.path().join("trimmed.wav");
+        for seconds in [31, 46] {
+            let mut writer = hound::WavWriter::create(
+                &source,
+                hound::WavSpec {
+                    channels: 1,
+                    sample_rate: 16000,
+                    bits_per_sample: 16,
+                    sample_format: hound::SampleFormat::Int,
+                },
+            )
+            .unwrap();
+            for _ in 0..16000 * seconds {
+                writer.write_sample(1000i16).unwrap();
+            }
+            writer.finalize().unwrap();
+            let result = analyze_and_trim_voice(&source, &destination, 45.0);
+            if seconds == 31 {
+                assert_eq!(result.unwrap().trimmed_duration_seconds, 31.0);
+            } else {
+                assert!(result.unwrap_err().to_string().contains("3 to 45"));
+            }
+            assert!(
+                analyze_and_trim_voice(&source, &destination, 15.0)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("3 to 15")
+            );
+        }
     }
 
     #[tokio::test]

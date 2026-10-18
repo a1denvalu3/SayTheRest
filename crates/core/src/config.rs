@@ -109,10 +109,10 @@ fn default_steps() -> usize {
     5
 }
 fn default_qwen_device() -> String {
-    "cpu".into()
+    "auto".into()
 }
 fn default_qwen_dtype() -> String {
-    "float32".into()
+    "auto".into()
 }
 fn default_qwen_language() -> String {
     "Auto".into()
@@ -122,7 +122,7 @@ fn default_executable() -> PathBuf {
     "sherpa-onnx-offline-tts".into()
 }
 fn default_provider() -> String {
-    "cpu".into()
+    "auto".into()
 }
 fn default_threads() -> usize {
     std::thread::available_parallelism()
@@ -131,6 +131,41 @@ fn default_threads() -> usize {
 }
 
 impl EngineConfig {
+    pub fn provider(&self) -> &str {
+        match self {
+            Self::SherpaOnnxVits(c) => &c.provider,
+            Self::SherpaOnnxPocket(c) => &c.provider,
+            Self::SherpaOnnxKokoro(c) => &c.provider,
+            Self::SherpaOnnxKitten(c) => &c.provider,
+            Self::Qwen3Tts(c) => &c.device,
+        }
+    }
+
+    pub fn set_sherpa_provider(&mut self, provider: &str, executable: Option<&Path>) {
+        let (target, binary) = match self {
+            Self::SherpaOnnxVits(c) => (&mut c.provider, &mut c.executable),
+            Self::SherpaOnnxPocket(c) => (&mut c.provider, &mut c.executable),
+            Self::SherpaOnnxKokoro(c) => (&mut c.provider, &mut c.executable),
+            Self::SherpaOnnxKitten(c) => (&mut c.provider, &mut c.executable),
+            Self::Qwen3Tts(_) => return,
+        };
+        *target = provider.into();
+        if let Some(path) = executable {
+            *binary = path.into();
+        }
+    }
+
+    pub fn cpu(&self) -> Self {
+        let mut config = self.clone();
+        if let Self::Qwen3Tts(qwen) = &mut config {
+            qwen.device = "cpu".into();
+            qwen.dtype = "float32".into();
+        } else {
+            config.set_sherpa_provider("cpu", None);
+        }
+        config
+    }
+
     pub fn from_path(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read config {}", path.display()))?;
@@ -224,8 +259,11 @@ impl EngineConfig {
                 if !qwen.model.is_dir() {
                     bail!("model directory does not exist: {}", qwen.model.display());
                 }
-                if !matches!(qwen.dtype.as_str(), "float32" | "float16" | "bfloat16") {
-                    bail!("Qwen dtype must be float32, float16, or bfloat16");
+                if !matches!(
+                    qwen.dtype.as_str(),
+                    "auto" | "float32" | "float16" | "bfloat16"
+                ) {
+                    bail!("Qwen dtype must be auto, float32, float16, or bfloat16");
                 }
                 if matches!(qwen.mode, Qwen3TtsMode::CustomVoice)
                     && qwen.speaker.as_deref().is_none_or(str::is_empty)

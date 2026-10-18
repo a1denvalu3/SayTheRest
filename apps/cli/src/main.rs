@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::blocking::Client;
-use sayit_core::{BenchmarkRunner, EngineConfig, SherpaOnnxEngine, SynthesisRequest, TtsEngine};
+use sayit_core::{
+    BenchmarkRunner, EngineConfig, InferenceRuntime, ManagedEngine, SynthesisRequest, TtsEngine,
+};
 use sayit_protocol::{QueuePolicy, SpeechSource, SpeechSubmission};
 use std::{
     io::{self, Read},
@@ -570,7 +572,7 @@ fn print_response(response: reqwest::blocking::Response) -> Result<()> {
     Ok(())
 }
 
-fn load_engine(path: Option<PathBuf>) -> Result<SherpaOnnxEngine> {
+fn load_engine(path: Option<PathBuf>) -> Result<ManagedEngine> {
     let path = match path {
         Some(path) => path,
         None if PathBuf::from("sayit.json").is_file() => PathBuf::from("sayit.json"),
@@ -585,9 +587,11 @@ fn load_engine(path: Option<PathBuf>) -> Result<SherpaOnnxEngine> {
             })
             .ok_or_else(|| anyhow::anyhow!("cannot determine application directory"))?,
     };
-    Ok(SherpaOnnxEngine::from_config(EngineConfig::from_path(
-        &path,
-    )?))
+    ManagedEngine::load(
+        &EngineConfig::from_path(&path)?,
+        &InferenceRuntime::for_current_user(),
+        std::env::var("SAYIT_COMPUTE_DEVICE").as_deref() != Ok("cpu"),
+    )
 }
 
 fn authorized(

@@ -2,17 +2,52 @@
 name = "sayit-qwen-runtime"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
-dependencies = [
+dependencies = []
+
+[project.optional-dependencies]
+cpu = [
   "qwen-tts==0.1.1",
   "torch==2.9.1+cpu",
   "torchaudio==2.9.1+cpu",
 ]
+cu126 = ["qwen-tts==0.1.1", "torch==2.9.1+cu126", "torchaudio==2.9.1+cu126"]
+cu128 = ["qwen-tts==0.1.1", "torch==2.9.1+cu128", "torchaudio==2.9.1+cu128"]
+onnx-cu12 = [
+  "nvidia-cublas-cu12==12.6.4.1; sys_platform == 'linux'",
+  "nvidia-cuda-runtime-cu12==12.6.77; sys_platform == 'linux'",
+  "nvidia-cudnn-cu12==9.10.2.21; sys_platform == 'linux'",
+  "nvidia-cufft-cu12==11.3.0.4; sys_platform == 'linux'",
+  "nvidia-curand-cu12==10.3.7.77; sys_platform == 'linux'",
+  "nvidia-nvjitlink-cu12==12.6.85; sys_platform == 'linux'",
+]
+
+[tool.uv]
+conflicts = [[{ extra = "cpu" }, { extra = "cu126" }, { extra = "cu128" }, { extra = "onnx-cu12" }]]
+constraint-dependencies = ["torch==2.9.1", "torchaudio==2.9.1"]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
 [tool.uv.sources]
-torch = { index = "pytorch-cpu" }
-torchaudio = { index = "pytorch-cpu" }
+torch = [
+  { index = "pytorch-cpu", extra = "cpu" },
+  { index = "pytorch-cu126", extra = "cu126" },
+  { index = "pytorch-cu128", extra = "cu128" },
+]
+torchaudio = [
+  { index = "pytorch-cpu", extra = "cpu" },
+  { index = "pytorch-cu126", extra = "cu126" },
+  { index = "pytorch-cu128", extra = "cu128" },
+]

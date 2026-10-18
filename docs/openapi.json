@@ -17,7 +17,7 @@
         "required": ["name", "reference_audio_path", "speaker_permission_confirmed"],
         "properties": {
           "name": { "type": "string", "minLength": 1, "maxLength": 80 },
-          "reference_audio_path": { "type": "string", "description": "Local 16-bit PCM WAV containing 3–15 seconds of speech after silence trimming." },
+          "reference_audio_path": { "type": "string", "description": "Local 16-bit PCM WAV containing 3–45 seconds of speech for Qwen, or 3–15 seconds for PocketTTS, after silence trimming." },
           "reference_text": { "type": ["string", "null"], "maxLength": 2000, "description": "Exact words spoken in the reference audio, in its original language. Required and nonblank for new Qwen profiles; optional for PocketTTS. Stored locally with the profile and supplied to Qwen for full audio-and-text conditioning." },
           "speaker_permission_confirmed": { "type": "boolean", "const": true }
         }
@@ -33,6 +33,7 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "compute_device": { "type": "string", "enum": ["auto", "cpu"], "description": "Automatic prefers a compatible GPU for every inference path, including previews and benchmarks. CPU forces CPU execution. Pinned GPU runtimes are prepared on first use. The last selected backend and CPU fallback reason appear in /state.inference_device; loaded models expose inference_device in /models." },
           "playback_rate": { "type": "number", "minimum": 0.5, "maximum": 3.0 },
           "speaking_pace": { "type": "number", "enum": [0.75, 0.9, 1.0, 1.1, 1.25, 1.5] },
           "volume": { "type": "number", "minimum": 0.0, "maximum": 1.0 },

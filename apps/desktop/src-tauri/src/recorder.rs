@@ -7,7 +7,7 @@ use std::{
 };
 
 const SAMPLE_RATE: u32 = 16_000;
-const MAX_SECONDS: usize = 15;
+const MAX_SECONDS: usize = 45;
 
 pub struct RecorderState(pub Mutex<Option<ActiveRecording>>);
 
@@ -15,6 +15,7 @@ pub struct ActiveRecording {
     device: Device,
     samples: Arc<Mutex<Vec<f32>>>,
     started: Instant,
+    maximum_seconds: usize,
 }
 
 #[derive(Serialize)]
@@ -31,13 +32,16 @@ pub struct RecordingResult {
     pub sample_rate: u32,
 }
 
-pub fn start(state: &RecorderState) -> Result<RecordingStatus, String> {
+pub fn start(state: &RecorderState, maximum_seconds: usize) -> Result<RecordingStatus, String> {
+    if !(3..=MAX_SECONDS).contains(&maximum_seconds) {
+        return Err("recording limit must be between 3 and 45 seconds".into());
+    }
     let mut active = state.0.lock().map_err(|_| "recorder lock is unavailable")?;
     if active.is_some() {
         return Err("a voice recording is already in progress".into());
     }
     let samples = Arc::new(Mutex::new(Vec::with_capacity(
-        SAMPLE_RATE as usize * MAX_SECONDS,
+        SAMPLE_RATE as usize * maximum_seconds,
     )));
     let captured = Arc::clone(&samples);
     let config = DeviceConfig::new(DeviceType::Capture)
@@ -46,7 +50,8 @@ pub fn start(state: &RecorderState) -> Result<RecordingStatus, String> {
         .format(Format::F32)
         .data_callback(move |_output, input| {
             if let Ok(mut samples) = captured.try_lock() {
-                let remaining = SAMPLE_RATE as usize * MAX_SECONDS - samples.len();
+                let remaining =
+                    (SAMPLE_RATE as usize * maximum_seconds).saturating_sub(samples.len());
                 samples.extend(input.iter().take(remaining).copied());
             }
         });
@@ -62,6 +67,7 @@ pub fn start(state: &RecorderState) -> Result<RecordingStatus, String> {
         device,
         samples,
         started: Instant::now(),
+        maximum_seconds,
     });
     Ok(status_from(active.as_ref()))
 }
@@ -113,6 +119,7 @@ pub fn stop(state: &RecorderState, directory: &Path) -> Result<RecordingResult, 
 }
 
 fn status_from(active: Option<&ActiveRecording>) -> RecordingStatus {
+    let maximum_seconds = active.map_or(MAX_SECONDS, |recording| recording.maximum_seconds);
     RecordingStatus {
         recording: active.is_some(),
         elapsed_seconds: active
@@ -120,11 +127,11 @@ fn status_from(active: Option<&ActiveRecording>) -> RecordingStatus {
                 recording
                     .started
                     .elapsed()
-                    .min(Duration::from_secs(MAX_SECONDS as u64))
+                    .min(Duration::from_secs(maximum_seconds as u64))
                     .as_secs_f64()
             })
             .unwrap_or_default(),
-        maximum_seconds: MAX_SECONDS,
+        maximum_seconds,
     }
 }
 

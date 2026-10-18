@@ -131,6 +131,8 @@ pub struct HistoryItem {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ServiceSettings {
+    #[serde(default = "automatic_compute_device")]
+    pub compute_device: String,
     pub active_model_id: Option<String>,
     #[serde(default)]
     pub active_voice_profile_id: Option<Uuid>,
@@ -153,6 +155,7 @@ pub struct ServiceSettings {
 impl Default for ServiceSettings {
     fn default() -> Self {
         Self {
+            compute_device: automatic_compute_device(),
             active_model_id: Some("piper-en-us-lessac-medium".into()),
             active_voice_profile_id: None,
             voice_profile_by_model: HashMap::new(),
@@ -170,6 +173,7 @@ impl Default for ServiceSettings {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ServiceSettingsUpdate {
+    pub compute_device: Option<String>,
     pub playback_rate: Option<f64>,
     pub speaking_pace: Option<f64>,
     pub volume: Option<f64>,
@@ -205,6 +209,8 @@ impl Default for TextCleaningSettings {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelDescriptor {
+    #[serde(default)]
+    pub inference_device: Option<InferenceDeviceStatus>,
     pub id: String,
     pub name: String,
     pub languages: Vec<String>,
@@ -379,8 +385,22 @@ pub struct PinRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ServiceSnapshot {
+    #[serde(default)]
+    pub inference_device: Option<InferenceDeviceStatus>,
     pub protocol_version: u32,
     pub active_model_id: Option<String>,
     pub queue_depth: usize,
     pub playback: PlaybackSnapshot,
+}
+
+fn automatic_compute_device() -> String {
+    "auto".into()
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct InferenceDeviceStatus {
+    pub provider: String,
+    pub device: String,
+    pub dtype: Option<String>,
+    pub fallback_reason: Option<String>,
 }

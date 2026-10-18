@@ -28,6 +28,7 @@ MAX_CPU_THREADS = 8
 # size of the KV cache, retained hidden states, or decoded waveform in memory.
 MAX_CHUNK_CHARACTERS = 160
 MAX_NEW_TOKENS = 512
+MAX_REFERENCE_SECONDS = 45
 
 
 def resource_thread_count(cpu_count: int | None = None) -> int:
@@ -70,8 +71,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     parser.add_argument("--mode", required=True, choices=sorted(MODES))
-    parser.add_argument("--device", default="cpu")
-    parser.add_argument("--dtype", default="float32", choices=["float32", "float16", "bfloat16"])
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--dtype", default="auto", choices=["auto", "float32", "float16", "bfloat16"])
     return parser.parse_args()
 
 
@@ -167,8 +168,8 @@ def synthesize(model: Any, mode: str, request: dict[str, Any], torch: Any, sound
             generate = model.generate_voice_clone
             reference = local_file(request, "reference_audio")
             info = soundfile.info(reference)
-            if not 0 < info.duration <= 15:
-                raise ValueError("reference audio must contain at most 15 seconds of speech")
+            if not 0 < info.duration <= MAX_REFERENCE_SECONDS:
+                raise ValueError(f"reference audio must contain at most {MAX_REFERENCE_SECONDS} seconds of speech")
             reference_text = optional_text(request, "reference_text")
             # Reuse just this request's prompt, without retaining tensors from
             # previous requests or re-encoding the reference for every chunk.
@@ -201,6 +202,26 @@ def synthesize(model: Any, mode: str, request: dict[str, Any], torch: Any, sound
         pending.replace(output)
 
 
+def inference_device(torch: Any, requested: str) -> str:
+    if requested != "auto":
+        return requested
+    if torch.cuda.is_available():
+        return "cuda:0"
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        return "xpu:0"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def inference_dtype(torch: Any, device: str, requested: str) -> str:
+    if requested != "auto":
+        return requested
+    if device.startswith("cuda"):
+        return "bfloat16" if torch.cuda.is_bf16_supported() else "float16"
+    return "float32"
+
+
 def main() -> int:
     args = parse_args()
     model_path = Path(args.model).expanduser().resolve(strict=True)
@@ -222,16 +243,18 @@ def main() -> int:
         torch.set_num_threads(threads)
         torch.set_num_interop_threads(1)
 
-        dtype = getattr(torch, args.dtype)
+        device = inference_device(torch, args.device)
+        dtype_name = inference_dtype(torch, device, args.dtype)
+        dtype = getattr(torch, dtype_name)
         model = Qwen3TTSModel.from_pretrained(
             str(model_path),
-            device_map=args.device,
+            device_map=device,
             dtype=dtype,
             local_files_only=True,
             attn_implementation="sdpa",
             low_cpu_mem_usage=True,
         )
-    print(json.dumps({"ready": True}), flush=True)
+    print(json.dumps({"ready": True, "device": device, "dtype": dtype_name}), flush=True)
 
     for line in sys.stdin:
         try:

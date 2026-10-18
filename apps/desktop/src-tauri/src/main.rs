@@ -628,8 +628,9 @@ fn export_history(source: String, destination: String) -> Result<(), String> {
 #[tauri::command]
 fn start_voice_recording(
     state: tauri::State<'_, recorder::RecorderState>,
+    maximum_seconds: Option<usize>,
 ) -> Result<recorder::RecordingStatus, String> {
-    recorder::start(&state)
+    recorder::start(&state, maximum_seconds.unwrap_or(15))
 }
 
 #[tauri::command]

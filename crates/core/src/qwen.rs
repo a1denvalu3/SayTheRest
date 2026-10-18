@@ -16,6 +16,8 @@ pub struct ResidentQwenEngine {
 #[derive(Deserialize)]
 struct ReadyResponse {
     ready: bool,
+    device: Option<String>,
+    dtype: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -81,7 +83,28 @@ impl ResidentQwenEngine {
         let ready: ReadyResponse = serde_json::from_str(&line)
             .context("Qwen worker returned an invalid ready response")?;
         anyhow::ensure!(ready.ready, "Qwen worker did not become ready");
+        engine.config.device = ready.device.unwrap_or_else(|| {
+            if config.device == "auto" {
+                "cpu".into()
+            } else {
+                config.device.clone()
+            }
+        });
+        engine.config.dtype = ready.dtype.unwrap_or_else(|| {
+            if config.dtype == "auto" {
+                "float32".into()
+            } else {
+                config.dtype.clone()
+            }
+        });
         Ok(engine)
+    }
+
+    pub fn device(&self) -> &str {
+        &self.config.device
+    }
+    pub fn dtype(&self) -> &str {
+        &self.config.dtype
     }
 
     pub fn synthesize(&mut self, request: &SynthesisRequest<'_>) -> Result<()> {

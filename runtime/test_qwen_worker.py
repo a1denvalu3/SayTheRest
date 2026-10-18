@@ -40,6 +40,26 @@ class WaveWriter:
 
 
 class WorkerValidationTests(unittest.TestCase):
+    def test_automatic_device_selection_uses_available_hardware_and_cpu_fallback(self):
+        torch = SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: True, is_bf16_supported=lambda: True),
+            xpu=SimpleNamespace(is_available=lambda: True),
+            backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: True)),
+        )
+        self.assertEqual(WORKER.inference_device(torch, "auto"), "cuda:0")
+        self.assertEqual(WORKER.inference_dtype(torch, "cuda:0", "auto"), "bfloat16")
+        torch.cuda.is_bf16_supported = lambda: False
+        self.assertEqual(WORKER.inference_dtype(torch, "cuda:0", "auto"), "float16")
+        torch.cuda.is_available = lambda: False
+        self.assertEqual(WORKER.inference_device(torch, "auto"), "xpu:0")
+        torch.xpu.is_available = lambda: False
+        self.assertEqual(WORKER.inference_device(torch, "auto"), "mps")
+        torch.backends.mps.is_available = lambda: False
+        self.assertEqual(WORKER.inference_device(torch, "auto"), "cpu")
+        self.assertEqual(WORKER.inference_dtype(torch, "cpu", "auto"), "float32")
+        self.assertEqual(WORKER.inference_device(torch, "cpu"), "cpu")
+        self.assertEqual(WORKER.inference_dtype(torch, "cuda:0", "float32"), "float32")
+
     def test_resource_threads_preserve_capacity_for_the_desktop(self):
         self.assertEqual(WORKER.resource_thread_count(1), 1)
         self.assertEqual(WORKER.resource_thread_count(2), 1)
@@ -181,10 +201,21 @@ class WorkerSynthesisTests(unittest.TestCase):
 
     def test_long_reference_is_rejected_before_prompt_encoding(self):
         self.soundfile.info.return_value.duration = 3600
-        with self.assertRaisesRegex(ValueError, "at most 15 seconds"):
+        with self.assertRaisesRegex(ValueError, "at most 45 seconds"):
             WORKER.synthesize(self.model, "voice-clone", self.request(), self.torch, self.soundfile)
         self.model.create_voice_clone_prompt.assert_not_called()
         self.assertFalse(self.output.exists())
+
+    def test_longer_reference_is_accepted_with_its_complete_transcript(self):
+        self.soundfile.info.return_value.duration = 44.5
+        self.model.generate_voice_clone.side_effect = self.generate
+        WORKER.synthesize(
+            self.model, "voice-clone", self.request(reference_text="A longer, varied reference passage."),
+            self.torch, self.soundfile,
+        )
+        self.model.create_voice_clone_prompt.assert_called_once_with(
+            ref_audio=str(self.reference), ref_text="A longer, varied reference passage.", x_vector_only_mode=False,
+        )
 
     def test_reference_transcript_enables_icl_in_the_reused_prompt(self):
         self.model.generate_voice_clone.side_effect = self.generate
