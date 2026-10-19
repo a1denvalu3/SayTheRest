@@ -1,0 +1,133 @@
+{
+  "repository": "onnx-community/Qwen3-TTS-12Hz-0.6B-Base",
+  "revision": "2b18c0a044a190e35f1a907779aa51cda0fb1fff",
+  "upstream_revision": "5d83992436eae1d760afd27aff78a71d676296fc",
+  "files": [
+    {
+      "path": "int4/code_predictor.onnx",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_int4/code_predictor.onnx",
+      "sha256": "e502507963ccd95e924e37a2c1e53ff7c22543d61cbe5c35d4532be6e40ec914",
+      "size": 91668866
+    },
+    {
+      "path": "int4/codec_embed.onnx",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_int4/codec_embed.onnx",
+      "sha256": "54ea7a1ab81ffc96a886044dafa3b9cc4475b284f15be310e7a7007e15f61145",
+      "size": 2015779
+    },
+    {
+      "path": "int4/residual_embed.onnx",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_int4/residual_embed.onnx",
+      "sha256": "90ff11a5e061731099b29609310be4dece8f44bf28d53d2d1a62d704abd2b205",
+      "size": 22179258
+    },
+    {
+      "path": "int4/speaker_encoder.onnx",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_int4/speaker_encoder.onnx",
+      "sha256": "6f1729bc072f7ecd0beb7b408162bb5fcf6374a4df3e2ab803d94ccf6497decc",
+      "size": 36104723
+    },
+    {
+      "path": "int4/talker_cache.onnx",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_int4/talker_cache.onnx",
+      "sha256": "861689fb1778f480137b647ad7550e6316136918f6f98e1799e141a42b62c82b",
+      "size": 288573853
+    },
+    {
+      "path": "int4/text_embed.onnx",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_int4/text_embed.onnx",
+      "sha256": "530243e68ca8a723d0bf6705497f4b435c9875844d0488ccd67f571d10277705",
+      "size": 203384915
+    },
+    {
+      "path": "int4/tok_decoder.onnx",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_int4/tok_decoder.onnx",
+      "sha256": "8ec10051735029f6e08b04834128c9108428885c39384f443e49a6790ccb129f",
+      "size": 458268831
+    },
+    {
+      "path": "int4/tok_encoder.onnx",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_int4/tok_encoder.onnx",
+      "sha256": "4a335eaf525ceef17b457f82704d3bc835d4cb15f42fc6f5908f2e860d3da400",
+      "size": 225554101
+    },
+    {
+      "path": "fp32/code_predictor.onnx",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_fp32/code_predictor.onnx",
+      "sha256": "799bed308d9faa3fd6b7115f57432505db6600c86b42cf8cae58e6798e36f746",
+      "size": 570723513
+    },
+    {
+      "path": "fp32/codec_embed.onnx",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_fp32/codec_embed.onnx",
+      "sha256": "650ee9a5903a70296d2ac4e1c0aebe63510727458be03ebe4115f5dc1de6e567",
+      "size": 12583206
+    },
+    {
+      "path": "fp32/residual_embed.onnx",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_fp32/residual_embed.onnx",
+      "sha256": "0d41e2cf0f5542c419065b59eaf7a09580d9edb415d66310494c332ec18ec415",
+      "size": 138419704
+    },
+    {
+      "path": "fp32/speaker_encoder.onnx",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_fp32/speaker_encoder.onnx",
+      "sha256": "6f1729bc072f7ecd0beb7b408162bb5fcf6374a4df3e2ab803d94ccf6497decc",
+      "size": 36104723
+    },
+    {
+      "path": "fp32/talker_cache.onnx",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_fp32/talker_cache.onnx",
+      "sha256": "e73bd579a0e59bd52017402fe34e161ce169a112af168fdc08d3fcaf9d26b285",
+      "size": 4551308
+    },
+    {
+      "path": "fp32/talker_cache.onnx.data",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_fp32/talker_cache.onnx.data",
+      "sha256": "4d8e742a81ab44ae09bbff72b728caeeaa9c3fb2bd50a0c0f0103d4a0909158b",
+      "size": 1774452736
+    },
+    {
+      "path": "fp32/text_embed.onnx",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_fp32/text_embed.onnx",
+      "sha256": "7b3e3f45d42a08fd0aa0b7ca167727f52220290c06e9c58bf7dc40a47348d943",
+      "size": 1269839332
+    },
+    {
+      "path": "fp32/tok_decoder.onnx",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_fp32/tok_decoder.onnx",
+      "sha256": "8ec10051735029f6e08b04834128c9108428885c39384f443e49a6790ccb129f",
+      "size": 458268831
+    },
+    {
+      "path": "fp32/tok_encoder.onnx",
+      "url": "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base/resolve/2b18c0a044a190e35f1a907779aa51cda0fb1fff/cpu_fp32/tok_encoder.onnx",
+      "sha256": "4a335eaf525ceef17b457f82704d3bc835d4cb15f42fc6f5908f2e860d3da400",
+      "size": 225554101
+    },
+    {
+      "path": "model.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/config.json",
+      "sha256": "2e714c787c8edb98b05432685cddb634add2de4d4e645f653d68251ef72ba011",
+      "size": 4494
+    },
+    {
+      "path": "merges.txt",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/merges.txt",
+      "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+      "size": 1671839
+    },
+    {
+      "path": "vocab.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/vocab.json",
+      "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+      "size": 2776833
+    },
+    {
+      "path": "tokenizer_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/tokenizer_config.json",
+      "sha256": "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670",
+      "size": 7344
+    }
+  ]
+}

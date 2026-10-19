@@ -11,7 +11,7 @@ driver and respects an empty or `-1` `CUDA_VISIBLE_DEVICES`. Drivers supporting 
 12.6 use the pinned cu126 runtime; drivers supporting 12.8 or newer use cu128 for Qwen.
 Older drivers and devices without a supported backend use CPU.
 
-On first GPU use, the app prepares a separate cached runtime. Qwen receives CUDA-enabled
+On first GPU use, the app prepares a separate cached runtime. The PyTorch Qwen backend receives CUDA-enabled
 PyTorch 2.9.1 and selects bfloat16 when supported, otherwise float16. CPU uses float32.
 ONNX models receive sherpa-onnx 1.13.4's CUDA 12/cuDNN 9 runtime, verified against a pinned
 SHA-256 digest. Linux ONNX inference downloads NVIDIA libraries without installing Qwen
@@ -23,6 +23,11 @@ Qwen uses PyTorch SDPA; the optional external `flash-attn` package is unnecessar
 User-supplied Qwen runtimes can also expose ROCm, Intel XPU, or Apple MPS through PyTorch.
 The managed ONNX releases do not supply compatible Intel/AMD GPU providers, so those
 devices use CPU. NPU inference is not enabled.
+
+Qwen also has an opt-in native ONNX backend; see [Native Qwen](native-qwen.md).
+It shares Automatic/CPU preferences and CPU fallback, and reports weight
+quantization separately from computation dtype. Its native runtime setup does
+not install Python or PyTorch. The existing PyTorch backend remains available.
 
 The Models view shows the provider of the loaded model. Settings diagnostics and
 `GET /v1/state` expose the last inference device, precision, and any fallback reason.

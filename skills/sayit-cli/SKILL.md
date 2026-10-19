@@ -32,6 +32,8 @@ sayit models select piper-en-us-lessac-medium
 
 Model installation and updates are asynchronous. Inspect `sayit models` before selecting a newly installed model. For models with built-in speakers, choose an ID from their `preset_voices` with `sayit models voice MODEL_ID PRESET_VOICE_ID`.
 
+Qwen3-TTS 0.6B Base offers an opt-in native backend: `sayit models backend qwen3-tts-06b-base onnx --precision int4` (or `fp32`). This downloads asynchronously and preserves saved voice IDs and transcripts. Inspect `sayit models` until setup completes before speaking. `sayit models backend qwen3-tts-06b-base pytorch` restores the legacy backend. Switch only when setup or backend evaluation is part of the user's task; existing speech uses the configured backend.
+
 ## Clone and manage voices
 
 PocketTTS and Qwen Base voice-cloning models require a reference WAV. Confirm that the user has permission to clone the recorded speaker before using `--speaker-permission-confirmed`; honor permission already given in the conversation.
@@ -135,6 +137,8 @@ Use `sayit history replay HISTORY_ID` to play the saved WAV without new inferenc
 ## Devices and diagnostics
 
 Automatic inference prefers a supported GPU across model families, previews, and benchmarks, with CPU fallback. Managed Linux/Windows x86-64 runtimes support NVIDIA CUDA; other GPU types may use CPU. First GPU use can download a runtime. Check `sayit status`'s `inference_device` for the last inference provider, precision, and fallback reason; a GPU being present does not establish that it was used. The desktop Settings → Inference device can force CPU; there is no CLI settings command.
+
+Device, backend, and weight precision are separate: native Qwen can run INT4 weights on CPU while reporting a `float32` computation dtype. Inspect `backend` and `quantization` as well as `provider` and `fallback_reason`. The native backend does not require Python or PyTorch for inference.
 
 Prefer `sayit models benchmark MODEL_ID` to benchmark an installed model with the service's device setting and its saved selected reference profile/transcript. Select a cloned voice for that model first if required. This does not change the active model. `sayit models unload MODEL_ID` releases its resident engine. Model update, cancel, remove, and import operations are documented by `sayit models --help` and each subcommand's help; imports require license details and acknowledgment.
 

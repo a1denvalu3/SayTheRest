@@ -20,6 +20,9 @@ sha2.workspace = true
 tar.workspace = true
 tempfile.workspace = true
 zip.workspace = true
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-22", "cuda"] }
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
+rand = "0.9"
 
 [dev-dependencies]
 tempfile.workspace = true

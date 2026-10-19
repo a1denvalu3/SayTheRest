@@ -1,0 +1,16 @@
+sayIt native Qwen3-TTS inference
+
+Qwen3-TTS model architecture, prompt construction, and model weights:
+Qwen Team / Alibaba Cloud, Apache License 2.0.
+https://github.com/QwenLM/Qwen3-TTS
+https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base
+
+The native component layout and generation algorithm are adapted from
+ONNX Community's Qwen3-TTS-12Hz-0.6B-Base export and reference inference.py,
+published under Apache License 2.0.
+https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-Base
+Pinned export revision: 2b18c0a044a190e35f1a907779aa51cda0fb1fff
+
+ONNX Runtime is provided by Microsoft under the MIT License. Its license and
+third-party notices are included in the downloaded/bundled runtime directory.
+CUDA libraries retain NVIDIA's licenses, included beside downloaded libraries.

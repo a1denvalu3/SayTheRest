@@ -29,7 +29,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -64,6 +64,7 @@ pub struct ServiceState {
     resident_engine: Arc<Mutex<Option<ResidentEngineSlot>>>,
     inference_runtime: InferenceRuntime,
     last_inference_device: Arc<Mutex<Option<InferenceDeviceStatus>>>,
+    synthesis_cancelled: Arc<AtomicBool>,
 }
 
 struct ResidentEngineSlot {
@@ -80,6 +81,8 @@ fn inference_device(engine: &ManagedEngine) -> InferenceDeviceStatus {
         device: device.device,
         dtype: device.dtype,
         fallback_reason: device.fallback_reason,
+        backend: device.backend,
+        quantization: device.quantization,
     }
 }
 
@@ -182,6 +185,7 @@ impl ServiceState {
                 }
                 EngineConfig::SherpaOnnxPocket(_) => "pocket-tts-int8",
                 EngineConfig::Qwen3Tts(_) => "qwen3-tts",
+                EngineConfig::Qwen3TtsOnnx(_) => "qwen3-tts-06b-base",
             });
         if let (Some(id), Some(source)) = (configured_model_id, engine_config_path.as_deref()) {
             let managed = models.config_path(id);
@@ -196,6 +200,9 @@ impl ServiceState {
             let selected_config = models.config_path(selected);
             if selected_config.is_file() {
                 engine_config_path = Some(selected_config);
+            } else if let Some(id) = configured_model_id {
+                inner.settings.active_model_id = Some(id.into());
+                engine_config_path = Some(models.config_path(id));
             }
         } else if let Some(id) = configured_model_id {
             inner.settings.active_model_id = Some(id.into());
@@ -224,6 +231,7 @@ impl ServiceState {
         Ok(Self {
             inference_runtime: InferenceRuntime::new(&data_dir),
             last_inference_device: Arc::new(Mutex::new(None)),
+            synthesis_cancelled: Arc::new(AtomicBool::new(false)),
             inner: Arc::new(RwLock::new(inner)),
             notify: Arc::new(Notify::new()),
             store_path,
@@ -300,6 +308,7 @@ impl ServiceState {
             .iter_mut()
             .find(|job| job.state == JobState::Queued)?;
         job.state = JobState::Synthesizing;
+        self.synthesis_cancelled.store(false, Ordering::Relaxed);
         let result = job.clone();
         drop(inner);
         let _ = self.persist().await;
@@ -333,6 +342,7 @@ impl ServiceState {
         let resident_engine = self.resident_engine.clone();
         let runtime = self.inference_runtime.clone();
         let last_device = self.last_inference_device.clone();
+        let cancelled = self.synthesis_cancelled.clone();
         let synthesis = tokio::task::spawn_blocking(move || -> Result<(PathBuf, f64)> {
             let mut config = EngineConfig::from_path(&config_path)?;
             if let (EngineConfig::SherpaOnnxPocket(pocket), Some(steps)) =
@@ -361,14 +371,21 @@ impl ServiceState {
             let slot = resident
                 .as_mut()
                 .context("resident engine was not loaded")?;
-            let result = slot.engine.synthesize(&SynthesisRequest {
-                text: &text,
-                output: &output,
-                reference_audio: reference_audio.as_deref(),
-                reference_text: reference_text.as_deref(),
-                speaking_pace,
-            });
+            let result = slot.engine.synthesize_cancellable(
+                &SynthesisRequest {
+                    text: &text,
+                    output: &output,
+                    reference_audio: reference_audio.as_deref(),
+                    reference_text: reference_text.as_deref(),
+                    speaking_pace,
+                },
+                Some(&cancelled),
+            );
             *last_device.lock().unwrap() = Some(inference_device(&slot.engine));
+            if cancelled.load(Ordering::Relaxed) {
+                *resident = None;
+                anyhow::bail!("speech generation cancelled");
+            }
             result?;
             slot.last_used = Instant::now();
             let duration = wav_duration_seconds(&output)?;
@@ -388,6 +405,10 @@ impl ServiceState {
             let Some(job) = inner.jobs.iter_mut().find(|job| job.id == id) else {
                 return;
             };
+            if job.state == JobState::Cancelled {
+                let _ = fs::remove_file(&path);
+                return;
+            }
             job.state = JobState::Playing;
             (inner.settings.playback_rate, inner.settings.volume)
         };
@@ -425,6 +446,16 @@ impl ServiceState {
         let Some(index) = inner.jobs.iter().position(|job| job.id == id) else {
             return;
         };
+        if inner.jobs[index].state == JobState::Cancelled {
+            if let Ok((path, _)) = result {
+                let _ = fs::remove_file(path);
+            }
+            drop(inner);
+            let _ = self.persist().await;
+            self.emit("jobs");
+            self.emit("playback");
+            return;
+        }
         let (audio_path, duration, error) = match result {
             Ok((path, duration)) => (Some(path.display().to_string()), Some(duration), None),
             Err(error) => (None, None, Some(error.to_string())),
@@ -725,6 +756,7 @@ fn remove_archived_audio(item: &HistoryItem, audio_dir: &std::path::Path) {
 pub fn router(state: ServiceState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/models/{id}/backend", post(set_model_backend))
         .route("/v1/openapi.json", get(openapi))
         .route("/v1/events", get(events))
         .route("/v1/state", get(snapshot))
@@ -1500,9 +1532,10 @@ async fn stop(State(state): State<ServiceState>) -> Result<StatusCode, (StatusCo
         .await
         .jobs
         .iter_mut()
-        .find(|job| Some(job.id) == active)
+        .find(|job| Some(job.id) == active || job.state == JobState::Synthesizing)
     {
         job.state = JobState::Cancelled;
+        state.synthesis_cancelled.store(true, Ordering::Relaxed);
     }
     state.persist().await.map_err(internal_error)?;
     state.emit("jobs");
@@ -1592,20 +1625,14 @@ async fn create_voice(
         )
     };
     let config = EngineConfig::from_path(&config_path).map_err(unprocessable)?;
-    if !matches!(&config, EngineConfig::SherpaOnnxPocket(_))
-        && !matches!(
-            &config,
-            EngineConfig::Qwen3Tts(qwen)
-                if matches!(qwen.mode, sayit_core::Qwen3TtsMode::VoiceClone)
-        )
-    {
+    if !config.requires_reference() {
         return Err((
             StatusCode::CONFLICT,
             "the selected model does not support voice cloning".into(),
         ));
     }
     let reference_text = validate_reference_text(request.reference_text.as_deref())?;
-    if matches!(&config, EngineConfig::Qwen3Tts(_)) && reference_text.is_none() {
+    if config.is_qwen() && reference_text.is_none() {
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
             "Qwen voice cloning requires the exact transcript of the reference recording".into(),
@@ -1621,11 +1648,7 @@ async fn create_voice(
     let source = PathBuf::from(&request.reference_audio_path);
     let id = Uuid::new_v4();
     let destination = state.voices_dir.join(format!("{id}.wav"));
-    let maximum_seconds = if matches!(&config, EngineConfig::Qwen3Tts(_)) {
-        45.0
-    } else {
-        15.0
-    };
+    let maximum_seconds = if config.is_qwen() { 45.0 } else { 15.0 };
     let quality = analyze_and_trim_voice(&source, &destination, maximum_seconds)
         .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
     let profile = VoiceProfile {
@@ -1769,8 +1792,7 @@ async fn benchmark_model(
             inner.settings.compute_device != "cpu",
         )
     };
-    let requires_reference = matches!(&config, EngineConfig::SherpaOnnxPocket(_))
-        || matches!(&config, EngineConfig::Qwen3Tts(qwen) if matches!(qwen.mode, sayit_core::Qwen3TtsMode::VoiceClone));
+    let requires_reference = config.requires_reference();
     if requires_reference && reference.is_none() {
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -2009,10 +2031,9 @@ async fn submit_job(
         StatusCode::CONFLICT,
         "download and select a speech model before reading text aloud".into(),
     ))?;
-    let requires_voice_profile = matches!(
-        EngineConfig::from_path(&config_path).map_err(unprocessable)?,
-        EngineConfig::SherpaOnnxPocket(_)
-    );
+    let requires_voice_profile = EngineConfig::from_path(&config_path)
+        .map_err(unprocessable)?
+        .requires_reference();
     let cleaning = state.inner.read().await.settings.text_cleaning;
     let cleaned = clean_text(
         &submission.text,
@@ -2042,11 +2063,19 @@ async fn submit_job(
         ));
     }
     let active = if submission.queue_policy == QueuePolicy::Interrupt {
-        state.player.snapshot().job_id
+        state.player.snapshot().job_id.or(state
+            .inner
+            .read()
+            .await
+            .jobs
+            .iter()
+            .find(|job| job.state == JobState::Synthesizing)
+            .map(|job| job.id))
     } else {
         None
     };
     if active.is_some() {
+        state.synthesis_cancelled.store(true, Ordering::Relaxed);
         state.player.stop().map_err(internal_error)?;
     }
     let mut inner = state.inner.write().await;
@@ -2091,7 +2120,7 @@ async fn submit_job(
     if requires_voice_profile && voice_profile_id.is_none() {
         return Err((
             StatusCode::CONFLICT,
-            "PocketTTS requires a cloned voice; open Voices and create or select a voice profile first"
+            "The selected model requires a cloned voice; open Voices and create or select a voice profile first"
                 .into(),
         ));
     }
@@ -2124,6 +2153,19 @@ async fn submit_job(
     state.notify.notify_one();
     state.emit("jobs");
     Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+async fn set_model_backend(
+    State(state): State<ServiceState>,
+    RoutePath(id): RoutePath<String>,
+    Json(request): Json<sayit_protocol::ModelBackendRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    state
+        .models
+        .start_backend(&id, &request.backend, request.precision.as_deref())
+        .map_err(unprocessable)?;
+    state.emit("models");
+    Ok(StatusCode::ACCEPTED)
 }
 
 fn analyze_and_trim_voice(
@@ -2613,6 +2655,151 @@ for line in sys.stdin:
         state.inner.try_write().unwrap().settings.active_model_id = Some("qwen3-tts".into());
         write_persisted_state(&state.store_path, &state.inner.try_read().unwrap(), false).unwrap();
         state
+    }
+
+    fn native_voice_test_state(directory: &Path) -> ServiceState {
+        let model = directory.join("native-model");
+        fs::create_dir_all(model.join("int4")).unwrap();
+        for file in sayit_core::onnx_runtime::model_assets().files {
+            if file.path.starts_with("fp32/") {
+                continue;
+            }
+            fs::write(model.join(file.path), b"test fixture").unwrap();
+        }
+        let config = EngineConfig::Qwen3TtsOnnx(sayit_core::QwenOnnxConfig {
+            worker: directory.join("worker"),
+            model,
+            runtime: None,
+            device: "auto".into(),
+            precision: "int4".into(),
+            num_threads: 4,
+            language: "Auto".into(),
+        });
+        let path = directory.join("native.json");
+        fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        ServiceState::open(directory.join("data"), Some(path)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_config_bootstraps_and_preserves_long_voice_profiles_across_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = native_voice_test_state(directory.path());
+        assert_eq!(
+            state.inner.read().await.settings.active_model_id.as_deref(),
+            Some("qwen3-tts-06b-base")
+        );
+        let source = directory.path().join("reference.wav");
+        let mut writer = hound::WavWriter::create(
+            &source,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for _ in 0..30 * 16000 {
+            writer.write_sample(1000i16).unwrap();
+        }
+        writer.finalize().unwrap();
+        let request = VoiceCloneRequest {
+            name: "Native reference".into(),
+            reference_audio_path: source.display().to_string(),
+            reference_text: Some("The reference transcript.".into()),
+            speaker_permission_confirmed: true,
+        };
+        let error = create_voice(
+            State(state.clone()),
+            Json(VoiceCloneRequest {
+                reference_text: None,
+                ..request.clone()
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        let (_, Json(voice)) = create_voice(State(state.clone()), Json(request))
+            .await
+            .unwrap();
+        assert!(voice.reference_duration_seconds > 15.0);
+        select_voice(State(state.clone()), RoutePath(voice.id))
+            .await
+            .unwrap();
+        let descriptor = state
+            .models
+            .descriptors(None, &HashMap::new())
+            .into_iter()
+            .find(|model| model.id == voice.model_id)
+            .unwrap();
+        assert_eq!(descriptor.inference_backend.as_deref(), Some("onnx"));
+        assert_eq!(descriptor.weight_precision.as_deref(), Some("int4"));
+        let reopened = ServiceState::open(directory.path().join("data"), None).unwrap();
+        assert_eq!(
+            reopened.inner.read().await.settings.active_voice_profile_id,
+            Some(voice.id)
+        );
+        let Json(profiles) = voices(State(reopened)).await;
+        assert_eq!(profiles[0].id, voice.id);
+        assert_eq!(profiles[0].reference_text, voice.reference_text);
+    }
+
+    #[tokio::test]
+    async fn native_benchmark_requires_a_voice_before_runtime_preparation() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = native_voice_test_state(directory.path());
+        let error = benchmark_model(State(state), RoutePath("qwen3-tts-06b-base".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!directory.path().join("data/runtimes").exists());
+    }
+
+    #[tokio::test]
+    async fn invalid_native_backend_requests_fail_before_downloads() {
+        let state = ServiceState::default();
+        for (id, backend, precision) in [
+            ("pocket-tts-int8", "onnx", Some("int4")),
+            ("qwen3-tts-06b-base", "unknown", None),
+            ("qwen3-tts-06b-base", "onnx", Some("invalid")),
+        ] {
+            let result = set_model_backend(
+                State(state.clone()),
+                RoutePath(id.into()),
+                Json(sayit_protocol::ModelBackendRequest {
+                    backend: backend.into(),
+                    precision: precision.map(str::to_owned),
+                }),
+            )
+            .await;
+            assert_eq!(result.unwrap_err().0, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+
+    #[tokio::test]
+    async fn stopping_synthesis_preserves_cancelled_state_and_discards_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = qwen_voice_test_state(directory.path());
+        let id = Uuid::new_v4();
+        state.inner.write().await.jobs.push_back(SpeechJob {
+            id,
+            text: "hello".into(),
+            source: SpeechSource::Cli,
+            state: JobState::Synthesizing,
+            created_at: chrono::Utc::now(),
+            error: None,
+            voice_profile_id: None,
+            speaking_pace: None,
+        });
+        stop(State(state.clone())).await.unwrap();
+        assert!(state.synthesis_cancelled.load(Ordering::Relaxed));
+        let output = state.audio_dir.join("cancelled.wav");
+        fs::write(&output, b"discarded result").unwrap();
+        state.finish_job(id, Ok((output.clone(), 1.0))).await;
+        assert!(!output.exists());
+        let inner = state.inner.read().await;
+        assert_eq!(inner.jobs[0].state, JobState::Cancelled);
+        assert!(inner.history.is_empty());
     }
 
     #[tokio::test]

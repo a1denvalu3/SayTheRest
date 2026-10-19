@@ -112,6 +112,14 @@ enum CliQueuePolicy {
 
 #[derive(Subcommand)]
 enum ModelAction {
+    /// Select Qwen's native ONNX or legacy PyTorch backend (downloads asynchronously).
+    Backend {
+        id: String,
+        #[arg(value_parser = ["onnx", "pytorch"])]
+        backend: String,
+        #[arg(long, value_parser = ["int4", "fp32"])]
+        precision: Option<String>,
+    },
     Install {
         id: String,
     },
@@ -250,6 +258,18 @@ fn main() -> Result<()> {
         Command::Status => get_and_print(base, "state")?,
         Command::Jobs => get_and_print(base, "jobs")?,
         Command::Models { action: None } => get_and_print(base, "models")?,
+        Command::Models {
+            action:
+                Some(ModelAction::Backend {
+                    id,
+                    backend,
+                    precision,
+                }),
+        } => post_and_print(
+            base,
+            &format!("models/{id}/backend"),
+            Some(serde_json::json!({"backend":backend,"precision":precision})),
+        )?,
         Command::Models {
             action: Some(ModelAction::Install { id }),
         } => post_and_print(base, &format!("models/{id}/install"), None)?,
@@ -650,6 +670,31 @@ mod tests {
             &["sayit", "jobs"],
             &["sayit", "models"],
             &["sayit", "models", "install", "piper-en-us-lessac-medium"],
+            &[
+                "sayit",
+                "models",
+                "backend",
+                "qwen3-tts-06b-base",
+                "onnx",
+                "--precision",
+                "int4",
+            ],
+            &[
+                "sayit",
+                "models",
+                "backend",
+                "qwen3-tts-06b-base",
+                "onnx",
+                "--precision",
+                "fp32",
+            ],
+            &[
+                "sayit",
+                "models",
+                "backend",
+                "qwen3-tts-06b-base",
+                "pytorch",
+            ],
             &["sayit", "voices"],
             &[
                 "sayit",

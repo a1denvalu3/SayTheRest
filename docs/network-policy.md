@@ -15,6 +15,12 @@ External network access occurs for the following local setup and update operatio
   GitHub releases, verified against the SHA-256 digest compiled into the catalog.
 - **Import from Hugging Face:** the repository and optional access token entered by the user
   are sent to `huggingface.co`; the immutable revision and LFS digests are verified.
+- **Select the native Qwen backend:** pinned ONNX components and tokenizer files are
+  downloaded from Hugging Face, verified against compiled sizes and SHA-256 digests.
+  Development builds can download the pinned ONNX Runtime from Microsoft's GitHub
+  releases; release packages bundle its CPU runtime. Native CUDA setup downloads
+  pinned NVIDIA wheels from `files.pythonhosted.org` and extracts their libraries
+  locally without installing Python. Text, transcripts, and recordings remain local.
 - **Prepare automatic GPU acceleration:** the first inference that needs an uncached CUDA
   runtime downloads pinned sherpa-onnx assets from GitHub and locked Python/NVIDIA packages
   from `download.pytorch.org` and PyPI. This applies to synthesis, previews, and benchmarks.

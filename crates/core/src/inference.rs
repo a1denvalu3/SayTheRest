@@ -13,7 +13,10 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -23,6 +26,10 @@ pub struct InferenceDevice {
     pub device: String,
     pub dtype: Option<String>,
     pub fallback_reason: Option<String>,
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub quantization: Option<String>,
 }
 
 #[derive(Clone)]
@@ -90,6 +97,34 @@ impl InferenceRuntime {
     }
 
     fn prepare(&self, config: &EngineConfig, prefer_gpu: bool) -> Result<PreparedInference> {
+        if let EngineConfig::Qwen3TtsOnnx(native) = config {
+            let mut native = native.clone();
+            let runtime =
+                crate::onnx_runtime::NativeRuntimeManager::new(self.root.parent().unwrap());
+            let gpu = prefer_gpu
+                && self
+                    .cuda
+                    .is_some_and(|device| device.driver_version >= 12060);
+            let mut reason = (prefer_gpu && self.cuda.is_some() && !gpu)
+                .then(|| "NVIDIA driver does not support the packaged CUDA 12.6 libraries".into());
+            native.device = if gpu { "cuda" } else { "cpu" }.into();
+            if native.runtime.is_none() {
+                native.runtime = Some(match runtime.install(gpu) {
+                    Ok(path) => path,
+                    Err(error) if gpu => {
+                        reason = Some(format!("native CUDA runtime setup failed: {error:#}"));
+                        native.device = "cpu".into();
+                        runtime.install(false)?
+                    }
+                    Err(error) => return Err(error),
+                });
+            }
+            return Ok(PreparedInference {
+                config: EngineConfig::Qwen3TtsOnnx(native),
+                environment: Vec::new(),
+                fallback_reason: reason,
+            });
+        }
         let mut prepared = config.cpu();
         let managed_qwen =
             matches!(config, EngineConfig::Qwen3Tts(q) if self.qwen.owns_python(&q.python));
@@ -330,8 +365,12 @@ impl Backend {
         config: &EngineConfig,
         environment: Vec<(OsString, OsString)>,
     ) -> Result<(Self, InferenceDevice)> {
-        if let EngineConfig::Qwen3Tts(qwen) = config {
-            let engine = ResidentQwenEngine::load(qwen)?;
+        if config.is_qwen() {
+            let engine = match config {
+                EngineConfig::Qwen3Tts(qwen) => ResidentQwenEngine::load(qwen)?,
+                EngineConfig::Qwen3TtsOnnx(qwen) => ResidentQwenEngine::load_native(qwen)?,
+                _ => unreachable!(),
+            };
             let device = engine.device().to_owned();
             let provider = device.split(':').next().unwrap_or("cpu").to_owned();
             let info = InferenceDevice {
@@ -339,6 +378,8 @@ impl Backend {
                 device,
                 dtype: Some(engine.dtype().to_owned()),
                 fallback_reason: None,
+                backend: Some(engine.backend().into()),
+                quantization: engine.quantization().map(str::to_owned),
             };
             return Ok((Self::Qwen(engine), info));
         }
@@ -348,6 +389,8 @@ impl Backend {
             provider: provider.clone(),
             dtype: None,
             fallback_reason: None,
+            backend: Some("sherpa-onnx".into()),
+            quantization: None,
         };
         let backend = if provider == "cuda" {
             Self::SherpaCuda(
@@ -359,11 +402,15 @@ impl Backend {
         Ok((backend, info))
     }
 
-    fn synthesize(&mut self, request: &SynthesisRequest<'_>) -> Result<()> {
+    fn synthesize(
+        &mut self,
+        request: &SynthesisRequest<'_>,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<()> {
         match self {
             Self::Sherpa(engine) => engine.synthesize(request),
             Self::SherpaCuda(engine) => engine.synthesize(request),
-            Self::Qwen(engine) => engine.synthesize(request),
+            Self::Qwen(engine) => engine.synthesize_cancellable(request, cancelled),
         }
     }
 }
@@ -393,6 +440,14 @@ impl ManagedEngine {
         let started = Instant::now();
         // A CUDA-enabled PyTorch environment can run CPU fallback too.
         let mut cpu_config = config.cpu();
+        if let EngineConfig::Qwen3TtsOnnx(native) = &mut cpu_config
+            && native.runtime.is_none()
+        {
+            native.runtime = Some(
+                crate::onnx_runtime::NativeRuntimeManager::new(runtime.root.parent().unwrap())
+                    .install(false)?,
+            );
+        }
         if let (EngineConfig::Qwen3Tts(cpu), EngineConfig::Qwen3Tts(selected)) =
             (&mut cpu_config, &prepared)
         {
@@ -440,6 +495,34 @@ impl ManagedEngine {
 
 impl TtsEngine for ManagedEngine {
     fn synthesize(&self, request: &SynthesisRequest<'_>) -> Result<()> {
+        self.synthesize_cancellable(request, None)
+    }
+
+    fn name(&self) -> &'static str {
+        if matches!(self.cpu_config, EngineConfig::Qwen3TtsOnnx(_)) {
+            "qwen3-tts-onnx"
+        } else if self.cpu_config.is_qwen() {
+            "qwen3-tts"
+        } else {
+            "sherpa-onnx"
+        }
+    }
+
+    fn startup_ms(&self) -> f64 {
+        self.startup_ms
+    }
+}
+
+impl ManagedEngine {
+    pub fn synthesize_cancellable(
+        &self,
+        request: &SynthesisRequest<'_>,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            cancelled.is_none_or(|cancelled| !cancelled.load(Ordering::Relaxed)),
+            "speech generation cancelled"
+        );
         anyhow::ensure!(!request.text.trim().is_empty(), "text must not be empty");
         let parent = request
             .output
@@ -455,11 +538,15 @@ impl TtsEngine for ManagedEngine {
             ..request.clone()
         };
         let mut state = self.state.lock().unwrap();
+        if state.backend.is_none() {
+            let (backend, _) = Backend::load(&self.cpu_config, Vec::new())?;
+            state.backend = Some(backend);
+        }
         let result = state
             .backend
             .as_mut()
             .context("inference engine unavailable")?
-            .synthesize(&bounded)
+            .synthesize(&bounded, cancelled)
             .and_then(|()| {
                 anyhow::ensure!(
                     crate::wav_duration_seconds(pending.as_ref())? > 0.0,
@@ -468,7 +555,10 @@ impl TtsEngine for ManagedEngine {
                 Ok(())
             });
         if let Err(error) = result {
-            if state.device.provider == "cpu" {
+            if state.device.provider == "cpu"
+                || cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Relaxed))
+            {
+                state.backend = None;
                 return Err(error);
             }
             let reason = format!("GPU inference failed; using CPU: {error:#}");
@@ -479,7 +569,11 @@ impl TtsEngine for ManagedEngine {
             device.fallback_reason = Some(reason);
             state.backend = Some(backend);
             state.device = device;
-            state.backend.as_mut().unwrap().synthesize(&bounded)?;
+            state
+                .backend
+                .as_mut()
+                .unwrap()
+                .synthesize(&bounded, cancelled)?;
         }
         anyhow::ensure!(
             crate::wav_duration_seconds(pending.as_ref())? > 0.0,
@@ -491,24 +585,89 @@ impl TtsEngine for ManagedEngine {
             .map_err(|error| error.error)?;
         Ok(())
     }
-
-    fn name(&self) -> &'static str {
-        if matches!(self.cpu_config, EngineConfig::Qwen3Tts(_)) {
-            "qwen3-tts"
-        } else {
-            "sherpa-onnx"
-        }
-    }
-
-    fn startup_ms(&self) -> f64 {
-        self.startup_ms
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Qwen3TtsConfig, Qwen3TtsMode};
+
+    #[test]
+    fn cpu_fallback_preserves_native_weight_quantization() {
+        let config = EngineConfig::Qwen3TtsOnnx(crate::QwenOnnxConfig {
+            worker: "worker".into(),
+            model: "model".into(),
+            runtime: None,
+            device: "cuda".into(),
+            precision: "int4".into(),
+            num_threads: 4,
+            language: "Auto".into(),
+        });
+        let EngineConfig::Qwen3TtsOnnx(cpu) = config.cpu() else {
+            panic!()
+        };
+        assert_eq!(cpu.device, "cpu");
+        assert_eq!(cpu.precision, "int4");
+        assert!(config.requires_reference());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_gpu_failure_retries_cpu_without_installing_python() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("native-worker");
+        fs::write(&worker,r#"#!/usr/bin/python3
+import json,pathlib,sys,wave
+device=sys.argv[sys.argv.index('--device')+1]
+model=pathlib.Path(sys.argv[sys.argv.index('--model')+1])
+with (model/'starts').open('a') as out: out.write(device+'\n')
+if device=='cuda': sys.exit(1)
+print(json.dumps({'ready':True,'device':'cpu','dtype':'float32','backend':'qwen3-tts-onnx','quantization':'int4'}),flush=True)
+for line in sys.stdin:
+ request=json.loads(line)
+ with wave.open(request['output'],'wb') as out:
+  out.setparams((1,2,24000,0,'NONE','NONE'));out.writeframes(b'\0\0'*240)
+ print(json.dumps({'ok':True}),flush=True)
+"#).unwrap();
+        fs::set_permissions(&worker, fs::Permissions::from_mode(0o755)).unwrap();
+        let library = directory.path().join("runtime");
+        fs::write(&library, []).unwrap();
+        let config = EngineConfig::Qwen3TtsOnnx(crate::QwenOnnxConfig {
+            worker,
+            model: directory.path().into(),
+            runtime: Some(library),
+            device: "auto".into(),
+            precision: "int4".into(),
+            num_threads: 4,
+            language: "Auto".into(),
+        });
+        let mut runtime = InferenceRuntime::new(directory.path());
+        runtime.cuda = Some(CudaDevice {
+            driver_version: 12060,
+            count: 1,
+        });
+        let engine = ManagedEngine::load(&config, &runtime, true).unwrap();
+        let output = directory.path().join("speech.wav");
+        engine
+            .synthesize(&SynthesisRequest {
+                text: "hello",
+                output: &output,
+                reference_audio: None,
+                reference_text: None,
+                speaking_pace: 1.0,
+            })
+            .unwrap();
+        assert_eq!(engine.device().provider, "cpu");
+        assert_eq!(engine.device().backend.as_deref(), Some("qwen3-tts-onnx"));
+        assert_eq!(engine.device().quantization.as_deref(), Some("int4"));
+        assert!(engine.device().fallback_reason.is_some());
+        assert_eq!(
+            fs::read_to_string(directory.path().join("starts")).unwrap(),
+            "cuda\ncpu\n"
+        );
+        assert!(!directory.path().join("runtimes/qwen").exists());
+    }
 
     #[test]
     fn provider_selection_covers_every_onnx_model_family() {

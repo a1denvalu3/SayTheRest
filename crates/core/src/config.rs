@@ -11,6 +11,38 @@ pub enum EngineConfig {
     SherpaOnnxKitten(KittenConfig),
     SherpaOnnxPocket(PocketConfig),
     Qwen3Tts(Qwen3TtsConfig),
+    Qwen3TtsOnnx(QwenOnnxConfig),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct QwenOnnxConfig {
+    #[serde(default = "native_worker_path")]
+    pub worker: PathBuf,
+    pub model: PathBuf,
+    pub runtime: Option<PathBuf>,
+    #[serde(default = "default_qwen_device")]
+    pub device: String,
+    #[serde(default = "default_onnx_precision")]
+    pub precision: String,
+    #[serde(default = "default_threads")]
+    pub num_threads: usize,
+    #[serde(default = "default_qwen_language")]
+    pub language: String,
+}
+
+fn default_onnx_precision() -> String {
+    "int4".into()
+}
+pub fn native_worker_path() -> PathBuf {
+    let name = if cfg!(windows) {
+        "sayit-inference-worker.exe"
+    } else {
+        "sayit-inference-worker"
+    };
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.join(name)))
+        .unwrap_or_else(|| name.into())
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -138,6 +170,7 @@ impl EngineConfig {
             Self::SherpaOnnxKokoro(c) => &c.provider,
             Self::SherpaOnnxKitten(c) => &c.provider,
             Self::Qwen3Tts(c) => &c.device,
+            Self::Qwen3TtsOnnx(c) => &c.device,
         }
     }
 
@@ -147,7 +180,7 @@ impl EngineConfig {
             Self::SherpaOnnxPocket(c) => (&mut c.provider, &mut c.executable),
             Self::SherpaOnnxKokoro(c) => (&mut c.provider, &mut c.executable),
             Self::SherpaOnnxKitten(c) => (&mut c.provider, &mut c.executable),
-            Self::Qwen3Tts(_) => return,
+            Self::Qwen3Tts(_) | Self::Qwen3TtsOnnx(_) => return,
         };
         *target = provider.into();
         if let Some(path) = executable {
@@ -160,6 +193,8 @@ impl EngineConfig {
         if let Self::Qwen3Tts(qwen) = &mut config {
             qwen.device = "cpu".into();
             qwen.dtype = "float32".into();
+        } else if let Self::Qwen3TtsOnnx(qwen) = &mut config {
+            qwen.device = "cpu".into();
         } else {
             config.set_sherpa_provider("cpu", None);
         }
@@ -175,8 +210,60 @@ impl EngineConfig {
         Ok(config)
     }
 
+    pub fn is_qwen(&self) -> bool {
+        matches!(self, Self::Qwen3Tts(_) | Self::Qwen3TtsOnnx(_))
+    }
+
+    pub fn requires_reference(&self) -> bool {
+        matches!(self, Self::SherpaOnnxPocket(_) | Self::Qwen3TtsOnnx(_))
+            || matches!(self, Self::Qwen3Tts(qwen) if matches!(qwen.mode, Qwen3TtsMode::VoiceClone))
+    }
+
     pub fn validate(&self) -> Result<()> {
         match self {
+            Self::Qwen3TtsOnnx(qwen) => {
+                anyhow::ensure!(
+                    matches!(qwen.precision.as_str(), "int4" | "fp32"),
+                    "native Qwen precision must be int4 or fp32"
+                );
+                anyhow::ensure!(
+                    matches!(qwen.device.as_str(), "auto" | "cpu" | "cuda" | "cuda:0"),
+                    "invalid native Qwen device"
+                );
+                anyhow::ensure!(
+                    (1..=64).contains(&qwen.num_threads),
+                    "native Qwen threads must be between 1 and 64"
+                );
+                for name in [
+                    "model.json",
+                    "vocab.json",
+                    "merges.txt",
+                    "tokenizer_config.json",
+                ] {
+                    anyhow::ensure!(
+                        qwen.model.join(name).is_file(),
+                        "native Qwen is missing {name}"
+                    );
+                }
+                for name in [
+                    "talker_cache",
+                    "code_predictor",
+                    "text_embed",
+                    "codec_embed",
+                    "residual_embed",
+                    "speaker_encoder",
+                    "tok_encoder",
+                    "tok_decoder",
+                ] {
+                    anyhow::ensure!(
+                        qwen.model
+                            .join(&qwen.precision)
+                            .join(format!("{name}.onnx"))
+                            .is_file(),
+                        "native Qwen is missing {name}"
+                    );
+                }
+            }
             Self::SherpaOnnxVits(vits) => {
                 if vits.num_threads == 0 {
                     bail!("num_threads must be at least 1");

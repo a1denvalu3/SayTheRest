@@ -285,6 +285,7 @@ impl ModelManager {
         fs::create_dir_all(&root)?;
         let executable = initial_config
             .and_then(|path| EngineConfig::from_path(path).ok())
+            .filter(|config| !config.is_qwen())
             .map(|config| SherpaOnnxEngine::from_config(config).executable())
             .unwrap_or_else(|| {
                 let name = if cfg!(windows) {
@@ -388,6 +389,9 @@ impl ModelManager {
                     replace_path(&mut config.python, &self.qwen_runtime.python())
                         | replace_path(&mut config.worker, &self.qwen_runtime.worker())
                 }
+                EngineConfig::Qwen3TtsOnnx(config) => {
+                    replace_path(&mut config.worker, &sayit_core::native_worker_path())
+                }
             };
             if !changed {
                 continue;
@@ -413,16 +417,45 @@ impl ModelManager {
             .iter()
             .map(|entry| {
                 let installed = self.config_path(entry.id).is_file();
-                let selected_speaker = EngineConfig::from_path(&self.config_path(entry.id))
-                    .ok()
+                let installed_config = EngineConfig::from_path(&self.config_path(entry.id)).ok();
+                let native = match &installed_config {
+                    Some(EngineConfig::Qwen3TtsOnnx(config)) => Some(config),
+                    _ => None,
+                };
+                let size_bytes = native
+                    .map(|config| {
+                        let prefix = format!("{}/", config.precision);
+                        sayit_core::onnx_runtime::model_assets()
+                            .files
+                            .iter()
+                            .filter(|file| {
+                                !file.path.contains('/') || file.path.starts_with(&prefix)
+                            })
+                            .map(|file| file.size)
+                            .sum()
+                    })
+                    .unwrap_or(entry.size);
+                let speed_note = if native.is_some() {
+                    "Experimental native ONNX inference; compare precision, memory and speed with the local benchmark."
+                } else {
+                    entry.speed_note
+                };
+                let selected_speaker = installed_config
+                    .as_ref()
                     .and_then(|config| match config {
                         EngineConfig::SherpaOnnxVits(config) => Some(config.speaker_id),
                         EngineConfig::SherpaOnnxKokoro(config) => Some(config.speaker_id),
                         EngineConfig::SherpaOnnxKitten(config) => Some(config.speaker_id),
                         EngineConfig::SherpaOnnxPocket(_) => None,
-                        EngineConfig::Qwen3Tts(_) => None,
+                        EngineConfig::Qwen3Tts(_) | EngineConfig::Qwen3TtsOnnx(_) => None,
                     });
                 ModelDescriptor {
+                    inference_backend: match installed_config.as_ref() {
+                        Some(EngineConfig::Qwen3TtsOnnx(_)) => Some("onnx".into()),
+                        Some(EngineConfig::Qwen3Tts(_)) => Some("pytorch".into()),
+                        _ => None,
+                    },
+                    weight_precision: native.map(|config| config.precision.clone()),
                     inference_device: None,
                     id: entry.id.into(),
                     name: entry.name.into(),
@@ -431,7 +464,7 @@ impl ModelManager {
                         .iter()
                         .map(|value| (*value).into())
                         .collect(),
-                    size_bytes: entry.size,
+                    size_bytes,
                     license: entry.license.into(),
                     license_url: entry.license_url.into(),
                     installed,
@@ -447,7 +480,7 @@ impl ModelManager {
                     },
                     download: self.progress.lock().unwrap().get(entry.id).cloned(),
                     quality_note: entry.quality_note.into(),
-                    speed_note: entry.speed_note.into(),
+                    speed_note: speed_note.into(),
                     benchmark: benchmarks.get(entry.id).cloned(),
                     recommended: recommended == Some(entry.id),
                     supports_native_speaking_pace: !entry.capabilities.voice_cloning,
@@ -470,6 +503,8 @@ impl ModelManager {
                 .unwrap()
                 .iter()
                 .map(|entry| ModelDescriptor {
+                    inference_backend: None,
+                    weight_precision: None,
                     inference_device: None,
                     id: entry.id.clone(),
                     name: entry.name.clone(),
@@ -547,11 +582,24 @@ impl ModelManager {
             EngineConfig::SherpaOnnxKitten(config) => config.speaker_id = speaker_id,
             EngineConfig::SherpaOnnxPocket(_) => bail!("model does not provide preset voices"),
             EngineConfig::Qwen3Tts(config) => config.speaker = Some(voice_id.into()),
+            EngineConfig::Qwen3TtsOnnx(_) => bail!("native Qwen Base requires a cloned voice"),
         }
         Ok(config)
     }
 
     fn catalog_update_available(&self, entry: &CatalogEntry) -> bool {
+        if let Ok(EngineConfig::Qwen3TtsOnnx(_)) =
+            EngineConfig::from_path(&self.config_path(entry.id))
+        {
+            let manifest = sayit_core::onnx_runtime::model_assets();
+            return !self
+                .root
+                .join(entry.id)
+                .join("onnx")
+                .join(manifest.revision)
+                .join("installed")
+                .is_file();
+        }
         if !self.config_path(entry.id).is_file() {
             return false;
         }
@@ -563,6 +611,11 @@ impl ModelManager {
     }
 
     pub fn start_install(&self, id: &str) -> Result<()> {
+        if let Ok(EngineConfig::Qwen3TtsOnnx(config)) =
+            EngineConfig::from_path(&self.config_path(id))
+        {
+            return self.start_backend(id, "onnx", Some(&config.precision));
+        }
         let entry = *CATALOG
             .iter()
             .find(|entry| entry.id == id)
@@ -595,6 +648,181 @@ impl ModelManager {
                 }
                 manager.cancellations.lock().unwrap().remove(entry.id);
             })?;
+        Ok(())
+    }
+
+    /// Switch implementation without changing the model ID or saved voice profiles.
+    pub fn start_backend(&self, id: &str, backend: &str, precision: Option<&str>) -> Result<()> {
+        anyhow::ensure!(
+            id == "qwen3-tts-06b-base",
+            "backend selection is supported for Qwen3-TTS 0.6B Base only"
+        );
+        anyhow::ensure!(
+            matches!(backend, "onnx" | "pytorch"),
+            "backend must be onnx or pytorch"
+        );
+        let precision = precision.unwrap_or("int4");
+        anyhow::ensure!(
+            matches!(precision, "int4" | "fp32"),
+            "precision must be int4 or fp32"
+        );
+        let mut cancellations = self.cancellations.lock().unwrap();
+        anyhow::ensure!(
+            !cancellations.contains_key(id),
+            "model installation is already running"
+        );
+        let cancelled = Arc::new(AtomicBool::new(false));
+        cancellations.insert(id.into(), cancelled.clone());
+        drop(cancellations);
+        self.set_progress(id, DownloadState::Downloading, 0, 0, None);
+        let manager = self.clone();
+        let backend = backend.to_owned();
+        let precision = precision.to_owned();
+        let id = id.to_owned();
+        std::thread::Builder::new()
+            .name("qwen-backend-install".into())
+            .spawn(move || {
+                let result = if backend == "onnx" {
+                    manager.install_native_qwen(&id, &precision, &cancelled)
+                } else {
+                    manager.restore_pytorch_qwen(&id, &cancelled)
+                };
+                if let Err(error) = result {
+                    manager.set_progress(
+                        &id,
+                        if cancelled.load(Ordering::Relaxed) {
+                            DownloadState::Cancelled
+                        } else {
+                            DownloadState::Failed
+                        },
+                        0,
+                        0,
+                        Some(format!("{error:#}")),
+                    );
+                }
+                manager.cancellations.lock().unwrap().remove(&id);
+            })?;
+        Ok(())
+    }
+
+    fn install_native_qwen(&self, id: &str, precision: &str, cancelled: &AtomicBool) -> Result<()> {
+        let worker = sayit_core::native_worker_path();
+        anyhow::ensure!(
+            worker.is_file(),
+            "sayit-inference-worker is missing; install the complete release or build the workspace"
+        );
+        let manifest = sayit_core::onnx_runtime::model_assets();
+        let directory = self.root.join(id);
+        let model = directory.join("onnx").join(&manifest.revision);
+        fs::create_dir_all(&model)?;
+        fs::write(
+            model.join("NOTICE.txt"),
+            include_bytes!("../../core/data/QWEN-ONNX-NOTICE.txt"),
+        )?;
+        fs::write(
+            model.join("LICENSE.txt"),
+            include_bytes!("../../core/data/Apache-2.0.txt"),
+        )?;
+        let selected = manifest
+            .files
+            .iter()
+            .filter(|file| {
+                !file.path.contains('/') || file.path.starts_with(&format!("{precision}/"))
+            })
+            .collect::<Vec<_>>();
+        let total = selected.iter().map(|file| file.size).sum();
+        let mut completed = 0;
+        for file in selected {
+            sayit_core::onnx_runtime::download(
+                file,
+                &model.join(&file.path),
+                cancelled,
+                |received| {
+                    self.set_progress(
+                        id,
+                        DownloadState::Downloading,
+                        completed + received,
+                        total,
+                        None,
+                    );
+                },
+            )?;
+            completed += file.size;
+        }
+        anyhow::ensure!(!cancelled.load(Ordering::Relaxed), "download cancelled");
+        self.set_progress(id, DownloadState::Installing, total, total, None);
+        sayit_core::onnx_runtime::NativeRuntimeManager::new(
+            self.root.parent().unwrap_or(&self.root),
+        )
+        .install(false)?;
+        anyhow::ensure!(!cancelled.load(Ordering::Relaxed), "download cancelled");
+        let settings = self.config_path(id);
+        let current = fs::read(&settings).ok();
+        let language = current
+            .as_ref()
+            .and_then(|bytes| serde_json::from_slice::<EngineConfig>(bytes).ok())
+            .and_then(|config| match config {
+                EngineConfig::Qwen3Tts(config) => Some(config.language),
+                EngineConfig::Qwen3TtsOnnx(config) => Some(config.language),
+                _ => None,
+            })
+            .unwrap_or_else(|| "Auto".into());
+        let config = EngineConfig::Qwen3TtsOnnx(sayit_core::QwenOnnxConfig {
+            worker,
+            model: model.clone(),
+            runtime: None,
+            device: "auto".into(),
+            precision: precision.into(),
+            num_threads: 4,
+            language,
+        });
+        config.validate()?;
+        if let Some(bytes) = current
+            && matches!(
+                serde_json::from_slice::<EngineConfig>(&bytes),
+                Ok(EngineConfig::Qwen3Tts(_))
+            )
+        {
+            fs::write(directory.join("sayit-config.pytorch.json"), bytes)?;
+        }
+        fs::write(
+            model.join("installed"),
+            format!("{}\n{}\n", manifest.revision, manifest.upstream_revision),
+        )?;
+        let destination = directory.join(SAYIT_CONFIG);
+        let pending = destination.with_extension("json.native-tmp");
+        fs::write(&pending, serde_json::to_vec_pretty(&config)?)?;
+        fs::rename(pending, destination)?;
+        self.set_progress(id, DownloadState::Installed, total, total, None);
+        Ok(())
+    }
+
+    fn restore_pytorch_qwen(&self, id: &str, cancelled: &AtomicBool) -> Result<()> {
+        let directory = self.root.join(id);
+        if !directory.join("model.safetensors").is_file() {
+            let entry = *CATALOG
+                .iter()
+                .find(|entry| entry.id == id)
+                .context("unknown Qwen model")?;
+            return self.install_hugging_face_catalog(entry, cancelled);
+        }
+        self.set_progress(id, DownloadState::Installing, 0, 0, None);
+        self.qwen_runtime.install_for(TorchFlavor::Cpu)?;
+        anyhow::ensure!(!cancelled.load(Ordering::Relaxed), "download cancelled");
+        let backup = directory.join("sayit-config.pytorch.json");
+        if backup.is_file() {
+            let config = EngineConfig::from_path(&backup)?;
+            anyhow::ensure!(
+                matches!(config, EngineConfig::Qwen3Tts(_)),
+                "invalid PyTorch backend backup"
+            );
+            let pending = directory.join("sayit-config.restore-tmp");
+            fs::write(&pending, serde_json::to_vec_pretty(&config)?)?;
+            fs::rename(pending, directory.join(SAYIT_CONFIG))?;
+        } else {
+            self.write_qwen_engine_config(&directory, &directory)?;
+        }
+        self.set_progress(id, DownloadState::Installed, 0, 0, None);
         Ok(())
     }
 
@@ -1463,6 +1691,13 @@ fn relocate_config(
             config.model = relocate(config.model)?;
             Ok(EngineConfig::Qwen3Tts(config))
         }
+        EngineConfig::Qwen3TtsOnnx(mut config) => {
+            config.model = relocate(config.model)?;
+            config.worker = sayit_core::native_worker_path();
+            // Runtime paths are local installation details, never imported from a model.
+            config.runtime = None;
+            Ok(EngineConfig::Qwen3TtsOnnx(config))
+        }
     }
 }
 
@@ -1492,12 +1727,7 @@ fn validate_community_metadata(display_name: &str, license: &str, license_url: &
 }
 
 fn supports_voice_cloning(config: &EngineConfig) -> bool {
-    matches!(config, EngineConfig::SherpaOnnxPocket(_))
-        || matches!(
-            config,
-            EngineConfig::Qwen3Tts(qwen)
-                if matches!(qwen.mode, sayit_core::Qwen3TtsMode::VoiceClone)
-        )
+    config.requires_reference()
 }
 
 fn valid_hf_revision(value: &str) -> bool {
@@ -1564,6 +1794,7 @@ fn config_requirements(config: &EngineConfig) -> Result<Vec<(String, bool)>> {
             path(&config.data_dir, true)?,
         ]),
         EngineConfig::Qwen3Tts(config) => Ok(vec![path(&config.model, true)?]),
+        EngineConfig::Qwen3TtsOnnx(config) => Ok(vec![path(&config.model, true)?]),
     }
 }
 

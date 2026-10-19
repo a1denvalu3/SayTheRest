@@ -3,7 +3,9 @@ mod config;
 mod device;
 mod engine;
 mod inference;
+pub mod onnx_runtime;
 mod qwen;
+pub mod qwen_onnx;
 pub mod qwen_runtime;
 mod resident;
 mod text;
@@ -12,7 +14,7 @@ mod wav;
 pub use benchmark::{BenchmarkReport, BenchmarkRunner};
 pub use config::{
     EngineConfig, KittenConfig, KokoroConfig, PocketConfig, Qwen3TtsConfig, Qwen3TtsMode,
-    VitsConfig,
+    QwenOnnxConfig, VitsConfig, native_worker_path,
 };
 pub use device::{CudaDevice, TorchFlavor};
 pub use engine::{SherpaOnnxEngine, SynthesisRequest, TtsEngine};

@@ -12,6 +12,14 @@
       "controlToken": { "type": "http", "scheme": "bearer", "description": "Read/write per-user token." }
     },
     "schemas": {
+      "ModelBackendRequest": {
+        "type": "object",
+        "required": ["backend"],
+        "properties": {
+          "backend": { "type": "string", "enum": ["onnx", "pytorch"] },
+          "precision": { "type": ["string", "null"], "enum": ["int4", "fp32", null], "description": "Native weight precision; defaults to int4." }
+        }
+      },
       "VoiceCloneRequest": {
         "type": "object",
         "required": ["name", "reference_audio_path", "speaker_permission_confirmed"],
@@ -70,6 +78,7 @@
       "post": { "security": [{ "controlToken": [] }], "summary": "Queue speech with an optional native speaking pace", "responses": { "202": { "description": "Queued" }, "413": { "description": "Long text requires confirmation" } } }
     },
     "/playback/{action}": { "post": { "security": [{ "controlToken": [] }], "summary": "Pause, resume, stop, seek, set rate, or set volume", "parameters": [{ "in": "path", "name": "action", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Applied" } } } },
+    "/models/{id}/backend": {"post": {"summary": "Prepare and select the Qwen native ONNX or PyTorch backend without changing saved voice IDs", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ModelBackendRequest"}}}}, "responses": {"202": {"description": "Asynchronous backend setup started; inspect model download progress"}, "422": {"description": "Unsupported model, backend, or precision"}}, "security": [{"controlToken": []}]}},
     "/models": { "get": { "summary": "Model catalog and installation state", "responses": { "200": { "description": "Models" } } } },
     "/models/{id}/update": { "post": { "security": [{ "controlToken": [] }], "summary": "Download, verify, and replace an outdated curated model", "responses": { "202": { "description": "Update started" } } } },
     "/models/{id}/voices/{voice_id}/select": { "post": { "security": [{ "controlToken": [] }], "summary": "Select a built-in voice exposed by an installed model", "responses": { "204": { "description": "Voice selected" } } } },

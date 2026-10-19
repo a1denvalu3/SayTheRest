@@ -1,16 +1,23 @@
-use crate::{Qwen3TtsConfig, Qwen3TtsMode, SynthesisRequest};
+use crate::{Qwen3TtsConfig, Qwen3TtsMode, QwenOnnxConfig, SynthesisRequest};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
     io::{BufRead, BufReader, Write},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 pub struct ResidentQwenEngine {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
-    config: Qwen3TtsConfig,
+    language: String,
+    speaker: Option<String>,
+    voice_description: Option<String>,
+    device: String,
+    dtype: String,
+    backend: String,
+    quantization: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -18,6 +25,8 @@ struct ReadyResponse {
     ready: bool,
     device: Option<String>,
     dtype: Option<String>,
+    backend: Option<String>,
+    quantization: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -48,7 +57,7 @@ impl ResidentQwenEngine {
             Qwen3TtsMode::VoiceDesign => "voice-design",
             Qwen3TtsMode::VoiceClone => "voice-clone",
         };
-        let mut child = Command::new(&config.python)
+        let child = Command::new(&config.python)
             .arg(&config.worker)
             .arg("--model")
             .arg(&config.model)
@@ -65,6 +74,61 @@ impl ResidentQwenEngine {
             .stderr(Stdio::inherit())
             .spawn()
             .with_context(|| format!("failed to start {}", config.python.display()))?;
+        Self::from_child(
+            child,
+            &config.language,
+            config.speaker.clone(),
+            config.voice_description.clone(),
+        )
+    }
+
+    pub fn load_native(config: &QwenOnnxConfig) -> Result<Self> {
+        let runtime = config
+            .runtime
+            .as_ref()
+            .context("native ONNX runtime was not prepared")?;
+        let mut command = Command::new(&config.worker);
+        command
+            .arg("--model")
+            .arg(&config.model)
+            .arg("--runtime")
+            .arg(runtime)
+            .arg("--precision")
+            .arg(&config.precision)
+            .arg("--device")
+            .arg(&config.device)
+            .arg("--threads")
+            .arg(config.num_threads.to_string());
+        let key = if cfg!(windows) {
+            "PATH"
+        } else {
+            "LD_LIBRARY_PATH"
+        };
+        let mut directories = vec![runtime.parent().context("invalid runtime path")?.to_owned()];
+        if let Some(existing) = std::env::var_os(key) {
+            directories.extend(std::env::split_paths(&existing));
+        }
+        command.env(key, std::env::join_paths(directories)?);
+        let child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .with_context(|| {
+                format!(
+                    "cannot start {}; build/install sayit-inference-worker",
+                    config.worker.display()
+                )
+            })?;
+        Self::from_child(child, &config.language, None, None)
+    }
+
+    fn from_child(
+        mut child: Child,
+        language: &str,
+        speaker: Option<String>,
+        voice_description: Option<String>,
+    ) -> Result<Self> {
         let stdin = child.stdin.take().context("Qwen worker has no stdin")?;
         let stdout = BufReader::new(child.stdout.take().context("Qwen worker has no stdout")?);
         // Own the child before reading its startup response so every failure
@@ -73,7 +137,13 @@ impl ResidentQwenEngine {
             child,
             stdin,
             stdout,
-            config: config.clone(),
+            language: language.into(),
+            speaker,
+            voice_description,
+            device: "cpu".into(),
+            dtype: "float32".into(),
+            backend: "qwen3-tts-pytorch".into(),
+            quantization: None,
         };
         let mut line = String::new();
         anyhow::ensure!(
@@ -83,31 +153,41 @@ impl ResidentQwenEngine {
         let ready: ReadyResponse = serde_json::from_str(&line)
             .context("Qwen worker returned an invalid ready response")?;
         anyhow::ensure!(ready.ready, "Qwen worker did not become ready");
-        engine.config.device = ready.device.unwrap_or_else(|| {
-            if config.device == "auto" {
-                "cpu".into()
-            } else {
-                config.device.clone()
-            }
-        });
-        engine.config.dtype = ready.dtype.unwrap_or_else(|| {
-            if config.dtype == "auto" {
-                "float32".into()
-            } else {
-                config.dtype.clone()
-            }
-        });
+        if let Some(device) = ready.device {
+            engine.device = device;
+        }
+        if let Some(dtype) = ready.dtype {
+            engine.dtype = dtype;
+        }
+        if let Some(backend) = ready.backend {
+            engine.backend = backend;
+        }
+        engine.quantization = ready.quantization;
         Ok(engine)
     }
 
     pub fn device(&self) -> &str {
-        &self.config.device
+        &self.device
     }
     pub fn dtype(&self) -> &str {
-        &self.config.dtype
+        &self.dtype
+    }
+    pub fn backend(&self) -> &str {
+        &self.backend
+    }
+    pub fn quantization(&self) -> Option<&str> {
+        self.quantization.as_deref()
     }
 
     pub fn synthesize(&mut self, request: &SynthesisRequest<'_>) -> Result<()> {
+        self.synthesize_cancellable(request, None)
+    }
+
+    pub fn synthesize_cancellable(
+        &mut self,
+        request: &SynthesisRequest<'_>,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<()> {
         if request.text.trim().is_empty() {
             bail!("text must not be empty");
         }
@@ -117,9 +197,9 @@ impl ResidentQwenEngine {
         let payload = WorkerRequest {
             text: request.text,
             output: request.output.to_string_lossy().into_owned(),
-            language: &self.config.language,
-            speaker: self.config.speaker.as_deref(),
-            voice_description: self.config.voice_description.as_deref(),
+            language: &self.language,
+            speaker: self.speaker.as_deref(),
+            voice_description: self.voice_description.as_deref(),
             reference_audio: request
                 .reference_audio
                 .map(|path| path.to_string_lossy().into_owned()),
@@ -129,10 +209,31 @@ impl ResidentQwenEngine {
         self.stdin.write_all(b"\n")?;
         self.stdin.flush()?;
         let mut line = String::new();
-        anyhow::ensure!(
-            self.stdout.read_line(&mut line)? > 0,
-            "Qwen worker exited during synthesis"
-        );
+        let count = if let Some(cancelled) = cancelled {
+            std::thread::scope(|scope| -> Result<usize> {
+                let stdout = &mut self.stdout;
+                let line = &mut line;
+                let reader = scope.spawn(move || stdout.read_line(line));
+                while !reader.is_finished() {
+                    if cancelled.load(Ordering::Relaxed) {
+                        let _ = self.child.kill();
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                let count = reader
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("Qwen response reader failed"))??;
+                anyhow::ensure!(
+                    !cancelled.load(Ordering::Relaxed),
+                    "speech generation cancelled"
+                );
+                Ok(count)
+            })?
+        } else {
+            self.stdout.read_line(&mut line)?
+        };
+        anyhow::ensure!(count > 0, "Qwen worker exited during synthesis");
         let response: SynthesisResponse =
             serde_json::from_str(&line).context("Qwen worker returned an invalid response")?;
         if !response.ok {
@@ -160,6 +261,51 @@ impl Drop for ResidentQwenEngine {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cancelling_inference_terminates_the_worker_promptly() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("worker.py");
+        std::fs::write(&worker,"import sys,json,time\nprint(json.dumps({'ready':True}),flush=True)\nfor line in sys.stdin: time.sleep(60)\n").unwrap();
+        let config = Qwen3TtsConfig {
+            python: "/usr/bin/python3".into(),
+            worker,
+            model: directory.path().into(),
+            mode: Qwen3TtsMode::VoiceClone,
+            device: "cpu".into(),
+            dtype: "float32".into(),
+            language: "Auto".into(),
+            speaker: None,
+            voice_description: None,
+        };
+        let mut engine = ResidentQwenEngine::load(&config).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let output = directory.path().join("out.wav");
+        let start = std::time::Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                cancelled.store(true, Ordering::Relaxed);
+            });
+            let error = engine
+                .synthesize_cancellable(
+                    &SynthesisRequest {
+                        text: "hello",
+                        output: &output,
+                        reference_audio: None,
+                        reference_text: None,
+                        speaking_pace: 1.0,
+                    },
+                    Some(&cancelled),
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("cancelled"));
+        });
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+        assert!(engine.child.wait().unwrap().code().is_none());
+        assert!(!output.exists());
+    }
 
     #[test]
     fn worker_request_never_serializes_absent_reference_audio() {

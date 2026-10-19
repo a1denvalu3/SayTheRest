@@ -210,6 +210,10 @@ impl Default for TextCleaningSettings {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelDescriptor {
     #[serde(default)]
+    pub inference_backend: Option<String>,
+    #[serde(default)]
+    pub weight_precision: Option<String>,
+    #[serde(default)]
     pub inference_device: Option<InferenceDeviceStatus>,
     pub id: String,
     pub name: String,
@@ -403,4 +407,14 @@ pub struct InferenceDeviceStatus {
     pub device: String,
     pub dtype: Option<String>,
     pub fallback_reason: Option<String>,
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub quantization: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ModelBackendRequest {
+    pub backend: String,
+    pub precision: Option<String>,
 }

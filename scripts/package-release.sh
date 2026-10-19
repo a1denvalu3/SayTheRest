@@ -37,12 +37,13 @@ mkdir -p "$STAGE/runtime" "$STAGE/icons" "$ROOT_DIR/dist"
 cargo build --release --locked --target "$TARGET" --manifest-path "$ROOT_DIR/Cargo.toml"
 
 case "$TARGET" in
-  *windows*) APP_BINARY=sayit.exe; SERVICE_BINARY=sayit-service.exe; DESKTOP_BINARY=sayit-desktop.exe ;;
-  *) APP_BINARY=sayit; SERVICE_BINARY=sayit-service; DESKTOP_BINARY=sayit-desktop ;;
+  *windows*) APP_BINARY=sayit.exe; SERVICE_BINARY=sayit-service.exe; DESKTOP_BINARY=sayit-desktop.exe; INFERENCE_BINARY=sayit-inference-worker.exe ;;
+  *) APP_BINARY=sayit; SERVICE_BINARY=sayit-service; DESKTOP_BINARY=sayit-desktop; INFERENCE_BINARY=sayit-inference-worker ;;
 esac
 cp "$ROOT_DIR/target/$TARGET/release/$APP_BINARY" "$STAGE/"
 cp "$ROOT_DIR/target/$TARGET/release/$SERVICE_BINARY" "$STAGE/"
 cp "$ROOT_DIR/target/$TARGET/release/$DESKTOP_BINARY" "$STAGE/"
+cp "$ROOT_DIR/target/$TARGET/release/$INFERENCE_BINARY" "$STAGE/"
 cp "$ROOT_DIR/LICENSE" "$ROOT_DIR/README.md" "$STAGE/"
 cp "$ROOT_DIR/apps/desktop/src-tauri/icons/icon.ico" "$STAGE/icons/"
 
@@ -57,6 +58,35 @@ cp "$ROOT_DIR/runtime/qwen-runtime/pyproject.toml" \
   "$ROOT_DIR/runtime/qwen-runtime/uv.lock" "$STAGE/runtime/generative/"
 rm "$ARCHIVE"
 
+# The native worker uses its own pinned runtime, isolated from sherpa's library ABI.
+case "$TARGET" in
+  *windows*)
+    NATIVE_ASSET=onnxruntime-win-x64-1.24.2.zip
+    NATIVE_SHA256=8e3e9c826375352e29cb2614fe44f3d7a4b0ff7b8028ad7a456af9d949a7e8b0
+    ;;
+  *)
+    NATIVE_ASSET=onnxruntime-linux-x64-1.24.2.tgz
+    NATIVE_SHA256=43725474ba5663642e17684717946693850e2005efbd724ac72da278fead25e6
+    ;;
+esac
+NATIVE_ARCHIVE="$ROOT_DIR/dist/$NATIVE_ASSET"
+mkdir -p "$STAGE/runtime/native"
+curl --fail --location --retry 3 \
+  "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/$NATIVE_ASSET" \
+  --output "$NATIVE_ARCHIVE"
+verify_sha256 "$NATIVE_SHA256" "$NATIVE_ARCHIVE"
+if [[ "$TARGET" == *windows* ]]; then
+  NATIVE_EXTRACT="$ROOT_DIR/dist/native-runtime-extract"
+  rm -rf "$NATIVE_EXTRACT"
+  7z x -y "$NATIVE_ARCHIVE" "-o$NATIVE_EXTRACT" >/dev/null
+  cp -a "$NATIVE_EXTRACT/onnxruntime-win-x64-1.24.2/." "$STAGE/runtime/native/"
+  rm -rf "$NATIVE_EXTRACT"
+else
+  tar -xzf "$NATIVE_ARCHIVE" -C "$STAGE/runtime/native" --strip-components=1
+fi
+rm "$NATIVE_ARCHIVE"
+cp "$ROOT_DIR/crates/core/data/QWEN-ONNX-NOTICE.txt" "$ROOT_DIR/crates/core/data/Apache-2.0.txt" "$STAGE/"
+
 if [[ "$TARGET" == *windows* ]]; then
   cp "$ROOT_DIR/packaging/setup.ps1" "$STAGE/"
   (cd "$ROOT_DIR/dist" && 7z a -tzip "$PACKAGE_NAME.zip" "$PACKAGE_NAME" >/dev/null)
@@ -67,7 +97,7 @@ if [[ "$TARGET" == *windows* ]]; then
     '$compiler = (Get-Command ISCC.exe -ErrorAction Stop).Source; & $compiler "/DStage=$env:STR_STAGE" "/DOutputDir=$env:STR_OUTPUT" $env:STR_ISS; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
 else
   cp "$ROOT_DIR/packaging/setup.sh" "$STAGE/"
-  chmod +x "$STAGE/setup.sh" "$STAGE/sayit" "$STAGE/sayit-service" "$STAGE/sayit-desktop"
+  chmod +x "$STAGE/setup.sh" "$STAGE/sayit" "$STAGE/sayit-service" "$STAGE/sayit-desktop" "$STAGE/sayit-inference-worker"
   tar -czf "$ROOT_DIR/dist/$PACKAGE_NAME.tar.gz" -C "$ROOT_DIR/dist" "$PACKAGE_NAME"
 
   VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT_DIR/Cargo.toml" | head -n 1)
@@ -81,8 +111,9 @@ else
     "$DEB_ROOT/usr/share/applications" \
     "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps"
   cp -a "$STAGE/runtime" "$DEB_ROOT/opt/sayit/"
-  cp "$STAGE/sayit" "$STAGE/sayit-service" "$STAGE/sayit-desktop" \
+  cp "$STAGE/sayit" "$STAGE/sayit-service" "$STAGE/sayit-desktop" "$STAGE/sayit-inference-worker" \
     "$STAGE/LICENSE" "$STAGE/README.md" "$DEB_ROOT/opt/sayit/"
+  cp "$STAGE/Apache-2.0.txt" "$STAGE/QWEN-ONNX-NOTICE.txt" "$DEB_ROOT/opt/sayit/"
   cp "$ROOT_DIR/packaging/linux/sayit.service" \
     "$ROOT_DIR/packaging/linux/sayit-desktop.service" \
     "$DEB_ROOT/usr/lib/systemd/user/"
@@ -94,6 +125,7 @@ else
   chmod 755 "$DEB_ROOT/opt/sayit/sayit" \
     "$DEB_ROOT/opt/sayit/sayit-service" \
     "$DEB_ROOT/opt/sayit/sayit-desktop" \
+    "$DEB_ROOT/opt/sayit/sayit-inference-worker" \
     "$DEB_ROOT/usr/bin/sayit-desktop"
   chmod 644 "$DEB_ROOT/opt/sayit/LICENSE" "$DEB_ROOT/opt/sayit/README.md" \
     "$DEB_ROOT/usr/lib/systemd/user/sayit.service" \
@@ -121,7 +153,9 @@ EOF
   rm -rf "$APPDIR"
   mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/256x256/apps" "$APPDIR/usr/share/metainfo" "$APPDIR/usr/share/sayit"
   cp -a "$STAGE/runtime" "$APPDIR/usr/bin/"
-  cp "$STAGE/sayit" "$STAGE/sayit-service" "$STAGE/sayit-desktop" "$APPDIR/usr/bin/"
+  cp "$STAGE/sayit" "$STAGE/sayit-service" "$STAGE/sayit-desktop" "$STAGE/sayit-inference-worker" "$APPDIR/usr/bin/"
+  mkdir -p "$APPDIR/usr/share/doc/sayit"
+  cp "$STAGE/LICENSE" "$STAGE/Apache-2.0.txt" "$STAGE/QWEN-ONNX-NOTICE.txt" "$APPDIR/usr/share/doc/sayit/"
   cp "$ROOT_DIR/packaging/linux-appimage/AppRun" "$APPDIR/AppRun"
   cp "$ROOT_DIR/packaging/linux/sayit.desktop" "$APPDIR/usr/share/applications/sayit.desktop"
   cp "$ROOT_DIR/apps/desktop/src-tauri/icons/icon.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/sayit.png"
@@ -151,6 +185,7 @@ EOF
     "$LINUXDEPLOY" --appdir "$APPDIR" \
       --executable "$APPDIR/usr/bin/sayit-desktop" \
       --executable "$APPDIR/usr/bin/sayit-service" \
+      --executable "$APPDIR/usr/bin/sayit-inference-worker" \
       --desktop-file "$APPDIR/usr/share/applications/sayit.desktop" \
       --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/sayit.png"
   APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 \

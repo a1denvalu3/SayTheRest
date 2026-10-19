@@ -45,7 +45,7 @@ impl SherpaOnnxEngine {
     }
 
     pub fn command_args(&self, request: &SynthesisRequest<'_>) -> Result<Vec<String>> {
-        if matches!(self.config, EngineConfig::Qwen3Tts(_)) {
+        if self.config.is_qwen() {
             bail!("Qwen models require the persistent generative worker");
         }
         anyhow::ensure!(
@@ -109,14 +109,14 @@ impl SherpaOnnxEngine {
                 format!("--sid={}", config.speaker_id),
                 format!("--kitten-length-scale={}", 1.0 / request.speaking_pace),
             ],
-            EngineConfig::Qwen3Tts(_) => unreachable!(),
+            EngineConfig::Qwen3Tts(_) | EngineConfig::Qwen3TtsOnnx(_) => unreachable!(),
         };
         let (provider, threads) = match &self.config {
             EngineConfig::SherpaOnnxVits(config) => (&config.provider, config.num_threads),
             EngineConfig::SherpaOnnxPocket(config) => (&config.provider, config.num_threads),
             EngineConfig::SherpaOnnxKokoro(config) => (&config.provider, config.num_threads),
             EngineConfig::SherpaOnnxKitten(config) => (&config.provider, config.num_threads),
-            EngineConfig::Qwen3Tts(_) => unreachable!(),
+            EngineConfig::Qwen3Tts(_) | EngineConfig::Qwen3TtsOnnx(_) => unreachable!(),
         };
         args.push(Self::arg("output-filename", request.output));
         args.push(format!("--provider={provider}"));
@@ -132,6 +132,7 @@ impl SherpaOnnxEngine {
             EngineConfig::SherpaOnnxKokoro(config) => config.executable.clone(),
             EngineConfig::SherpaOnnxKitten(config) => config.executable.clone(),
             EngineConfig::Qwen3Tts(config) => config.python.clone(),
+            EngineConfig::Qwen3TtsOnnx(config) => config.worker.clone(),
         }
     }
 }
@@ -181,7 +182,9 @@ impl TtsEngine for SherpaOnnxEngine {
             EngineConfig::SherpaOnnxPocket(_) => "sherpa-onnx-pocket/process-cold",
             EngineConfig::SherpaOnnxKokoro(_) => "sherpa-onnx-kokoro/process-cold",
             EngineConfig::SherpaOnnxKitten(_) => "sherpa-onnx-kitten/process-cold",
-            EngineConfig::Qwen3Tts(_) => "qwen3-tts/persistent-worker",
+            EngineConfig::Qwen3Tts(_) | EngineConfig::Qwen3TtsOnnx(_) => {
+                "qwen3-tts/persistent-worker"
+            }
         }
     }
 }

@@ -34,4 +34,4 @@ Name: "{group}\Uninstall sayIt"; Filename: "{uninstallexe}"
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup.ps1"""; WorkingDir: "{app}"; Description: "Start sayIt and enable launch at sign-in"; Flags: postinstall waituntilterminated
 
 [UninstallRun]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Get-Process sayit-service,sayit-desktop,say-the-rest-service,say-the-rest-desktop -ErrorAction SilentlyContinue | Stop-Process -Force; Unregister-ScheduledTask -TaskName 'sayIt','sayIt Desktop','Say the Rest','Say the Rest Desktop' -Confirm:$false -ErrorAction SilentlyContinue"""; Flags: runhidden; RunOnceId: "sayItCleanup"
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Get-Process sayit-service,sayit-desktop,sayit-inference-worker,say-the-rest-service,say-the-rest-desktop -ErrorAction SilentlyContinue | Stop-Process -Force; Unregister-ScheduledTask -TaskName 'sayIt','sayIt Desktop','Say the Rest','Say the Rest Desktop' -Confirm:$false -ErrorAction SilentlyContinue"""; Flags: runhidden; RunOnceId: "sayItCleanup"
