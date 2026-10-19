@@ -77,7 +77,16 @@ Run `sayit --help` for all commands.
 
 ## Build from source
 
-A current Rust toolchain is required:
+A current Rust toolchain is required. On Debian or Ubuntu, install the native
+build dependencies first:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libclang-dev libdbus-1-dev \
+  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
+```
+
+Then test and build the workspace:
 
 ```sh
 cargo test --workspace --locked
