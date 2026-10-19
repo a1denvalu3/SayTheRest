@@ -4019,7 +4019,7 @@ dependencies = [
 
 [[package]]
 name = "sayit"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4032,7 +4032,7 @@ dependencies = [
 
 [[package]]
 name = "sayit-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bzip2",
@@ -4056,7 +4056,7 @@ dependencies = [
 
 [[package]]
 name = "sayit-desktop"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "ashpd",
@@ -4083,7 +4083,7 @@ dependencies = [
 
 [[package]]
 name = "sayit-inference-worker"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4093,7 +4093,7 @@ dependencies = [
 
 [[package]]
 name = "sayit-protocol"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",
@@ -4102,7 +4102,7 @@ dependencies = [
 
 [[package]]
 name = "sayit-service"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4129,7 +4129,7 @@ dependencies = [
 
 [[package]]
 name = "sayit-service-app"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",

@@ -8,7 +8,7 @@
 [Setup]
 AppId={{81EF8C0F-B9DE-45AE-90DF-302D59AEE36E}
 AppName=sayIt
-AppVersion=0.1.1
+AppVersion=0.2.0
 AppPublisher=a1denvalu3
 DefaultDirName={localappdata}\Programs\sayIt
 DefaultGroupName=sayIt

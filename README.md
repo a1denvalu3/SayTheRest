@@ -101,6 +101,14 @@ Release packages also bundle a pinned sherpa-onnx runtime:
   sherpa-onnx-v1.13.4-linux-x64-shared.tar.bz2
 ```
 
+To publish packages on GitHub, update the version in `Cargo.toml`,
+`apps/desktop/src-tauri/tauri.conf.json`, and `packaging/windows-installer.iss`,
+refresh `Cargo.lock`, then commit and push a matching `v*` tag (for example,
+`v0.2.0`). The **Release packages** workflow builds both platforms and publishes
+the packages to that tag's GitHub release after both packaging jobs succeed.
+Manual runs on a branch only build downloadable workflow artifacts; the
+**publish** job runs only when the workflow uses a tag.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md)
