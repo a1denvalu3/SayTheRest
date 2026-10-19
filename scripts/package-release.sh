@@ -165,16 +165,16 @@ EOF
   cp "$ROOT_DIR/packaging/linux-appimage/sayit-appimage-desktop.service" "$APPDIR/usr/share/sayit/"
   chmod 755 "$APPDIR/AppRun" "$APPDIR/usr/bin/"sayit*
   LINUXDEPLOY="$ROOT_DIR/dist/linuxdeploy-x86_64.AppImage"
-  LINUXDEPLOY_SHA256=421ca71d5c69ea97c6309276232990d43df1dcece0edfaa26bbf926ff96ed12e
+  LINUXDEPLOY_SHA256=c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
   curl --fail --location --retry 3 \
-    "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage" \
+    "https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage" \
     --output "$LINUXDEPLOY"
   verify_sha256 "$LINUXDEPLOY_SHA256" "$LINUXDEPLOY"
   chmod +x "$LINUXDEPLOY"
   APPIMAGETOOL="$ROOT_DIR/dist/appimagetool-x86_64.AppImage"
-  APPIMAGETOOL_SHA256=a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0
+  APPIMAGETOOL_SHA256=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
   curl --fail --location --retry 3 \
-    "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" \
+    "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage" \
     --output "$APPIMAGETOOL"
   verify_sha256 "$APPIMAGETOOL_SHA256" "$APPIMAGETOOL"
   chmod +x "$APPIMAGETOOL"
