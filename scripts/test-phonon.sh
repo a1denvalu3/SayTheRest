@@ -8,6 +8,7 @@ trap 'rm -rf -- "$MODEL_ROOT"' EXIT
 
 python3 - "$ROOT_DIR/crates/core/data/phonon-assets.json" <<'PY' > "$MODEL_ROOT/assets.tsv"
 import json,sys
+sys.stdout.reconfigure(encoding='utf-8',newline='\n')
 manifest=json.load(open(sys.argv[1]))
 for entry in manifest['files']:
     print(entry['path'],entry['sha256'],f"https://huggingface.co/{manifest['repository']}/resolve/{manifest['revision']}/{entry['path']}",sep='\t')
