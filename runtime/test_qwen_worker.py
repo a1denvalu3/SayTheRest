@@ -40,6 +40,14 @@ class WaveWriter:
 
 
 class WorkerValidationTests(unittest.TestCase):
+    def test_generation_controls_are_bounded_and_do_not_change_legacy_defaults(self):
+        self.assertEqual(WORKER.generation_options({}), {"max_new_tokens": WORKER.MAX_NEW_TOKENS})
+        values = {"max_new_tokens": 256, "temperature": 0.65, "top_p": 0.9, "top_k": 40, "repetition_penalty": 1.2}
+        self.assertEqual(WORKER.generation_options(values), values)
+        for value in [{"temperature": float("nan")}, {"top_p": 0.1}, {"top_k": True}, {"top_k": 101}, {"repetition_penalty": 2}, {"max_new_tokens": 0}]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                WORKER.generation_options(value)
+
     def test_automatic_device_selection_uses_available_hardware_and_cpu_fallback(self):
         torch = SimpleNamespace(
             cuda=SimpleNamespace(is_available=lambda: True, is_bf16_supported=lambda: True),
@@ -186,6 +194,16 @@ class WorkerSynthesisTests(unittest.TestCase):
         for call in self.model.generate_voice_clone.call_args_list:
             self.assertIs(call.kwargs["voice_clone_prompt"], prompt)
         self.assertEqual(self.torch.inference_mode.call_count, 3)
+
+    def test_generation_controls_reach_the_model_and_seed_the_request(self):
+        self.model.generate_voice_clone.side_effect = self.generate
+        self.torch.manual_seed = Mock()
+        controls = {"max_new_tokens": 256, "temperature": 0.65, "top_p": 0.9, "top_k": 40, "repetition_penalty": 1.2}
+        WORKER.synthesize(self.model, "voice-clone", self.request(seed=417, **controls), self.torch, self.soundfile)
+        self.torch.manual_seed.assert_called_once_with(417)
+        for call in self.model.generate_voice_clone.call_args_list:
+            for key, value in controls.items():
+                self.assertEqual(call.kwargs[key], value)
 
     def test_pcm_is_emitted_before_publishing_the_complete_file(self):
         self.model.generate_voice_clone.side_effect = self.generate

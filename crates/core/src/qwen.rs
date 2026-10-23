@@ -52,6 +52,8 @@ struct WorkerAudio {
 
 #[derive(Serialize)]
 struct WorkerRequest<'a> {
+    #[serde(flatten)]
+    generation: Option<&'a crate::QwenGenerationOptions>,
     text: &'a str,
     output: String,
     language: &'a str,
@@ -196,17 +198,16 @@ impl ResidentSpeechWorker {
             directories.extend(std::env::split_paths(&existing));
         }
         command.env(key, std::env::join_paths(directories)?);
-        let child = command
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .with_context(|| {
-                format!(
-                    "cannot start {}; build/install sayit-inference-worker",
-                    config.worker.display()
-                )
-            })?;
+            .stderr(Stdio::inherit());
+        let child = spawn_native_worker(&mut command).with_context(|| {
+            format!(
+                "cannot start {}; build/install sayit-inference-worker",
+                config.worker.display()
+            )
+        })?;
         Self::from_child(child, language, None, None)
     }
 
@@ -297,10 +298,23 @@ impl ResidentSpeechWorker {
         if request.text.trim().is_empty() {
             bail!("text must not be empty");
         }
+        if let Some(options) = request.generation {
+            anyhow::ensure!(
+                self.backend.starts_with("qwen3-tts-"),
+                "generation tuning is supported only by Qwen models"
+            );
+            options.validate()?;
+            anyhow::ensure!(
+                self.backend != "qwen3-tts-pytorch"
+                    || options.seed.is_none_or(|seed| seed <= u64::from(u32::MAX)),
+                "PyTorch seed must be an unsigned 32-bit integer"
+            );
+        }
         if let Some(parent) = request.output.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let payload = WorkerRequest {
+            generation: request.generation,
             text: request.text,
             output: request.output.to_string_lossy().into_owned(),
             language: &self.language,
@@ -391,6 +405,23 @@ impl ResidentSpeechWorker {
     }
 }
 
+fn spawn_native_worker(command: &mut Command) -> std::io::Result<Child> {
+    for attempt in 0..4 {
+        match command.spawn() {
+            Err(error)
+                if cfg!(target_os = "linux") && error.raw_os_error() == Some(26) && attempt < 3 =>
+            {
+                // A concurrent fork can briefly retain a write descriptor for
+                // a newly written executable until its own exec completes.
+                // ETXTBSY is a launch race, not evidence of a GPU failure.
+                std::thread::sleep(std::time::Duration::from_millis(10 << attempt));
+            }
+            result => return result,
+        }
+    }
+    unreachable!()
+}
+
 impl Drop for ResidentSpeechWorker {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -405,6 +436,203 @@ impl Drop for ResidentSpeechWorker {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn temporarily_busy_native_executable_is_retried_before_inference_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("worker");
+        let mut writer = std::fs::File::create(&path).unwrap();
+        writer.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+        writer.flush().unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            Command::new(&path).spawn().unwrap_err().raw_os_error(),
+            Some(26)
+        );
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                drop(writer);
+            });
+            let mut child = spawn_native_worker(&mut Command::new(path)).unwrap();
+            assert!(child.wait().unwrap().success());
+        });
+    }
+
+    #[test]
+    #[ignore = "requires real native Qwen model/runtime/worker via SAYIT_ONNX_TEST_MODEL, SAYIT_ONNX_TEST_RUNTIME and SAYIT_TEST_WORKER"]
+    fn native_generation_controls_stream_cancel_and_recover_through_the_managed_worker() {
+        use crate::{
+            EngineConfig, InferenceRuntime, ManagedEngine, QwenGenerationOptions,
+            QwenSamplingOptions,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let config = EngineConfig::Qwen3TtsOnnx(QwenOnnxConfig {
+            model: std::env::var_os("SAYIT_ONNX_TEST_MODEL").unwrap().into(),
+            runtime: Some(std::env::var_os("SAYIT_ONNX_TEST_RUNTIME").unwrap().into()),
+            worker: std::env::var_os("SAYIT_TEST_WORKER").unwrap().into(),
+            device: "cpu".into(),
+            precision: "int4".into(),
+            num_threads: 4,
+            language: "English".into(),
+        });
+        let engine =
+            ManagedEngine::load(&config, &InferenceRuntime::new(directory.path()), false).unwrap();
+        let options = QwenGenerationOptions {
+            seed: Some(417),
+            max_new_tokens: Some(256),
+            sampling: QwenSamplingOptions::default(),
+        };
+        let output = directory.path().join("default.wav");
+        let request = SynthesisRequest {
+            generation: Some(&options),
+            text: "Every voice gives familiar words a new color, character, and rhythm.",
+            output: &output,
+            reference_audio: None,
+            reference_text: None,
+            speaking_pace: 1.0,
+        };
+        let mut streamed = 0;
+        engine
+            .synthesize_streaming(&request, None, &mut |pcm, rate| {
+                assert!(!output.exists(), "partial audio must remain private");
+                assert_eq!(rate, 24_000);
+                streamed += pcm.len();
+                Ok(())
+            })
+            .unwrap();
+        assert!(streamed > 24_000);
+        assert_eq!(
+            hound::WavReader::open(&output).unwrap().len() as usize,
+            streamed
+        );
+        let tuned = QwenGenerationOptions {
+            sampling: QwenSamplingOptions {
+                temperature: 0.65,
+                top_p: 0.9,
+                top_k: 40,
+                repetition_penalty: 1.2,
+            },
+            ..options.clone()
+        };
+        let changed = directory.path().join("tuned.wav");
+        engine
+            .synthesize_streaming(
+                &SynthesisRequest {
+                    generation: Some(&tuned),
+                    output: &changed,
+                    ..request.clone()
+                },
+                None,
+                &mut |_, _| Ok(()),
+            )
+            .unwrap();
+        assert_ne!(
+            std::fs::read(&output).unwrap(),
+            std::fs::read(changed).unwrap(),
+            "generation controls did not reach the native worker"
+        );
+        let cancelled = AtomicBool::new(false);
+        let partial = directory.path().join("cancelled.wav");
+        assert!(
+            engine
+                .synthesize_streaming(
+                    &SynthesisRequest {
+                        output: &partial,
+                        ..request.clone()
+                    },
+                    Some(&cancelled),
+                    &mut |_, _| {
+                        cancelled.store(true, Ordering::Relaxed);
+                        Ok(())
+                    }
+                )
+                .is_err()
+        );
+        assert!(!partial.exists());
+        let recovered = directory.path().join("recovered.wav");
+        engine
+            .synthesize_streaming(
+                &SynthesisRequest {
+                    output: &recovered,
+                    ..request
+                },
+                None,
+                &mut |_, _| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::read(output).unwrap(),
+            std::fs::read(recovered).unwrap(),
+            "cancelled free generation leaked state into the next request"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires installed PyTorch Qwen config and permitted reference through SAYIT_QWEN_PYTORCH_TEST_CONFIG and SAYIT_QWEN_TEST_REFERENCE"]
+    fn pytorch_generation_controls_synthesize_through_the_managed_worker() {
+        use crate::{
+            EngineConfig, InferenceRuntime, ManagedEngine, QwenGenerationOptions,
+            QwenSamplingOptions,
+        };
+        let source = PathBuf::from(std::env::var_os("SAYIT_QWEN_PYTORCH_TEST_CONFIG").unwrap());
+        let EngineConfig::Qwen3Tts(mut config) = EngineConfig::from_path(&source).unwrap() else {
+            panic!("PyTorch Qwen config required")
+        };
+        config.worker =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../runtime/qwen_worker.py");
+        config.device = "cpu".into();
+        config.language = "Spanish".into();
+        let directory = tempfile::tempdir().unwrap();
+        let engine = ManagedEngine::load(
+            &EngineConfig::Qwen3Tts(config),
+            &InferenceRuntime::new(directory.path()),
+            false,
+        )
+        .unwrap();
+        let options = QwenGenerationOptions {
+            seed: Some(417),
+            max_new_tokens: Some(256),
+            sampling: QwenSamplingOptions {
+                temperature: 0.65,
+                top_p: 0.9,
+                top_k: 40,
+                repetition_penalty: 1.2,
+            },
+        };
+        let output = directory.path().join("tuned.wav");
+        let reference = PathBuf::from(std::env::var_os("SAYIT_QWEN_TEST_REFERENCE").unwrap());
+        let request = SynthesisRequest {
+            generation: Some(&options),
+            text: "Buenos días. La mañana está tranquila.",
+            output: &output,
+            reference_audio: Some(&reference),
+            reference_text: None,
+            speaking_pace: 1.0,
+        };
+        let mut count = 0;
+        let mut audible = false;
+        engine
+            .synthesize_streaming(&request, None, &mut |pcm, rate| {
+                assert!(!output.exists());
+                assert_eq!(rate, 24_000);
+                count += pcm.len();
+                audible |= pcm.iter().any(|sample| sample.abs() > 0.001);
+                Ok(())
+            })
+            .unwrap();
+        assert!(audible && count > 24_000);
+        assert_eq!(
+            hound::WavReader::open(output).unwrap().len() as usize,
+            count
+        );
+        assert_eq!(
+            engine.device().backend.as_deref(),
+            Some("qwen3-tts-pytorch")
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -435,6 +663,7 @@ mod tests {
             let error = engine
                 .synthesize_cancellable(
                     &SynthesisRequest {
+                        generation: None,
                         text: "hello",
                         output: &output,
                         reference_audio: None,
@@ -454,6 +683,7 @@ mod tests {
     #[test]
     fn worker_request_never_serializes_absent_reference_audio() {
         let request = WorkerRequest {
+            generation: None,
             stream: false,
             speaking_pace: 1.0,
             text: "hello",
@@ -550,6 +780,7 @@ for line in sys.stdin:
             let output = temporary.path().join(name);
             engine
                 .synthesize(&SynthesisRequest {
+                    generation: None,
                     text: "hello",
                     output: &output,
                     reference_audio: None,

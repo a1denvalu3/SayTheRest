@@ -4,8 +4,70 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct QwenSamplingOptions {
+    pub temperature: f32,
+    pub top_p: f32,
+    pub top_k: usize,
+    pub repetition_penalty: f32,
+}
+
+impl Default for QwenSamplingOptions {
+    fn default() -> Self {
+        Self {
+            temperature: 0.9,
+            top_p: 1.0,
+            top_k: 50,
+            repetition_penalty: 1.05,
+        }
+    }
+}
+
+impl QwenSamplingOptions {
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.temperature.is_finite() && (0.2..=1.2).contains(&self.temperature),
+            "temperature must be between 0.2 and 1.2"
+        );
+        anyhow::ensure!(
+            self.top_p.is_finite() && (0.5..=1.0).contains(&self.top_p),
+            "top_p must be between 0.5 and 1"
+        );
+        anyhow::ensure!(self.top_k <= 100, "top_k must be between 0 and 100");
+        anyhow::ensure!(
+            self.repetition_penalty.is_finite() && (0.9..=1.5).contains(&self.repetition_penalty),
+            "repetition_penalty must be between 0.9 and 1.5"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+pub struct QwenGenerationOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_new_tokens: Option<usize>,
+    #[serde(flatten)]
+    pub sampling: QwenSamplingOptions,
+}
+
+impl QwenGenerationOptions {
+    pub fn validate(&self) -> Result<()> {
+        self.sampling.validate()?;
+        anyhow::ensure!(
+            self.max_new_tokens
+                .is_none_or(|value| (1..=2048).contains(&value)),
+            "generation limit must be between 1 and 2048"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SynthesisRequest<'a> {
+    pub generation: Option<&'a QwenGenerationOptions>,
     pub text: &'a str,
     pub output: &'a Path,
     pub reference_audio: Option<&'a Path>,
@@ -49,6 +111,10 @@ impl SherpaOnnxEngine {
     }
 
     pub fn command_args(&self, request: &SynthesisRequest<'_>) -> Result<Vec<String>> {
+        anyhow::ensure!(
+            request.generation.is_none(),
+            "generation tuning requires the Qwen speech worker"
+        );
         if self.config.is_qwen() || matches!(self.config, EngineConfig::Phonon(_)) {
             bail!("This model requires the persistent speech worker");
         }
@@ -276,6 +342,7 @@ mod tests {
         let output = directory.path().join("speech.wav");
         let error = SherpaOnnxEngine::from_config(config)
             .synthesize(&SynthesisRequest {
+                generation: None,
                 text: "Hello",
                 output: &output,
                 reference_audio: None,
@@ -300,6 +367,7 @@ mod tests {
             speaker_id: 2,
         }));
         let request = SynthesisRequest {
+            generation: None,
             text: "hello; still text",
             output: Path::new("out file.wav"),
             reference_audio: None,
@@ -331,6 +399,7 @@ mod tests {
         };
         let engine = SherpaOnnxEngine::from_config(EngineConfig::SherpaOnnxPocket(config));
         let request = SynthesisRequest {
+            generation: None,
             text: "hello",
             output: Path::new("out.wav"),
             reference_audio: None,
@@ -361,6 +430,7 @@ mod tests {
         }));
         let args = engine
             .command_args(&SynthesisRequest {
+                generation: None,
                 text: "hello",
                 output: Path::new("out.wav"),
                 reference_audio: None,
@@ -387,6 +457,7 @@ mod tests {
         }));
         let args = engine
             .command_args(&SynthesisRequest {
+                generation: None,
                 text: "hello",
                 output: Path::new("out.wav"),
                 reference_audio: None,

@@ -100,7 +100,7 @@ fn run_sherpa(config: EngineConfig) -> Result<()> {
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing output path"))?;
             let reference = request["reference_audio"].as_str().map(PathBuf::from);
-            engine.synthesize_streaming(&SynthesisRequest {
+            engine.synthesize_streaming(&SynthesisRequest { generation: None,
                 text, output: std::path::Path::new(destination), reference_audio: reference.as_deref(),
                 reference_text: request["reference_text"].as_str(),
                 speaking_pace: request["speaking_pace"].as_f64().unwrap_or(1.0),

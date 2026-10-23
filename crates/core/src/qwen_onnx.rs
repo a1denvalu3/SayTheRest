@@ -34,11 +34,12 @@ const SAMPLE_RATE: usize = 24_000;
 const GROUPS: usize = 16;
 const DECODE_FRAMES: usize = 25;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct NativeRequest {
     pub text: String,
     pub output: PathBuf,
-    pub reference_audio: PathBuf,
+    #[serde(default)]
+    pub reference_audio: Option<PathBuf>,
     pub reference_text: Option<String>,
     #[serde(default = "auto_language")]
     pub language: String,
@@ -47,6 +48,8 @@ pub struct NativeRequest {
     pub max_new_tokens: usize,
     #[serde(default = "sampling")]
     pub do_sample: bool,
+    #[serde(flatten)]
+    pub sampling: crate::QwenSamplingOptions,
 }
 fn auto_language() -> String {
     "Auto".into()
@@ -228,8 +231,21 @@ impl NativeQwenPipeline {
     }
 
     fn reference(&mut self, request: &NativeRequest) -> Result<ReferencePrompt> {
-        let bytes =
-            fs::read(&request.reference_audio).context("cannot read reference recording")?;
+        let Some(path) = &request.reference_audio else {
+            ensure!(
+                request
+                    .reference_text
+                    .as_ref()
+                    .is_none_or(|text| text.trim().is_empty()),
+                "a reference transcript requires reference audio"
+            );
+            return Ok(ReferencePrompt {
+                key: Vec::new(),
+                speaker: Vec::new(),
+                codes: Vec::new(),
+            });
+        };
+        let bytes = fs::read(path).context("cannot read reference recording")?;
         let mut hash = Sha256::new();
         hash.update(&bytes);
         hash.update(
@@ -245,7 +261,7 @@ impl NativeQwenPipeline {
         {
             return Ok(reference.clone());
         }
-        let wav = read_reference(&request.reference_audio)?;
+        let wav = read_reference(path)?;
         let speaker = floats(
             &run(
                 &mut self.speaker,
@@ -297,7 +313,7 @@ impl NativeQwenPipeline {
         request: &NativeRequest,
         text: &str,
         reference: &ReferencePrompt,
-    ) -> Result<(Vec<f32>, Vec<f32>)> {
+    ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>)> {
         let ids = self.tokenize(&format!(
             "<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n"
         ))?;
@@ -348,6 +364,17 @@ impl NativeQwenPipeline {
         for (i, row) in codec[..codec.len() - h].chunks_exact(h).enumerate() {
             prompt.extend(add(row, if i == frames - 2 { bos } else { pad })?);
         }
+        if reference.speaker.is_empty() {
+            // Qwen's unconditioned prompt supplies text alongside generated
+            // codec frames. Reference: Qwen3TTS.prepareGenerationInputs in
+            // Blaizzy/mlx-audio-swift at 624fd5410b2fc8ea06f955500c9ac078e405261f.
+            let body = embed(&mut self.text_embed, "text_ids", &ids[3..ids.len() - 5])?;
+            ensure!(body.len() >= h, "text has no generation tokens");
+            prompt.extend(add(&body[..h], &codec[codec.len() - h..])?);
+            let mut trailing = body[h..].to_vec();
+            trailing.extend_from_slice(eos);
+            return Ok((prompt, pad.to_vec(), trailing));
+        }
         let mut body_ids = Vec::new();
         let icl = request
             .reference_text
@@ -372,7 +399,7 @@ impl NativeQwenPipeline {
                 prompt.extend(add(row, pad)?);
             }
         }
-        Ok((prompt, pad.to_vec()))
+        Ok((prompt, pad.to_vec(), Vec::new()))
     }
 
     fn generate(
@@ -382,7 +409,7 @@ impl NativeQwenPipeline {
         reference: &ReferencePrompt,
         rng: &mut StdRng,
     ) -> Result<Vec<i64>> {
-        let (input, pad) = self.prompt(request, text, reference)?;
+        let (input, pad, trailing_text) = self.prompt(request, text, reference)?;
         #[cfg(debug_assertions)]
         trace(
             "native-prompt.json",
@@ -458,13 +485,13 @@ impl NativeQwenPipeline {
                 }
                 if previous.contains(&id) {
                     *logit = if *logit < 0.0 {
-                        *logit * 1.05
+                        *logit * request.sampling.repetition_penalty
                     } else {
-                        *logit / 1.05
+                        *logit / request.sampling.repetition_penalty
                     };
                 }
             }
-            let code0 = sample(&first, request.do_sample, rng)?;
+            let code0 = sample_with_options(&first, request.do_sample, &request.sampling, rng)?;
             if code0 == eos {
                 ensure!(!codes.is_empty(), "Qwen produced no speech");
                 return Ok(codes);
@@ -490,8 +517,12 @@ impl NativeQwenPipeline {
                     start + vocabulary <= logits.len(),
                     "invalid predictor logits"
                 );
-                frame[group] =
-                    sample(&logits[start..start + vocabulary], request.do_sample, rng)? as i64;
+                frame[group] = sample_with_options(
+                    &logits[start..start + vocabulary],
+                    request.do_sample,
+                    &request.sampling,
+                    rng,
+                )? as i64;
             }
             codes.extend_from_slice(&frame);
             #[cfg(debug_assertions)]
@@ -502,7 +533,8 @@ impl NativeQwenPipeline {
                 &mut self.residual_embed,
                 vec![("codec_ids", tensor_i64(vec![1, GROUPS], frame)?)],
             )?;
-            current = add(&floats(&output[0])?, &pad)?;
+            let text = trailing_text.get(step * h..(step + 1) * h).unwrap_or(&pad);
+            current = add(&floats(&output[0])?, text)?;
             if (step + 1) % 50 == 0 {
                 eprintln!("Native Qwen: {} audio frames", step + 1);
             }
@@ -550,6 +582,7 @@ impl NativeQwenPipeline {
     ) -> Result<()> {
         ensure!(!request.text.trim().is_empty(), "text must not be empty");
         crate::language::qwen_language(&request.language)?;
+        request.sampling.validate()?;
         ensure!(
             (1..=2048).contains(&request.max_new_tokens),
             "generation limit must be between 1 and 2048"
@@ -658,7 +691,22 @@ fn add(a: &[f32], b: &[f32]) -> Result<Vec<f32>> {
     Ok(a.iter().zip(b).map(|(a, b)| a + b).collect())
 }
 
+#[cfg(test)]
 fn sample(logits: &[f32], do_sample: bool, rng: &mut StdRng) -> Result<usize> {
+    sample_with_options(
+        logits,
+        do_sample,
+        &crate::QwenSamplingOptions::default(),
+        rng,
+    )
+}
+
+fn sample_with_options(
+    logits: &[f32],
+    do_sample: bool,
+    options: &crate::QwenSamplingOptions,
+    rng: &mut StdRng,
+) -> Result<usize> {
     let mut candidates = logits
         .iter()
         .copied()
@@ -673,12 +721,27 @@ fn sample(logits: &[f32], do_sample: bool, rng: &mut StdRng) -> Result<usize> {
     if !do_sample {
         return Ok(candidates[0].0);
     }
-    candidates.truncate(50);
+    if options.top_k > 0 {
+        candidates.truncate(options.top_k);
+    }
     let maximum = candidates[0].1;
-    let weights = candidates
+    let mut weights = candidates
         .iter()
-        .map(|(_, v)| f64::from((*v - maximum) / 0.9).exp())
+        .map(|(_, v)| f64::from((*v - maximum) / options.temperature).exp())
         .collect::<Vec<_>>();
+    if options.top_p < 1.0 {
+        let limit = f64::from(options.top_p) * weights.iter().sum::<f64>();
+        let mut accumulated = 0.0;
+        let keep = weights
+            .iter()
+            .position(|weight| {
+                accumulated += weight;
+                accumulated >= limit
+            })
+            .map_or(weights.len(), |index| index + 1);
+        weights.truncate(keep);
+        candidates.truncate(keep);
+    }
     let mut target = rng.random::<f64>() * weights.iter().sum::<f64>();
     for ((id, _), weight) in candidates.iter().zip(weights) {
         target -= weight;
@@ -790,6 +853,96 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires real native Qwen assets/runtime through SAYIT_ONNX_TEST_MODEL and SAYIT_ONNX_TEST_RUNTIME"]
+    fn free_voice_sampling_is_repeatable_and_isolated_from_saved_references() {
+        let model = PathBuf::from(std::env::var_os("SAYIT_ONNX_TEST_MODEL").unwrap());
+        let runtime = PathBuf::from(std::env::var_os("SAYIT_ONNX_TEST_RUNTIME").unwrap());
+        let mut pipeline = NativeQwenPipeline::load(&model, &runtime, "int4", "cpu", 4).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let request = NativeRequest {
+            text: "Every voice gives familiar words a new color, character, and rhythm.".into(),
+            output: directory.path().join("first.wav"),
+            reference_audio: None,
+            reference_text: None,
+            language: "English".into(),
+            seed: Some(417),
+            max_new_tokens: 256,
+            do_sample: true,
+            sampling: crate::QwenSamplingOptions::default(),
+        };
+        let mut streamed = Vec::new();
+        pipeline
+            .synthesize_streaming(&request, &mut |pcm, rate| {
+                assert_eq!(rate, 24_000);
+                assert!(pcm.iter().all(|sample| sample.is_finite()));
+                streamed.extend_from_slice(pcm);
+                Ok(())
+            })
+            .unwrap();
+        assert!(streamed.iter().any(|sample| sample.abs() > 0.001));
+        assert_eq!(
+            hound::WavReader::open(&request.output).unwrap().len() as usize,
+            streamed.len()
+        );
+        let cloned = NativeRequest {
+            text: "This recording uses the generated voice for new words.".into(),
+            reference_audio: Some(request.output.clone()),
+            reference_text: Some(request.text.clone()),
+            output: directory.path().join("cloned.wav"),
+            ..request.clone()
+        };
+        pipeline.synthesize(&cloned).unwrap();
+        assert!(crate::wav_duration_seconds(&cloned.output).unwrap() > 0.5);
+        let repeat = NativeRequest {
+            output: directory.path().join("repeat.wav"),
+            ..request.clone()
+        };
+        pipeline.synthesize(&repeat).unwrap();
+        assert_eq!(
+            fs::read(&request.output).unwrap(),
+            fs::read(&repeat.output).unwrap(),
+            "reference conditioning leaked into free generation or seeded generation was not repeatable"
+        );
+        let different = NativeRequest {
+            output: directory.path().join("different.wav"),
+            seed: Some(418),
+            ..request.clone()
+        };
+        pipeline.synthesize(&different).unwrap();
+        assert_ne!(
+            fs::read(&request.output).unwrap(),
+            fs::read(&different.output).unwrap(),
+            "different seeds must sample different audio"
+        );
+        let mut speakers = Vec::new();
+        for output in [&request.output, &different.output] {
+            let reference = NativeRequest {
+                reference_audio: Some(output.clone()),
+                ..request.clone()
+            };
+            speakers.push(pipeline.reference(&reference).unwrap().speaker);
+        }
+        let dot = speakers[0]
+            .iter()
+            .zip(&speakers[1])
+            .map(|(a, b)| f64::from(*a) * f64::from(*b))
+            .sum::<f64>();
+        let norm = |speaker: &[f32]| {
+            speaker
+                .iter()
+                .map(|v| f64::from(*v).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        };
+        let cosine = dot / (norm(&speakers[0]) * norm(&speakers[1]));
+        assert!(cosine.is_finite());
+        eprintln!(
+            "Free Qwen candidates: {} source samples, speaker cosine {cosine:.4}",
+            streamed.len()
+        );
+    }
+
+    #[test]
     #[ignore = "requires pinned native model/runtime assets and a permitted reference; set SAYIT_QWEN_TEST_ROOT"]
     fn native_reference_encoder_preserves_every_supported_recording_length() {
         let root =
@@ -817,7 +970,7 @@ mod tests {
                 .as_ref()
                 .is_some_and(|text| !text.is_empty())
         );
-        let source = read_reference(&request.reference_audio).unwrap();
+        let source = read_reference(request.reference_audio.as_ref().unwrap()).unwrap();
         let encoded = run(
             &mut pipeline.encoder,
             vec![(
@@ -844,7 +997,7 @@ mod tests {
                 writer.write_sample(source[index % source.len()]).unwrap();
             }
             writer.finalize().unwrap();
-            request.reference_audio = path;
+            request.reference_audio = Some(path);
             let prompt = pipeline.reference(&request).unwrap();
             assert_eq!(
                 prompt.codes.len() / pipeline.hidden,
@@ -877,5 +1030,49 @@ mod tests {
             );
         }
         assert!(sample(&[f32::NEG_INFINITY], true, &mut rng).is_err());
+    }
+
+    #[test]
+    fn top_k_and_nucleus_controls_keep_sampling_inside_the_selected_distribution() {
+        let mut rng = StdRng::seed_from_u64(10);
+        for options in [
+            crate::QwenSamplingOptions {
+                top_k: 1,
+                ..Default::default()
+            },
+            crate::QwenSamplingOptions {
+                top_k: 0,
+                top_p: 0.5,
+                ..Default::default()
+            },
+        ] {
+            for _ in 0..100 {
+                assert_eq!(
+                    sample_with_options(&[8.0, 1.0, f32::NEG_INFINITY], true, &options, &mut rng)
+                        .unwrap(),
+                    0
+                );
+            }
+        }
+        for options in [
+            crate::QwenSamplingOptions {
+                temperature: f32::NAN,
+                ..Default::default()
+            },
+            crate::QwenSamplingOptions {
+                top_p: 1.1,
+                ..Default::default()
+            },
+            crate::QwenSamplingOptions {
+                top_k: 101,
+                ..Default::default()
+            },
+            crate::QwenSamplingOptions {
+                repetition_penalty: 0.0,
+                ..Default::default()
+            },
+        ] {
+            assert!(options.validate().is_err());
+        }
     }
 }

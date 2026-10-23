@@ -2361,6 +2361,7 @@ mod tests {
         let mut engine = sayit_core::ResidentQwenEngine::load(&config).unwrap();
         engine
             .synthesize(&sayit_core::SynthesisRequest {
+                generation: None,
                 text: "sayIt now runs Qwen voice cloning locally and offline.",
                 output: &output,
                 reference_audio: Some(&reference),

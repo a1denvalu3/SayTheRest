@@ -455,6 +455,7 @@ fn main() -> Result<()> {
         } => {
             let engine = load_engine(config)?;
             engine.synthesize(&SynthesisRequest {
+                generation: None,
                 text: &text,
                 output: &output,
                 reference_audio: None,

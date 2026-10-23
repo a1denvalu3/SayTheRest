@@ -330,6 +330,10 @@ impl ResidentSherpaEngine {
         cancelled: Option<&AtomicBool>,
         sink: &mut AudioSink<'_>,
     ) -> Result<()> {
+        anyhow::ensure!(
+            request.generation.is_none(),
+            "generation tuning is supported only by Qwen models"
+        );
         if request.text.trim().is_empty() {
             bail!("text must not be empty")
         }
@@ -569,7 +573,7 @@ mod tests {
             let mut samples = Vec::new();
             engine
                 .synthesize_streaming(
-                    &SynthesisRequest {
+                    &SynthesisRequest { generation: None,
                         text: "Hello from this voice. These words arrive while the next piece of speech is still being decoded.",
                         output: &output,
                         reference_audio: None,
@@ -609,6 +613,7 @@ mod tests {
         let mut engine = ResidentSherpaEngine::load(&config).unwrap();
         let output = directory.path().join("cancelled.wav");
         let request = SynthesisRequest {
+            generation: None,
             text: "This recording should stop before it is finished.",
             output: &output,
             reference_audio: None,
@@ -703,6 +708,7 @@ mod tests {
             engine
                 .synthesize_streaming(
                     &SynthesisRequest {
+                        generation: None,
                         text: "Kitten speech runs through the resident native engine.",
                         output: &output,
                         reference_audio: None,
@@ -740,6 +746,7 @@ mod tests {
                 engine
                     .synthesize_streaming_with_worker(
                         &SynthesisRequest {
+                            generation: None,
                             text: "Speech also streams through the isolated worker.",
                             output: &output,
                             reference_audio: None,
@@ -761,7 +768,7 @@ mod tests {
                 );
                 let cancelled = std::sync::atomic::AtomicBool::new(false);
                 let aborted = temporary.path().join("cancelled.wav");
-                let result = engine.synthesize_streaming_with_worker(&SynthesisRequest {
+                let result = engine.synthesize_streaming_with_worker(&SynthesisRequest { generation: None,
                     text: "This speech is interrupted. The following sentences must not finish generating. This is a cancellation acceptance check.",
                     output: &aborted, reference_audio: None, reference_text: None, speaking_pace: 1.0,
                 }, Some(&cancelled), &mut |_, _| {

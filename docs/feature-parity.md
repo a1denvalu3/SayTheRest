@@ -55,7 +55,7 @@ and capability tests for every feature advertised by that model.
 - [x] Phonon 31M English, custom voice files, and voice-pack updates (38 presets, three import formats, exact streamed archives, cancellation, recovery, and cached updates pass Linux and Windows)
 - [ ] Kokoro (synthesis exists; multilingual/preset coverage remains)
 - [x] Kitten Mini and Kitten Nano (real synthesis, progressive callbacks, worker transport, and cancellation pass on Linux and Windows)
-- [ ] Pocket TTS (eight presets, optional cloning, and update repair pass Linux real-model and native UI acceptance; Windows matrix pending)
+- [x] Pocket TTS (eight presets, optional cloning, cancellation/recovery, and install/update repair pass Linux and Windows; native Linux UI acceptance also passes)
 - [ ] Soprano
 - [ ] Qwen3 TTS Base, VoiceDesign, and CustomVoice
 - [ ] Chatterbox, Chatterbox Turbo, and Chatterbox Multilingual
@@ -222,7 +222,8 @@ installation started through the API without reopening the model pane. Model
 descriptors read installation progress before filesystem state to avoid a
 terminal status paired with a stale uninstalled flag; the visible catalog also
 refreshes periodically after external changes. The fresh-download repeat passed
-after these changes; Windows model-family acceptance remains pending.
+after these changes. Both platform release jobs subsequently passed the real
+model-family suite; Windows GUI and device acceptance remain separate.
 
 ```sh
 scripts/test-pocket-model.sh <rust-target>
@@ -261,6 +262,36 @@ python3 scripts/test-qwen-service.py --config /path/to/qwen-config.json --refere
 python3 scripts/test-desktop-ui.py --config /path/to/native-config.json --window main --script scripts/desktop-language-ui-smoke.js --voice-file /path/to/reference.wav --reference-text 'Exact words in the recording.' --timeout 240
 ```
 
+The native Qwen Base worker can also generate a sample without a reference
+recording, using the prompt layout in the pinned Mac runtime. Linux real-model
+acceptance verified repeatable seeded output, different audio for different
+seeds, reuse of a generated sample as a cloning reference, and isolation between
+cloned and unconditioned requests. Existing cloned output remained byte-for-byte
+equal to its earlier baseline. This is backend evidence; the discovery UI,
+candidate saving, and automatic stable/random reading modes remain incomplete.
+
+Generation controls validate temperature, nucleus/top-k sampling, repetition
+penalty, seed, and token limits. Real managed-worker acceptance verified that
+tuning changes the native output, streamed/archive frame counts match,
+cancellation publishes no partial audio, and a subsequent request reproduces
+its seeded output. A separate real PyTorch run verified the same controls reach
+that backend and produce valid streamed audio. A deterministic Linux executable
+test covers a bounded ETXTBSY launch retry before inference fallback; the
+original CUDA/CPU fallback expectations remain intact.
+
+The real tests are ignored during the small workspace suite. Set
+`SAYIT_ONNX_TEST_MODEL`, `SAYIT_ONNX_TEST_RUNTIME`, and `SAYIT_TEST_WORKER` to the
+installed native assets, runtime library, and built release worker, then run:
+
+```sh
+cargo test -p sayit-core --release --locked qwen_onnx::tests::free_voice_sampling_is_repeatable_and_isolated_from_saved_references -- --ignored --exact
+cargo test -p sayit-core --release --locked qwen::tests::native_generation_controls_stream_cancel_and_recover_through_the_managed_worker -- --ignored --exact
+```
+
+The PyTorch counterpart uses `SAYIT_QWEN_PYTORCH_TEST_CONFIG` and
+`SAYIT_QWEN_TEST_REFERENCE` with
+`qwen::tests::pytorch_generation_controls_synthesize_through_the_managed_worker`.
+
 The job journal is written through a synced temporary file with a last-known-good backup. On
 startup, queued work remains queued; interrupted synthesis or playback is requeued once after
 partial audio is removed. A second interruption becomes a visible failed history item instead of
@@ -268,6 +299,13 @@ causing an endless service crash loop. Automated tests cover malformed and missi
 backup restoration, retry, cleanup, and the repeated-interruption guard.
 
 ## Release evidence
+
+Commit `4675481` passed the complete Linux/Windows matrix, including all eight
+real Pocket presets, streamed/archive sample comparisons, reference resampling,
+cloning-reference overrides, cancellation/recovery, fresh service installation,
+and repair of a missing selected preset while preserving its selection.
+GitHub Actions run:
+[39992141123](https://github.com/a1denvalu3/SayTheRest/actions/runs/39992141123).
 
 Commit `b7d1d38` passed the complete Linux/Windows matrix, including real Phonon
 synthesis with all 38 presets, F32/F16/BF16 voice imports, cancellation and

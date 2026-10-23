@@ -452,6 +452,7 @@ impl ServiceState {
                         tempfile::NamedTempFile::new_in(output.parent().unwrap())?.into_temp_path();
                     slot.engine.synthesize_streaming(
                         &SynthesisRequest {
+                            generation: None,
                             text: block.text,
                             output: part.as_ref(),
                             reference_audio: reference_audio.as_deref(),
@@ -2242,6 +2243,7 @@ async fn preview_preset_voice(
         *resident = None;
         let engine = ManagedEngine::load(&config, &runtime, prefer_gpu)?;
         let result = engine.synthesize(&SynthesisRequest {
+            generation: None,
             text: &text,
             output: &synthesis_output,
             reference_audio: None,

@@ -143,20 +143,40 @@ def text_chunks(text: str) -> Iterator[str]:
         remaining = remaining[end:].lstrip()
 
 
+def generation_options(request: dict[str, Any]) -> dict[str, Any]:
+    limit = request.get("max_new_tokens", MAX_NEW_TOKENS)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 2048:
+        raise ValueError("max_new_tokens must be an integer between 1 and 2048")
+    options: dict[str, Any] = {"max_new_tokens": limit}
+    for key, low, high in [("temperature", 0.2, 1.2), ("top_p", 0.5, 1.0), ("repetition_penalty", 0.9, 1.5)]:
+        if key not in request:
+            continue
+        value = request[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+            raise ValueError(f"{key} must be between {low} and {high}")
+        options[key] = value
+    if "top_k" in request:
+        value = request["top_k"]
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100:
+            raise ValueError("top_k must be an integer between 0 and 100")
+        options["top_k"] = value
+    return options
+
+
 def synthesize(model: Any, mode: str, request: dict[str, Any], torch: Any, soundfile: Any, emit=None) -> None:
     text = require_text(request, "text")
     output = output_file(request)
     language = optional_text(request, "language") or "Auto"
     seed = request.get("seed")
     if seed is not None:
-        if not isinstance(seed, int) or seed < 0 or seed > 0xFFFF_FFFF:
+        if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0 or seed > 0xFFFF_FFFF:
             raise ValueError("seed must be an unsigned 32-bit integer")
         torch.manual_seed(seed)
 
     with torch.inference_mode(), tempfile.TemporaryDirectory(
         prefix=".sayit-qwen-", dir=output.parent
     ) as temporary, contextlib.ExitStack() as stack:
-        options: dict[str, Any] = {"language": language, "max_new_tokens": MAX_NEW_TOKENS}
+        options: dict[str, Any] = {"language": language, **generation_options(request)}
         if mode == "custom-voice":
             generate = model.generate_custom_voice
             options["speaker"] = require_text(request, "speaker")

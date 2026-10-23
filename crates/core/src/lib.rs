@@ -20,7 +20,10 @@ pub use config::{
     Qwen3TtsMode, QwenOnnxConfig, VitsConfig, native_worker_path,
 };
 pub use device::{CudaDevice, TorchFlavor};
-pub use engine::{AudioSink, SherpaOnnxEngine, SynthesisRequest, TtsEngine};
+pub use engine::{
+    AudioSink, QwenGenerationOptions, QwenSamplingOptions, SherpaOnnxEngine, SynthesisRequest,
+    TtsEngine,
+};
 pub use inference::{InferenceDevice, InferenceRuntime, ManagedEngine};
 pub use qwen::{ResidentQwenEngine, ResidentSpeechWorker};
 pub use resident::ResidentSherpaEngine;

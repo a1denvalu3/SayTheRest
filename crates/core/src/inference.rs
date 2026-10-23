@@ -579,6 +579,10 @@ impl ManagedEngine {
             "speech generation cancelled"
         );
         anyhow::ensure!(!request.text.trim().is_empty(), "text must not be empty");
+        anyhow::ensure!(
+            request.generation.is_none() || self.cpu_config.is_qwen(),
+            "generation tuning is supported only by Qwen models"
+        );
         let parent = request
             .output
             .parent()
@@ -679,6 +683,7 @@ mod tests {
             engine
                 .synthesize_streaming(
                     &SynthesisRequest {
+                        generation: None,
                         text,
                         output: &output,
                         reference_audio: None,
@@ -719,6 +724,7 @@ mod tests {
         let cancelled = AtomicBool::new(false);
         let output = directory.path().join("cancelled.wav");
         let request = SynthesisRequest {
+            generation: None,
             text,
             output: &output,
             reference_audio: None,
@@ -775,7 +781,7 @@ mod tests {
         let start = Instant::now();
         let mut first_audio = None;
         let mut delivered = 0;
-        engine.synthesize_streaming(&SynthesisRequest {
+        engine.synthesize_streaming(&SynthesisRequest { generation: None,
             text: "Streaming audio arrives while the next sentence is generated. The player keeps the natural pitch of the voice. We can pause and resume the speech. This final sentence completes our test.",
             output: &output, reference_audio: Some(&reference), reference_text: Some(&transcript), speaking_pace: 1.0,
         }, None, &mut |samples, rate| {
@@ -860,6 +866,7 @@ for line in sys.stdin:
         let output = directory.path().join("speech.wav");
         engine
             .synthesize(&SynthesisRequest {
+                generation: None,
                 text: "hello",
                 output: &output,
                 reference_audio: None,
@@ -947,6 +954,7 @@ for line in sys.stdin:
         for _ in 0..2 {
             engine
                 .synthesize(&SynthesisRequest {
+                    generation: None,
                     text: "A short sentence.",
                     output: &output,
                     reference_audio: None,
@@ -1001,6 +1009,7 @@ for line in sys.stdin:
         assert!(
             engine
                 .synthesize(&SynthesisRequest {
+                    generation: None,
                     text: "fail on CPU too",
                     output: &output,
                     reference_audio: None,
@@ -1028,6 +1037,7 @@ for line in sys.stdin:
         let mut frames = 0;
         let result = engine.synthesize_streaming(
             &SynthesisRequest {
+                generation: None,
                 text: "A short sentence.",
                 output: &output,
                 reference_audio: None,

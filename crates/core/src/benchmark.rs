@@ -43,6 +43,7 @@ impl BenchmarkRunner {
         for _ in 0..iterations {
             let started = Instant::now();
             engine.synthesize(&SynthesisRequest {
+                generation: None,
                 text,
                 output,
                 reference_audio,
