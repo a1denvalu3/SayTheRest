@@ -69,6 +69,7 @@ def main():
                     return playback if playback["job_id"] == job["id"] and playback["generation_complete"] else None
                 complete = until(generated, timeout=90, interval=0.15)
                 generation_seconds = time.monotonic() - started
+                assert next(j for j in api("jobs") if j["id"] == job["id"])["state"] == "playing"
                 progressive = [p for p in observed if p["job_id"] == job["id"] and p["duration_seconds"] > 0 and not p["generation_complete"]]
                 assert progressive, "no audio delivered before generation completed"
                 assert any(p["position_seconds"] > 0 for p in progressive), "device never played during synthesis"

@@ -444,6 +444,15 @@ impl ServiceState {
                     self.finish_job(job.id, Err(error)).await;
                     return;
                 }
+                {
+                    let mut inner = self.inner.write().await;
+                    if let Some(active) = inner.jobs.iter_mut().find(|entry| entry.id == job.id)
+                        && active.state == JobState::Synthesizing
+                    {
+                        active.state = JobState::Playing;
+                    }
+                }
+                self.emit("jobs");
                 self.emit("playback");
                 self.wait_for_playback(job.id, path, duration).await;
             }
