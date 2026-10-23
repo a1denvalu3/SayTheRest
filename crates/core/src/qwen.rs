@@ -11,7 +11,7 @@ use std::{
     },
 };
 
-pub struct ResidentQwenEngine {
+pub struct ResidentSpeechWorker {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
@@ -24,6 +24,9 @@ pub struct ResidentQwenEngine {
     quantization: Option<String>,
     stderr_reader: Option<std::thread::JoinHandle<()>>,
 }
+
+/// Compatibility name for callers using the Qwen-specific constructors.
+pub type ResidentQwenEngine = ResidentSpeechWorker;
 
 #[derive(Deserialize)]
 struct ReadyResponse {
@@ -64,7 +67,23 @@ struct WorkerRequest<'a> {
     speaking_pace: f64,
 }
 
-impl ResidentQwenEngine {
+impl ResidentSpeechWorker {
+    pub fn load_phonon(config: &crate::PhononConfig) -> Result<Self> {
+        let configuration = tempfile::NamedTempFile::new()?.into_temp_path();
+        std::fs::write(
+            &configuration,
+            serde_json::to_vec(&crate::EngineConfig::Phonon(config.clone()))?,
+        )?;
+        let child = Command::new(&config.worker)
+            .arg("--phonon-config")
+            .arg(&configuration)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .context("failed to start native Phonon worker")?;
+        Self::from_child(child, "en", Some(config.voice.clone()), None)
+    }
     pub(crate) fn load_sherpa_with_worker(
         config: &crate::EngineConfig,
         environment: &[(std::ffi::OsString, std::ffi::OsString)],
@@ -195,8 +214,8 @@ impl ResidentQwenEngine {
         speaker: Option<String>,
         voice_description: Option<String>,
     ) -> Result<Self> {
-        let stdin = child.stdin.take().context("Qwen worker has no stdin")?;
-        let stdout = BufReader::new(child.stdout.take().context("Qwen worker has no stdout")?);
+        let stdin = child.stdin.take().context("speech worker has no stdin")?;
+        let stdout = BufReader::new(child.stdout.take().context("speech worker has no stdout")?);
         // Own the child before reading its startup response so every failure
         // below runs Drop and cannot leave an orphan allocating model memory.
         let mut engine = Self {
@@ -215,11 +234,11 @@ impl ResidentQwenEngine {
         let mut line = String::new();
         anyhow::ensure!(
             engine.stdout.read_line(&mut line)? > 0,
-            "Qwen worker exited before loading the model"
+            "speech worker exited before loading the model"
         );
         let ready: ReadyResponse = serde_json::from_str(&line)
-            .context("Qwen worker returned an invalid ready response")?;
-        anyhow::ensure!(ready.ready, "Qwen worker did not become ready");
+            .context("speech worker returned an invalid ready response")?;
+        anyhow::ensure!(ready.ready, "speech worker did not become ready");
         if let Some(device) = ready.device {
             engine.device = device;
         }
@@ -325,11 +344,11 @@ impl ResidentQwenEngine {
                     {
                         Ok(result) => result?,
                         Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                        Err(_) => bail!("Qwen worker exited during synthesis"),
+                        Err(_) => bail!("speech worker exited during synthesis"),
                     };
-                    anyhow::ensure!(count > 0, "Qwen worker exited during synthesis");
+                    anyhow::ensure!(count > 0, "speech worker exited during synthesis");
                     let response: SynthesisResponse = serde_json::from_str(&line)
-                        .context("Qwen worker returned an invalid response")?;
+                        .context("speech worker returned an invalid response")?;
                     if let Some(audio) = response.audio {
                         anyhow::ensure!(
                             (8_000..=192_000).contains(&audio.sample_rate)
@@ -344,7 +363,7 @@ impl ResidentQwenEngine {
                         return Ok(());
                     } else {
                         bail!(
-                            "Qwen synthesis failed: {}",
+                            "speech synthesis failed: {}",
                             response
                                 .error
                                 .as_deref()
@@ -359,18 +378,18 @@ impl ResidentQwenEngine {
             drop(rx);
             reader
                 .join()
-                .map_err(|_| anyhow::anyhow!("Qwen response reader failed"))?;
+                .map_err(|_| anyhow::anyhow!("speech response reader failed"))?;
             result
         })?;
         anyhow::ensure!(
             request.output.is_file(),
-            "Qwen worker did not create output audio"
+            "speech worker did not create output audio"
         );
         Ok(())
     }
 }
 
-impl Drop for ResidentQwenEngine {
+impl Drop for ResidentSpeechWorker {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();

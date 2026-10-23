@@ -52,7 +52,7 @@ Exact parity tracks SayIt's v0.2.0 bundled catalog at upstream commit
 family works. Each entry requires an installed-model synthesis smoke test on Linux and Windows,
 and capability tests for every feature advertised by that model.
 
-- [ ] Phonon 31M English, custom voice files, and voice-pack updates
+- [ ] Phonon 31M English, custom voice files, and voice-pack updates (native Q8 worker implemented and tested on Linux; catalog, voice workflow, and Windows validation remain)
 - [ ] Kokoro (synthesis exists; multilingual/preset coverage remains)
 - [x] Kitten Mini and Kitten Nano (real synthesis, progressive callbacks, worker transport, and cancellation pass on Linux and Windows)
 - [ ] Pocket TTS (cloning exists; preset coverage remains)
@@ -149,6 +149,18 @@ it does not establish Windows GUI or compositor-specific tray placement. Linux
 AppIndicator exposes the player through its menu because Tauri does not provide
 tray click coordinates/events there. Windows uses direct tray clicks. On Wayland,
 window placement follows the compositor when explicit positioning is unavailable.
+
+The native Phonon worker uses the pinned `ptts` 0.4.0 CPU/Q8 runtime. A real
+Linux run with the immutable 31M assets checked progressive PCM, exact archive
+sample values, cancellation without publishing/leaking partial audio, and a
+successful request after cancellation. Cold first PCM was 2.919 s and completion
+5.693 s; warm first PCM was 0.467 s and completion 3.266 s for 5.84 s of speech.
+These are local measurements, not upstream benchmark claims. Run
+`scripts/test-phonon.sh <rust-target>` with `SAYIT_TEST_WORKER` set to the built
+release worker; the release matrix runs it against the packaged binary. The
+runtime requires no Python and makes no model/voice network requests during
+synthesis. Native speaking pace is rejected explicitly; listening speed remains
+the separate pitch-preserving player control.
 
 Linux and Windows release candidates must pass the same behavior suite. Platform-specific selection tests run against representative native, Chromium, Electron, terminal, and office applications. Model/provider changes must compare audio quality and report cold start, warm p50/p95/p99, peak memory, time to first audio, and real-time factor on the supported hardware matrix.
 

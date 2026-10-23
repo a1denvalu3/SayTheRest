@@ -88,6 +88,7 @@ rm "$NATIVE_ARCHIVE"
 cp "$ROOT_DIR/crates/core/data/QWEN-ONNX-NOTICE.txt" "$ROOT_DIR/crates/core/data/Apache-2.0.txt" "$STAGE/"
 cp "$ROOT_DIR/crates/service/vendor/sonic/README.md" "$STAGE/SONIC-NOTICE.txt"
 cp "$ROOT_DIR/crates/service/vendor/sonic/LICENSE" "$STAGE/SONIC-LICENSE.txt"
+cp "$ROOT_DIR/crates/core/data/PHONON-NOTICE.txt" "$ROOT_DIR/crates/core/data/PHONON-LICENSE.txt" "$STAGE/"
 
 if [[ "$TARGET" == *windows* ]]; then
   cp "$ROOT_DIR/packaging/setup.ps1" "$STAGE/"
@@ -117,6 +118,7 @@ else
     "$STAGE/LICENSE" "$STAGE/README.md" "$DEB_ROOT/opt/sayit/"
   cp "$STAGE/Apache-2.0.txt" "$STAGE/QWEN-ONNX-NOTICE.txt" "$DEB_ROOT/opt/sayit/"
   cp "$STAGE/SONIC-NOTICE.txt" "$STAGE/SONIC-LICENSE.txt" "$DEB_ROOT/opt/sayit/"
+  cp "$STAGE/PHONON-NOTICE.txt" "$STAGE/PHONON-LICENSE.txt" "$DEB_ROOT/opt/sayit/"
   cp "$ROOT_DIR/packaging/linux/sayit.service" \
     "$ROOT_DIR/packaging/linux/sayit-desktop.service" \
     "$DEB_ROOT/usr/lib/systemd/user/"
@@ -160,6 +162,7 @@ EOF
   mkdir -p "$APPDIR/usr/share/doc/sayit"
   cp "$STAGE/LICENSE" "$STAGE/Apache-2.0.txt" "$STAGE/QWEN-ONNX-NOTICE.txt" "$APPDIR/usr/share/doc/sayit/"
   cp "$STAGE/SONIC-NOTICE.txt" "$STAGE/SONIC-LICENSE.txt" "$APPDIR/usr/share/doc/sayit/"
+  cp "$STAGE/PHONON-NOTICE.txt" "$STAGE/PHONON-LICENSE.txt" "$APPDIR/usr/share/doc/sayit/"
   cp "$ROOT_DIR/packaging/linux-appimage/AppRun" "$APPDIR/AppRun"
   cp "$ROOT_DIR/packaging/linux/sayit.desktop" "$APPDIR/usr/share/applications/sayit.desktop"
   cp "$ROOT_DIR/apps/desktop/src-tauri/icons/icon.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/sayit.png"

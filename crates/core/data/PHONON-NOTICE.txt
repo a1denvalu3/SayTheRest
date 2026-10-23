@@ -1,0 +1,12 @@
+Phonon native text-to-speech runtime
+
+This application links ptts 0.4.0 by Gradium and contributors in its isolated
+inference worker. Source: https://github.com/gradium-ai/xn-ptts/tree/v0.4.0
+The runtime is available under MIT OR Apache-2.0; its MIT license is included
+as PHONON-LICENSE.txt. Its xn tensor backend is available under MIT/Apache-2.0:
+https://github.com/LaurentMazare/xn . Apache-2.0.txt is included in this package.
+
+Phonon model weights and voice assets are separate downloads. The pinned
+Phonon 31M English checkpoint is licensed Apache-2.0:
+https://huggingface.co/gradium/phonon-31m-en/tree/8c64b55ec301728e2d1695bfea87a08a267d0c2d
+Model downloads are validated with the bundled immutable asset manifest.

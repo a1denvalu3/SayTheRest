@@ -97,6 +97,14 @@ impl InferenceRuntime {
     }
 
     fn prepare(&self, config: &EngineConfig, prefer_gpu: bool) -> Result<PreparedInference> {
+        if matches!(config, EngineConfig::Phonon(_)) {
+            return Ok(PreparedInference {
+                config: config.clone(),
+                environment: Vec::new(),
+                fallback_reason: prefer_gpu
+                    .then(|| "Phonon Q8 uses the native CPU runtime.".into()),
+            });
+        }
         if let EngineConfig::Qwen3TtsOnnx(native) = config {
             let mut native = native.clone();
             let runtime =
@@ -357,7 +365,7 @@ enum Backend {
     // Native provider initialization may abort instead of returning an error.
     // Isolate CUDA in the supplied executable so CPU fallback remains possible.
     SherpaCuda(SherpaOnnxEngine),
-    Qwen(ResidentQwenEngine),
+    Worker(ResidentQwenEngine),
 }
 
 impl Backend {
@@ -365,10 +373,11 @@ impl Backend {
         config: &EngineConfig,
         environment: Vec<(OsString, OsString)>,
     ) -> Result<(Self, InferenceDevice)> {
-        if config.is_qwen() {
+        if config.is_qwen() || matches!(config, EngineConfig::Phonon(_)) {
             let engine = match config {
                 EngineConfig::Qwen3Tts(qwen) => ResidentQwenEngine::load(qwen)?,
                 EngineConfig::Qwen3TtsOnnx(qwen) => ResidentQwenEngine::load_native(qwen)?,
+                EngineConfig::Phonon(phonon) => ResidentQwenEngine::load_phonon(phonon)?,
                 _ => unreachable!(),
             };
             let device = engine.device().to_owned();
@@ -381,7 +390,7 @@ impl Backend {
                 backend: Some(engine.backend().into()),
                 quantization: engine.quantization().map(str::to_owned),
             };
-            return Ok((Self::Qwen(engine), info));
+            return Ok((Self::Worker(engine), info));
         }
         let provider = config.provider().to_owned();
         let info = InferenceDevice {
@@ -428,13 +437,15 @@ impl Backend {
                 Self::SherpaCuda(engine) => {
                     engine.synthesize_streaming(request, cancelled, &mut forward)
                 }
-                Self::Qwen(engine) => engine.synthesize_streaming(request, cancelled, &mut forward),
+                Self::Worker(engine) => {
+                    engine.synthesize_streaming(request, cancelled, &mut forward)
+                }
             };
         }
         match self {
             Self::Sherpa(engine) => engine.synthesize(request),
             Self::SherpaCuda(engine) => engine.synthesize(request),
-            Self::Qwen(engine) => engine.synthesize_cancellable(request, cancelled),
+            Self::Worker(engine) => engine.synthesize_cancellable(request, cancelled),
         }
     }
 }
@@ -523,7 +534,9 @@ impl TtsEngine for ManagedEngine {
     }
 
     fn name(&self) -> &'static str {
-        if matches!(self.cpu_config, EngineConfig::Qwen3TtsOnnx(_)) {
+        if matches!(self.cpu_config, EngineConfig::Phonon(_)) {
+            "phonon"
+        } else if matches!(self.cpu_config, EngineConfig::Qwen3TtsOnnx(_)) {
             "qwen3-tts-onnx"
         } else if self.cpu_config.is_qwen() {
             "qwen3-tts"
@@ -641,6 +654,100 @@ impl ManagedEngine {
 mod tests {
     use super::*;
     use crate::{Qwen3TtsConfig, Qwen3TtsMode};
+
+    #[test]
+    #[ignore = "requires real Phonon Q8 assets and native worker via SAYIT_PHONON_TEST_MODEL/WORKER"]
+    fn real_phonon_stream_archive_cancellation_and_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = EngineConfig::Phonon(crate::PhononConfig {
+            model: PathBuf::from(std::env::var_os("SAYIT_PHONON_TEST_MODEL").unwrap()),
+            worker: PathBuf::from(std::env::var_os("SAYIT_PHONON_TEST_WORKER").unwrap()),
+            voice: "default".into(),
+        });
+        config.validate().unwrap();
+        let engine =
+            ManagedEngine::load(&config, &InferenceRuntime::new(directory.path()), true).unwrap();
+        assert_eq!(engine.device().backend.as_deref(), Some("phonon"));
+        assert_eq!(engine.device().quantization.as_deref(), Some("q8_0"));
+        assert_eq!(engine.device().provider, "cpu");
+        let text = "The morning is quiet and the words are clear. This synthetic voice is used only for local testing.";
+        for name in ["cold.wav", "warm.wav"] {
+            let output = directory.path().join(name);
+            let start = Instant::now();
+            let mut first = None;
+            let mut streamed = Vec::new();
+            engine
+                .synthesize_streaming(
+                    &SynthesisRequest {
+                        text,
+                        output: &output,
+                        reference_audio: None,
+                        reference_text: None,
+                        speaking_pace: 1.0,
+                    },
+                    None,
+                    &mut |samples, rate| {
+                        assert!(!output.exists(), "partial WAV must stay private");
+                        assert_eq!(rate, 24_000);
+                        first.get_or_insert(start.elapsed());
+                        streamed.extend_from_slice(samples);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            let elapsed = start.elapsed();
+            assert!(elapsed.saturating_sub(first.unwrap()) > Duration::from_millis(100));
+            assert!(streamed.iter().all(|sample| sample.is_finite()));
+            assert!(streamed.iter().any(|sample| sample.abs() > 0.01));
+            let archived = hound::WavReader::open(&output)
+                .unwrap()
+                .into_samples::<i16>()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let expected = streamed
+                .iter()
+                .map(|sample| (sample.clamp(-1.0, 1.0) * 32767.0).round() as i16)
+                .collect::<Vec<_>>();
+            assert_eq!(archived, expected);
+            eprintln!(
+                "Phonon {name}: first PCM {:.3}s, complete {:.3}s, {} samples",
+                first.unwrap().as_secs_f64(),
+                elapsed.as_secs_f64(),
+                streamed.len()
+            );
+        }
+        let cancelled = AtomicBool::new(false);
+        let output = directory.path().join("cancelled.wav");
+        let request = SynthesisRequest {
+            text,
+            output: &output,
+            reference_audio: None,
+            reference_text: None,
+            speaking_pace: 1.0,
+        };
+        let result = engine.synthesize_streaming(&request, Some(&cancelled), &mut |_, _| {
+            cancelled.store(true, Ordering::Relaxed);
+            Ok(())
+        });
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(!output.exists());
+        assert!(
+            !fs::read_dir(directory.path()).unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".tmp")),
+            "killed worker must not leak partial audio files"
+        );
+        let recovered = directory.path().join("recovered.wav");
+        engine
+            .synthesize(&SynthesisRequest {
+                output: &recovered,
+                ..request
+            })
+            .unwrap();
+        assert!(crate::wav_duration_seconds(&recovered).unwrap() > 1.0);
+    }
 
     #[test]
     #[ignore = "requires installed native Qwen assets, runtime, worker, and a permitted reference via SAYIT_NATIVE_TEST_* variables"]

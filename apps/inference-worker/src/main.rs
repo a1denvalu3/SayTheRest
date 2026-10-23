@@ -9,14 +9,18 @@ use std::{
     path::PathBuf,
 };
 
+mod phonon;
+
 #[derive(Parser)]
 struct Options {
-    #[arg(long, required_unless_present = "sherpa_config")]
+    #[arg(long, required_unless_present_any = ["sherpa_config", "phonon_config"])]
     model: Option<PathBuf>,
-    #[arg(long, required_unless_present = "sherpa_config")]
+    #[arg(long, required_unless_present_any = ["sherpa_config", "phonon_config"])]
     runtime: Option<PathBuf>,
-    #[arg(long, conflicts_with_all = ["model", "runtime"])]
+    #[arg(long, conflicts_with_all = ["model", "runtime", "phonon_config"])]
     sherpa_config: Option<PathBuf>,
+    #[arg(long, conflicts_with_all = ["model", "runtime", "sherpa_config"])]
+    phonon_config: Option<PathBuf>,
     #[arg(long, default_value = "int4")]
     precision: String,
     #[arg(long, default_value = "cpu")]
@@ -27,6 +31,9 @@ struct Options {
 
 fn main() -> Result<()> {
     let options = Options::parse();
+    if let Some(path) = options.phonon_config {
+        return phonon::run(EngineConfig::from_path(&path)?);
+    }
     if let Some(path) = options.sherpa_config {
         return run_sherpa(EngineConfig::from_path(&path)?);
     }

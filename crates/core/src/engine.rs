@@ -49,8 +49,8 @@ impl SherpaOnnxEngine {
     }
 
     pub fn command_args(&self, request: &SynthesisRequest<'_>) -> Result<Vec<String>> {
-        if self.config.is_qwen() {
-            bail!("Qwen models require the persistent generative worker");
+        if self.config.is_qwen() || matches!(self.config, EngineConfig::Phonon(_)) {
+            bail!("This model requires the persistent speech worker");
         }
         anyhow::ensure!(
             request.speaking_pace.is_finite() && (0.5..=2.0).contains(&request.speaking_pace),
@@ -113,14 +113,18 @@ impl SherpaOnnxEngine {
                 format!("--sid={}", config.speaker_id),
                 format!("--kitten-length-scale={}", 1.0 / request.speaking_pace),
             ],
-            EngineConfig::Qwen3Tts(_) | EngineConfig::Qwen3TtsOnnx(_) => unreachable!(),
+            EngineConfig::Qwen3Tts(_) | EngineConfig::Qwen3TtsOnnx(_) | EngineConfig::Phonon(_) => {
+                unreachable!()
+            }
         };
         let (provider, threads) = match &self.config {
             EngineConfig::SherpaOnnxVits(config) => (&config.provider, config.num_threads),
             EngineConfig::SherpaOnnxPocket(config) => (&config.provider, config.num_threads),
             EngineConfig::SherpaOnnxKokoro(config) => (&config.provider, config.num_threads),
             EngineConfig::SherpaOnnxKitten(config) => (&config.provider, config.num_threads),
-            EngineConfig::Qwen3Tts(_) | EngineConfig::Qwen3TtsOnnx(_) => unreachable!(),
+            EngineConfig::Qwen3Tts(_) | EngineConfig::Qwen3TtsOnnx(_) | EngineConfig::Phonon(_) => {
+                unreachable!()
+            }
         };
         args.push(Self::arg("output-filename", request.output));
         args.push(format!("--provider={provider}"));
@@ -137,6 +141,7 @@ impl SherpaOnnxEngine {
             EngineConfig::SherpaOnnxKitten(config) => config.executable.clone(),
             EngineConfig::Qwen3Tts(config) => config.python.clone(),
             EngineConfig::Qwen3TtsOnnx(config) => config.worker.clone(),
+            EngineConfig::Phonon(config) => config.worker.clone(),
         }
     }
 
@@ -239,6 +244,7 @@ impl TtsEngine for SherpaOnnxEngine {
 
     fn name(&self) -> &'static str {
         match self.config {
+            EngineConfig::Phonon(_) => "phonon/persistent-worker",
             EngineConfig::SherpaOnnxVits(_) => "sherpa-onnx-vits/process-cold",
             EngineConfig::SherpaOnnxPocket(_) => "sherpa-onnx-pocket/process-cold",
             EngineConfig::SherpaOnnxKokoro(_) => "sherpa-onnx-kokoro/process-cold",

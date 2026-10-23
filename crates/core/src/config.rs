@@ -12,6 +12,85 @@ pub enum EngineConfig {
     SherpaOnnxPocket(PocketConfig),
     Qwen3Tts(Qwen3TtsConfig),
     Qwen3TtsOnnx(QwenOnnxConfig),
+    Phonon(PhononConfig),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PhononConfig {
+    #[serde(default = "native_worker_path")]
+    pub worker: PathBuf,
+    pub model: PathBuf,
+    #[serde(default = "default_phonon_voice")]
+    pub voice: String,
+}
+
+fn default_phonon_voice() -> String {
+    "default".into()
+}
+
+impl PhononConfig {
+    pub fn voice_path(&self) -> Result<PathBuf> {
+        anyhow::ensure!(
+            !self.voice.is_empty()
+                && self.voice.len() <= 128
+                && self.voice != "."
+                && self.voice != ".."
+                && !self
+                    .voice
+                    .chars()
+                    .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':')),
+            "invalid Phonon voice name"
+        );
+        Ok(if self.voice == "default" {
+            self.model.join("default-voice.safetensors")
+        } else {
+            self.model
+                .join("voices")
+                .join(format!("{}.safetensors", self.voice))
+        })
+    }
+}
+
+#[cfg(test)]
+mod phonon_tests {
+    use super::*;
+
+    #[test]
+    fn selected_voice_stays_inside_the_model_and_is_required() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = PhononConfig {
+            worker: native_worker_path(),
+            model: directory.path().into(),
+            voice: "default".into(),
+        };
+        for voice in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "..\\escape",
+            "C:voice",
+            "voice\nname",
+        ] {
+            config.voice = voice.into();
+            assert!(config.voice_path().is_err(), "must reject {voice:?}");
+        }
+        config.voice = "Old Mortlake".into();
+        assert_eq!(
+            config.voice_path().unwrap(),
+            directory.path().join("voices/Old Mortlake.safetensors")
+        );
+        for file in ["config.json", "tokenizer.json", "model.q8.gguf"] {
+            fs::write(directory.path().join(file), b"fixture").unwrap();
+        }
+        assert!(
+            EngineConfig::Phonon(config.clone()).validate().is_err(),
+            "a missing selected voice cannot fall back silently"
+        );
+        fs::create_dir(directory.path().join("voices")).unwrap();
+        fs::write(config.voice_path().unwrap(), b"fixture").unwrap();
+        EngineConfig::Phonon(config).validate().unwrap();
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -171,6 +250,7 @@ impl EngineConfig {
             Self::SherpaOnnxKitten(c) => &c.provider,
             Self::Qwen3Tts(c) => &c.device,
             Self::Qwen3TtsOnnx(c) => &c.device,
+            Self::Phonon(_) => "cpu",
         }
     }
 
@@ -180,7 +260,7 @@ impl EngineConfig {
             Self::SherpaOnnxPocket(c) => (&mut c.provider, &mut c.executable),
             Self::SherpaOnnxKokoro(c) => (&mut c.provider, &mut c.executable),
             Self::SherpaOnnxKitten(c) => (&mut c.provider, &mut c.executable),
-            Self::Qwen3Tts(_) | Self::Qwen3TtsOnnx(_) => return,
+            Self::Qwen3Tts(_) | Self::Qwen3TtsOnnx(_) | Self::Phonon(_) => return,
         };
         *target = provider.into();
         if let Some(path) = executable {
@@ -221,6 +301,18 @@ impl EngineConfig {
 
     pub fn validate(&self) -> Result<()> {
         match self {
+            Self::Phonon(phonon) => {
+                for name in ["config.json", "tokenizer.json", "model.q8.gguf"] {
+                    anyhow::ensure!(
+                        phonon.model.join(name).is_file(),
+                        "Phonon is missing {name}"
+                    );
+                }
+                anyhow::ensure!(
+                    phonon.voice_path()?.is_file(),
+                    "Phonon voice is not installed"
+                );
+            }
             Self::Qwen3TtsOnnx(qwen) => {
                 anyhow::ensure!(
                     matches!(qwen.precision.as_str(), "int4" | "fp32"),

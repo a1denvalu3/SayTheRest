@@ -13,13 +13,13 @@ mod wav;
 
 pub use benchmark::{BenchmarkReport, BenchmarkRunner};
 pub use config::{
-    EngineConfig, KittenConfig, KokoroConfig, PocketConfig, Qwen3TtsConfig, Qwen3TtsMode,
-    QwenOnnxConfig, VitsConfig, native_worker_path,
+    EngineConfig, KittenConfig, KokoroConfig, PhononConfig, PocketConfig, Qwen3TtsConfig,
+    Qwen3TtsMode, QwenOnnxConfig, VitsConfig, native_worker_path,
 };
 pub use device::{CudaDevice, TorchFlavor};
 pub use engine::{AudioSink, SherpaOnnxEngine, SynthesisRequest, TtsEngine};
 pub use inference::{InferenceDevice, InferenceRuntime, ManagedEngine};
-pub use qwen::ResidentQwenEngine;
+pub use qwen::{ResidentQwenEngine, ResidentSpeechWorker};
 pub use resident::ResidentSherpaEngine;
 pub use text::{CleanedText, TextCleaningOptions, clean_text};
 pub use wav::wav_duration_seconds;

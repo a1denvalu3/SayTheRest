@@ -188,6 +188,7 @@ impl ServiceState {
                 EngineConfig::SherpaOnnxPocket(_) => "pocket-tts-int8",
                 EngineConfig::Qwen3Tts(_) => "qwen3-tts",
                 EngineConfig::Qwen3TtsOnnx(_) => "qwen3-tts-06b-base",
+                EngineConfig::Phonon(_) => "phonon-31m-en",
             });
         if let (Some(id), Some(source)) = (configured_model_id, engine_config_path.as_deref()) {
             let managed = models.config_path(id);

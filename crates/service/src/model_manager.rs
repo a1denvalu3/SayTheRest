@@ -392,6 +392,9 @@ impl ModelManager {
                 EngineConfig::Qwen3TtsOnnx(config) => {
                     replace_path(&mut config.worker, &sayit_core::native_worker_path())
                 }
+                EngineConfig::Phonon(config) => {
+                    replace_path(&mut config.worker, &sayit_core::native_worker_path())
+                }
             };
             if !changed {
                 continue;
@@ -447,7 +450,7 @@ impl ModelManager {
                         EngineConfig::SherpaOnnxKokoro(config) => Some(config.speaker_id),
                         EngineConfig::SherpaOnnxKitten(config) => Some(config.speaker_id),
                         EngineConfig::SherpaOnnxPocket(_) => None,
-                        EngineConfig::Qwen3Tts(_) | EngineConfig::Qwen3TtsOnnx(_) => None,
+                        EngineConfig::Qwen3Tts(_) | EngineConfig::Qwen3TtsOnnx(_) | EngineConfig::Phonon(_) => None,
                     });
                 ModelDescriptor {
                     inference_backend: match installed_config.as_ref() {
@@ -583,6 +586,7 @@ impl ModelManager {
             EngineConfig::SherpaOnnxPocket(_) => bail!("model does not provide preset voices"),
             EngineConfig::Qwen3Tts(config) => config.speaker = Some(voice_id.into()),
             EngineConfig::Qwen3TtsOnnx(_) => bail!("native Qwen Base requires a cloned voice"),
+            EngineConfig::Phonon(config) => config.voice = voice_id.into(),
         }
         Ok(config)
     }
@@ -1698,6 +1702,11 @@ fn relocate_config(
             config.runtime = None;
             Ok(EngineConfig::Qwen3TtsOnnx(config))
         }
+        EngineConfig::Phonon(mut config) => {
+            config.model = relocate(config.model)?;
+            config.worker = sayit_core::native_worker_path();
+            Ok(EngineConfig::Phonon(config))
+        }
     }
 }
 
@@ -1795,6 +1804,7 @@ fn config_requirements(config: &EngineConfig) -> Result<Vec<(String, bool)>> {
         ]),
         EngineConfig::Qwen3Tts(config) => Ok(vec![path(&config.model, true)?]),
         EngineConfig::Qwen3TtsOnnx(config) => Ok(vec![path(&config.model, true)?]),
+        EngineConfig::Phonon(config) => Ok(vec![path(&config.model, true)?]),
     }
 }
 

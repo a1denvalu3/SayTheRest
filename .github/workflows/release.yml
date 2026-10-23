@@ -51,6 +51,9 @@ jobs:
       - name: Test Kitten models through packaged resident runtime
         shell: bash
         run: ./scripts/test-kitten-models.sh '${{ matrix.target }}'
+      - name: Test real Phonon streaming, cancellation, and recovery
+        shell: bash
+        run: ./scripts/test-phonon.sh '${{ matrix.target }}'
       - name: Audit Linux packages
         if: runner.os == 'Linux'
         shell: bash

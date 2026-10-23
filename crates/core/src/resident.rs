@@ -208,8 +208,8 @@ unsafe impl Send for ResidentSherpaEngine {}
 
 impl ResidentSherpaEngine {
     pub fn load(config: &EngineConfig) -> Result<Self> {
-        if config.is_qwen() {
-            bail!("Qwen models require the persistent generative worker");
+        if config.is_qwen() || matches!(config, EngineConfig::Phonon(_)) {
+            bail!("This model requires the persistent speech worker");
         }
         let executable = executable(config);
         let library_path = c_api_library(&executable);
@@ -287,7 +287,9 @@ impl ResidentSherpaEngine {
                 native.model.provider = keep(value.provider.clone())?;
                 (0, value.num_steps as i32, true)
             }
-            EngineConfig::Qwen3Tts(_) | EngineConfig::Qwen3TtsOnnx(_) => unreachable!(),
+            EngineConfig::Qwen3Tts(_) | EngineConfig::Qwen3TtsOnnx(_) | EngineConfig::Phonon(_) => {
+                unreachable!()
+            }
         };
         native.max_num_sentences = 2;
         native.silence_scale = 0.2;
@@ -432,6 +434,7 @@ fn executable(config: &EngineConfig) -> PathBuf {
         EngineConfig::SherpaOnnxPocket(v) => v.executable.clone(),
         EngineConfig::Qwen3Tts(v) => v.python.clone(),
         EngineConfig::Qwen3TtsOnnx(v) => v.worker.clone(),
+        EngineConfig::Phonon(v) => v.worker.clone(),
     }
 }
 fn path_string(path: &Path) -> String {
