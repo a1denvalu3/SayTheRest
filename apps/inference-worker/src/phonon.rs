@@ -7,6 +7,7 @@ use ptts::{
     synth::{DeviceKind, Quant, SpeechOptions, Synth},
 };
 use sayit_core::EngineConfig;
+use sha2::{Digest, Sha256};
 use std::{
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
@@ -33,8 +34,11 @@ pub fn run(config: EngineConfig) -> Result<()> {
         .build()?;
     // Load the selected voice strictly: an unreadable optional voice must never
     // silently become unconditioned speech or a different voice.
-    synth.add_voice_file(&config.voice, &config.voice_path()?)?;
+    let selected_voice = config.voice_path()?;
+    sayit_core::phonon::read_voice(&selected_voice)?;
+    synth.add_voice_file(&config.voice, &selected_voice)?;
     let options = SpeechOptions::default().voice(config.voice.clone());
+    let mut custom_voice: Option<(PathBuf, Vec<u8>)> = None;
     let stdout = io::stdout();
     let mut output = stdout.lock();
     writeln!(
@@ -50,10 +54,23 @@ pub fn run(config: EngineConfig) -> Result<()> {
             let request: serde_json::Value = serde_json::from_str(&line?)?;
             let text = request["text"].as_str().context("missing speech text")?;
             ensure!(!text.trim().is_empty(), "text must not be empty");
-            ensure!(
-                request["reference_audio"].is_null(),
-                "Import a Phonon voice file instead of an audio reference"
-            );
+            let request_options = if request["reference_audio"].is_null() {
+                options.clone()
+            } else {
+                let path = PathBuf::from(
+                    request["reference_audio"]
+                        .as_str()
+                        .context("invalid voice file path")?,
+                );
+                let bytes = sayit_core::phonon::read_voice(&path)?;
+                let fingerprint = Sha256::digest(&bytes).to_vec();
+                let key = (path.clone(), fingerprint);
+                if custom_voice.as_ref() != Some(&key) {
+                    synth.add_voice_file("__sayit_custom", &path)?;
+                    custom_voice = Some(key);
+                }
+                SpeechOptions::default().voice("__sayit_custom")
+            };
             let pace = request["speaking_pace"].as_f64().unwrap_or(1.0);
             ensure!(
                 pace.is_finite() && (pace - 1.0).abs() < f64::EPSILON,
@@ -64,7 +81,7 @@ pub fn run(config: EngineConfig) -> Result<()> {
             let streaming = request["stream"].as_bool().unwrap_or(false);
             synthesize(
                 &synth,
-                &options,
+                &request_options,
                 text,
                 &destination,
                 &mut |samples, rate| {

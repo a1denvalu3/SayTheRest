@@ -24,6 +24,7 @@ use std::{
 
 const SAYIT_CONFIG: &str = "sayit-config.json";
 const QWEN_BASE_REVISION: &str = "5d83992436eae1d760afd27aff78a71d676296fc";
+mod phonon;
 // Original config.json from the immutable catalog revision. Older installers
 // overwrote this architecture with EngineConfig, so repair must work offline.
 // https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/blob/5d83992436eae1d760afd27aff78a71d676296fc/config.json
@@ -228,6 +229,27 @@ const CATALOG: &[CatalogEntry] = &[
         preset_voices: &[],
         hf_repository: Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base"),
         hf_revision: Some(QWEN_BASE_REVISION),
+    },
+    CatalogEntry {
+        id: "phonon-31m-en",
+        name: "Phonon 31M English",
+        archive_root: "",
+        url: "https://huggingface.co/gradium/phonon-31m-en",
+        sha256: "a7d9aad2cd6dc66473f24a08bc6d2939030ef4d751ef82349361fbef3272dbae",
+        size: 74_526_338,
+        languages: &["en"],
+        license: "Apache-2.0",
+        license_url: "https://huggingface.co/gradium/phonon-31m-en",
+        quality_note: "Native Q8 English speech with 38 named voices and local Phonon voice-file import.",
+        speed_note: "Streams on the CPU without Python; benchmark this device for first-audio latency.",
+        capabilities: ModelCapabilitiesStatic {
+            preset_voices: true,
+            voice_cloning: false,
+            streaming: true,
+        },
+        preset_voices: &[],
+        hf_repository: None,
+        hf_revision: None,
     },
 ];
 
@@ -456,9 +478,10 @@ impl ModelManager {
                     inference_backend: match installed_config.as_ref() {
                         Some(EngineConfig::Qwen3TtsOnnx(_)) => Some("onnx".into()),
                         Some(EngineConfig::Qwen3Tts(_)) => Some("pytorch".into()),
+                        Some(EngineConfig::Phonon(_)) => Some("phonon".into()),
                         _ => None,
                     },
-                    weight_precision: native.map(|config| config.precision.clone()),
+                    weight_precision: if entry.id=="phonon-31m-en" {Some("q8_0".into())} else {native.map(|config| config.precision.clone())},
                     inference_device: None,
                     id: entry.id.into(),
                     name: entry.name.into(),
@@ -475,6 +498,7 @@ impl ModelManager {
                     resident: false,
                     selected: installed && selected == Some(entry.id),
                     capabilities: ModelCapabilities {
+                        voice_file_import: entry.id == "phonon-31m-en",
                         preset_voices: entry.capabilities.preset_voices,
                         voice_cloning: entry.capabilities.voice_cloning,
                         voice_description: false,
@@ -486,8 +510,8 @@ impl ModelManager {
                     speed_note: speed_note.into(),
                     benchmark: benchmarks.get(entry.id).cloned(),
                     recommended: recommended == Some(entry.id),
-                    supports_native_speaking_pace: !entry.capabilities.voice_cloning,
-                    preset_voices: entry
+                    supports_native_speaking_pace: !entry.capabilities.voice_cloning && entry.id != "phonon-31m-en",
+                    preset_voices: if entry.id=="phonon-31m-en" {phonon::presets(installed_config.as_ref())} else {entry
                         .preset_voices
                         .iter()
                         .map(|id| ModelPresetVoice {
@@ -496,7 +520,7 @@ impl ModelManager {
                             language: preset_voice_language(id).into(),
                             selected: selected_speaker == preset_voice_speaker_id(entry, id),
                         })
-                        .collect(),
+                        .collect()},
                 }
             })
             .collect::<Vec<_>>();
@@ -521,6 +545,7 @@ impl ModelManager {
                     selected: self.config_path(&entry.id).is_file()
                         && selected == Some(entry.id.as_str()),
                     capabilities: ModelCapabilities {
+                        voice_file_import: false,
                         preset_voices: !entry.voice_cloning,
                         voice_cloning: entry.voice_cloning,
                         voice_description: false,
@@ -559,6 +584,9 @@ impl ModelManager {
     }
 
     pub fn preset_voice_config(&self, id: &str, voice_id: &str) -> Result<EngineConfig> {
+        if id == "phonon-31m-en" {
+            return self.phonon_preset_config(voice_id);
+        }
         let entry = CATALOG
             .iter()
             .find(|entry| entry.id == id)
@@ -592,6 +620,9 @@ impl ModelManager {
     }
 
     fn catalog_update_available(&self, entry: &CatalogEntry) -> bool {
+        if entry.id == "phonon-31m-en" {
+            return self.phonon_update_available();
+        }
         if let Ok(EngineConfig::Qwen3TtsOnnx(_)) =
             EngineConfig::from_path(&self.config_path(entry.id))
         {
@@ -1168,6 +1199,9 @@ impl ModelManager {
     }
 
     fn install(&self, entry: CatalogEntry, cancelled: &AtomicBool) -> Result<()> {
+        if entry.id == "phonon-31m-en" {
+            return self.install_phonon(cancelled);
+        }
         if entry.hf_repository.is_some() {
             self.install_hugging_face_catalog(entry, cancelled)
         } else {

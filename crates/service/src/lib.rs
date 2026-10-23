@@ -41,6 +41,7 @@ use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use uuid::Uuid;
 
 mod model_manager;
+mod phonon_voices;
 mod player;
 pub mod qwen_runtime;
 mod speech_blocks;
@@ -363,6 +364,17 @@ impl ServiceState {
             let voice = job
                 .voice_profile_id
                 .and_then(|id| inner.voices.iter().find(|voice| voice.id == id));
+            if job.voice_profile_id.is_some() && voice.is_none() {
+                drop(inner);
+                self.finish_job(
+                    job.id,
+                    Err(anyhow::anyhow!(
+                        "the voice profile for this job was deleted"
+                    )),
+                )
+                .await;
+                return;
+            }
             (
                 voice.map(|voice| PathBuf::from(&voice.reference_audio_path)),
                 voice.and_then(|voice| voice.reference_text.clone()),
@@ -394,6 +406,14 @@ impl ServiceState {
                 pocket.num_steps = steps as usize;
             }
             let mut config_bytes = fs::read(&config_path)?;
+            // Model/voice-pack revisions can change while the engine settings
+            // retain the same paths. Reload on the next request after an update.
+            if let Some(directory) = config_path.parent()
+                && let Ok(manifest) = fs::read(directory.join("catalog-install.json"))
+            {
+                config_bytes.extend_from_slice(b"\0catalog\0");
+                config_bytes.extend_from_slice(&manifest);
+            }
             config_bytes.extend_from_slice(&refinement_steps.unwrap_or_default().to_le_bytes());
             config_bytes.push(u8::from(prefer_gpu));
             let mut resident = resident_engine.lock().unwrap();
@@ -905,6 +925,7 @@ pub fn router(state: ServiceState) -> Router {
         .route("/v1/models/{id}/benchmark", post(benchmark_model))
         .route("/v1/models/{id}", axum::routing::delete(remove_model))
         .route("/v1/voices", get(voices).post(create_voice))
+        .route("/v1/voices/import", post(phonon_voices::import_voice))
         .route("/v1/voices/default/select", post(select_default_voice))
         .route("/v1/voices/{id}/select", post(select_voice))
         .route("/v1/voices/{id}/preview", post(preview_voice))
@@ -1022,7 +1043,22 @@ async fn snapshot(State(state): State<ServiceState>) -> Json<ServiceSnapshot> {
             player.job_id,
         ),
         PlayerStatus::Paused => (Some(JobState::Paused), player.job_id),
-        PlayerStatus::Finished => (Some(JobState::Completed), player.job_id),
+        PlayerStatus::Finished => {
+            // Completion includes publication to history. The audio callback
+            // can finish shortly before the job monitor journals the result.
+            let archived = inner
+                .jobs
+                .iter()
+                .any(|job| Some(job.id) == player.job_id && job.state == JobState::Completed);
+            (
+                Some(if archived {
+                    JobState::Completed
+                } else {
+                    JobState::Playing
+                }),
+                player.job_id,
+            )
+        }
         PlayerStatus::Idle | PlayerStatus::Failed => (
             processing.map(|_| JobState::Synthesizing),
             processing.map(|job| job.id),
@@ -1601,6 +1637,12 @@ async fn update_voice_transcript(
         .iter_mut()
         .find(|voice| voice.id == id)
         .ok_or((StatusCode::NOT_FOUND, "voice profile not found".into()))?;
+    if voice.reference_kind != sayit_protocol::VoiceReferenceKind::Audio {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "A Phonon voice file does not use a reference transcript".into(),
+        ));
+    }
     voice.reference_text = Some(reference_text);
     drop(inner);
     state.persist().await.map_err(internal_error)?;
@@ -1623,6 +1665,12 @@ async fn tune_voice(
     let Some(voice) = inner.voices.iter_mut().find(|voice| voice.id == id) else {
         return Err((StatusCode::NOT_FOUND, "voice profile not found".into()));
     };
+    if voice.reference_kind != sayit_protocol::VoiceReferenceKind::Audio {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "A Phonon voice file does not use PocketTTS refinement".into(),
+        ));
+    }
     voice.refinement_steps = request.refinement_steps;
     drop(inner);
     if let Ok(mut resident) = state.resident_engine.try_lock() {
@@ -1823,6 +1871,7 @@ async fn create_voice(
     let quality = analyze_and_trim_voice(&source, &destination, maximum_seconds)
         .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
     let profile = VoiceProfile {
+        reference_kind: sayit_protocol::VoiceReferenceKind::Audio,
         id,
         name: name.to_owned(),
         model_id,
@@ -2143,7 +2192,11 @@ async fn preview_preset_voice(
         "Hello! This is a preview of {}. Choose the voice that makes listening feel effortless.",
         voice.name
     );
-    let speaking_pace = state.inner.read().await.settings.speaking_pace;
+    let speaking_pace = if matches!(config, EngineConfig::Phonon(_)) {
+        1.0
+    } else {
+        state.inner.read().await.settings.speaking_pace
+    };
     let prefer_gpu = state.inner.read().await.settings.compute_device != "cpu";
     let runtime = state.inference_runtime.clone();
     let last_device = state.last_inference_device.clone();
@@ -2202,9 +2255,16 @@ async fn submit_job(
         StatusCode::CONFLICT,
         "download and select a speech model before reading text aloud".into(),
     ))?;
-    let requires_voice_profile = EngineConfig::from_path(&config_path)
-        .map_err(unprocessable)?
-        .requires_reference();
+    let config = EngineConfig::from_path(&config_path).map_err(unprocessable)?;
+    let requires_voice_profile = config.requires_reference();
+    let phonon = matches!(config, EngineConfig::Phonon(_));
+    if phonon && submission.speaking_pace.is_some_and(|pace| pace != 1.0) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Phonon uses natural speaking pace; adjust playback speed to listen faster or slower"
+                .into(),
+        ));
+    }
     let cleaning = state.inner.read().await.settings.text_cleaning;
     let cleaned = clean_text(
         &submission.text,
@@ -2297,10 +2357,12 @@ async fn submit_job(
     }
     if let Some(voice_id) = voice_profile_id {
         let active_model = inner.settings.active_model_id.as_deref();
-        let compatible = inner
-            .voices
-            .iter()
-            .any(|voice| voice.id == voice_id && Some(voice.model_id.as_str()) == active_model);
+        let compatible = inner.voices.iter().any(|voice| {
+            voice.id == voice_id
+                && Some(voice.model_id.as_str()) == active_model
+                && (voice.reference_kind == sayit_protocol::VoiceReferenceKind::PhononEmbedding)
+                    == phonon
+        });
         if !compatible {
             return Err((
                 StatusCode::CONFLICT,
@@ -2316,7 +2378,11 @@ async fn submit_job(
         created_at: chrono::Utc::now(),
         error: None,
         voice_profile_id,
-        speaking_pace: submission.speaking_pace,
+        speaking_pace: if phonon {
+            Some(1.0)
+        } else {
+            submission.speaking_pace
+        },
     };
     inner.jobs.push_back(job.clone());
     drop(inner);
@@ -3104,6 +3170,7 @@ for line in sys.stdin:
         let state = qwen_voice_test_state(directory.path());
         let id = Uuid::new_v4();
         state.inner.write().await.voices.push(VoiceProfile {
+            reference_kind: sayit_protocol::VoiceReferenceKind::Audio,
             id,
             name: "My voice".into(),
             model_id: "qwen3-tts".into(),
@@ -3166,6 +3233,7 @@ for line in sys.stdin:
                 .voice_profile_by_model
                 .insert("qwen3-tts".into(), Some(id));
             inner.voices.push(VoiceProfile {
+                reference_kind: sayit_protocol::VoiceReferenceKind::Audio,
                 id,
                 name: "Reference".into(),
                 model_id: "qwen3-tts".into(),
@@ -3248,6 +3316,7 @@ for line in sys.stdin:
         let state = ServiceState::default();
         let id = Uuid::new_v4();
         state.inner.write().await.voices.push(VoiceProfile {
+            reference_kind: sayit_protocol::VoiceReferenceKind::Audio,
             id,
             name: "Tunable".into(),
             model_id: "pocket-tts-int8".into(),
@@ -3716,6 +3785,7 @@ for line in sys.stdin:
         {
             let mut inner = state.inner.write().await;
             inner.voices.push(VoiceProfile {
+                reference_kind: sayit_protocol::VoiceReferenceKind::Audio,
                 id: voice_id,
                 name: "Remembered".into(),
                 model_id: "pocket-tts-int8".into(),

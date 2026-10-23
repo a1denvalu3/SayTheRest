@@ -19,15 +19,23 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config',type=Path,required=True)
     parser.add_argument('--snapshots',type=Path,help='Save native Linux WebKit screenshots in this directory')
+    parser.add_argument('--script',type=Path,help='Native UI acceptance script (defaults to player checks)')
+    parser.add_argument('--window',choices=['player','main'],default='player')
+    parser.add_argument('--voice-file',type=Path,help='Phonon voice file for management UI acceptance')
     args=parser.parse_args()
     repo=Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix='sayit-native-ui-') as temporary:
         root=Path(temporary)
+        fixture={'voice_file':str(args.voice_file.resolve()) if args.voice_file else None,'bad_voice_file':str(root/'invalid.safetensors')}
+        (root/'invalid.safetensors').write_bytes(b'invalid exported voice')
+        script=args.script or repo/'scripts/desktop-ui-smoke.js'
+        driver=root/'driver.js'
+        driver.write_text('window.__SAYIT_UI_FIXTURE__='+json.dumps(fixture)+';\n'+script.read_text())
         with socket.socket() as sock:
             sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
         env=dict(os.environ,XDG_STATE_HOME=str(root/'state'),XDG_CONFIG_HOME=str(root/'config'),XDG_CACHE_HOME=str(root/'cache'),
                  SAYIT_DESKTOP_TEST_MODE='1',SAYIT_SERVICE_URL=f'http://127.0.0.1:{port}/v1',
-                 SAYIT_UI_TEST_SCRIPT=str(repo/'scripts/desktop-ui-smoke.js'),SAYIT_UI_TEST_RESULT=str(root/'result.json'))
+                 SAYIT_UI_TEST_SCRIPT=str(driver),SAYIT_UI_TEST_RESULT=str(root/'result.json'),SAYIT_UI_TEST_WINDOW=args.window)
         data=root/'state/sayit'
         if args.snapshots:
             args.snapshots.mkdir(parents=True,exist_ok=True)

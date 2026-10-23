@@ -29,6 +29,7 @@
           "precision": { "type": ["string", "null"], "enum": ["int4", "fp32", null], "description": "Native weight precision; defaults to int4." }
         }
       },
+      "VoiceImportRequest": {"type": "object", "required": ["name", "path", "kind"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 80}, "path": {"type": "string", "description": "Local exported Phonon .safetensors file, up to 8 MB."}, "kind": {"type": "string", "enum": ["phonon-embedding"]}}},
       "VoiceCloneRequest": {
         "type": "object",
         "required": ["name", "reference_audio_path", "speaker_permission_confirmed"],
@@ -100,6 +101,7 @@
       "get": { "summary": "List local voice profiles", "responses": { "200": { "description": "Voices" } } },
       "post": { "security": [{ "controlToken": [] }], "summary": "Create a voice profile with speaker permission and a matching reference transcript", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VoiceCloneRequest" } } } }, "responses": { "201": { "description": "Created profile, including reference_text" }, "422": { "description": "Invalid reference audio, permission, or transcript; Qwen requires a nonblank transcript" } } }
     },
+    "/voices/import": {"post": {"summary": "Import an exported Phonon voice file", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/VoiceImportRequest"}}}}, "responses": {"201": {"description": "Local voice profile with reference_kind=phonon-embedding and a private copy of the voice file"}, "409": {"description": "Select and install a Phonon model first"}, "422": {"description": "Invalid name, file, shape, or non-finite/silent speaker latents"}}, "security": [{"controlToken": []}]}},
     "/voices/{id}/transcript": { "post": { "security": [{ "controlToken": [] }], "summary": "Add or correct a saved voice profile's reference transcript", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string", "format": "uuid" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VoiceTranscriptRequest" } } } }, "responses": { "204": { "description": "Transcript saved for future generations" }, "404": { "description": "Voice profile not found" }, "422": { "description": "Transcript is blank or too long" } } } },
     "/voices/{id}/{action}": { "post": { "security": [{ "controlToken": [] }], "summary": "Select, preview, rename, or tune a voice", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string" } }, { "in": "path", "name": "action", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Applied" }, "202": { "description": "Preview queued" } } } },
     "/voices/{id}": { "delete": { "security": [{ "controlToken": [] }], "summary": "Delete a voice profile", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Deleted" } } } },

@@ -68,6 +68,14 @@
         <label class="consent"><input name="consent" type="checkbox" required><span>I confirm that the speaker gave permission for their voice to be cloned.</span></label>
         <button type="submit" class="action">Create voice profile</button>
       </form>
+      <form id="voice-file-form" class="studio-card settings-form" hidden>
+        <h3>Import a Phonon voice</h3>
+        <p>Choose a voice exported with “Download for Phonon” in Gradium. A local copy works offline.</p>
+        <label>Name<input name="name" required maxlength="80" placeholder="My narrator"></label>
+        <label>Voice file<input name="path" required placeholder="Choose a .safetensors file, up to 8 MB"></label>
+        <button type="button" id="browse-voice-file" class="action secondary">Choose voice file…</button>
+        <button type="submit" class="action">Import voice</button>
+      </form>
       <div id="voice-list" class="card-list compact"></div>
     </section>
     <section class="view" id="history-view"><div class="section-intro"><h2>What you heard.</h2><p>Your local listening history, ready to revisit.</p></div><label class="search-field">Search history<input id="history-search" type="search" placeholder="Find spoken text"></label><div id="history-list" class="card-list compact"></div></section>

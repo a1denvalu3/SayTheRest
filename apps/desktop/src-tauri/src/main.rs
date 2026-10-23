@@ -760,15 +760,38 @@ async fn service_get(
 }
 
 async fn read_service_resource(resource: &str) -> Result<Value, String> {
-    authorized_read(reqwest::Client::new().get(format!("{}/{resource}", service_url())))?
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
+    let response =
+        authorized_read(reqwest::Client::new().get(format!("{}/{resource}", service_url())))?
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+    checked_service_response(response)
+        .await?
         .json()
         .await
         .map_err(|error| error.to_string())
+}
+
+async fn checked_service_response(
+    mut response: reqwest::Response,
+) -> Result<reqwest::Response, String> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+        body.extend_from_slice(&chunk[..chunk.len().min(4096 - body.len())]);
+        if body.len() == 4096 {
+            break;
+        }
+    }
+    let detail = String::from_utf8_lossy(&body);
+    Err(if detail.trim().is_empty() {
+        format!("Service request failed: {status}")
+    } else {
+        detail.trim().to_owned()
+    })
 }
 
 #[tauri::command]
@@ -785,9 +808,8 @@ async fn service_post(
     }
     .send()
     .await
-    .map_err(|error| error.to_string())?
-    .error_for_status()
     .map_err(|error| error.to_string())?;
+    let response = checked_service_response(response).await?;
     cache.invalidate();
     let bytes = response.bytes().await.map_err(|error| error.to_string())?;
     if bytes.is_empty() {
@@ -804,12 +826,12 @@ async fn service_delete(
     cache: tauri::State<'_, api_cache::SnapshotCache>,
 ) -> Result<(), String> {
     let resource = safe_resource(&resource)?;
-    authorized(reqwest::Client::new().delete(format!("{}/{resource}", service_url())))?
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?;
+    let response =
+        authorized(reqwest::Client::new().delete(format!("{}/{resource}", service_url())))?
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+    checked_service_response(response).await?;
     cache.invalidate();
     Ok(())
 }

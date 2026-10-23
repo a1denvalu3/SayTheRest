@@ -61,7 +61,7 @@ $('#player-model').onchange=async event=>{
     if (models.find(model=>model.id===id)?.capabilities.voice_cloning&&!settings.active_voice_profile_id) {
       await invoke('open_management',{section:'voices'});return;
     }
-    if (previous?.spoken_text) await post('jobs',{text:previous.spoken_text,source:'desktop',queue_policy:'replace',confirmed_long_text:true});
+    if (previous?.spoken_text) await post('jobs',{text:previous.spoken_text,source:'desktop',queue_policy:'interrupt',confirmed_long_text:true});
     await refresh(true);
   } catch(error) {toast(String(error));await refresh(true);}
 };

@@ -4,6 +4,7 @@ mod device;
 mod engine;
 mod inference;
 pub mod onnx_runtime;
+pub mod phonon;
 mod qwen;
 pub mod qwen_onnx;
 pub mod qwen_runtime;

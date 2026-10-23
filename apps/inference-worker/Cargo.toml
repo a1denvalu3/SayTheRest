@@ -11,3 +11,4 @@ serde_json.workspace = true
 sayit-core = { path = "../../crates/core" }
 ptts = { version = "=0.4.0", default-features = false, features = ["hf"] }
 hound.workspace = true
+sha2.workspace = true

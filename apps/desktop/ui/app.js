@@ -60,11 +60,15 @@ function renderVoices(voices,settings,models){
   voiceProfiles=voices;
   const selected=settings.active_voice_profile_id;
   const model=models.find(candidate=>candidate.selected);
+  $('#voice-form').hidden=!model?.capabilities.voice_cloning;
+  $('#voice-file-form').hidden=!model?.capabilities.voice_file_import;
   const usesTranscript=Boolean(model?.id.startsWith('qwen3-tts'));
   $('#voice-form').elements.reference_text.required=usesTranscript;
   const maximumSeconds=usesTranscript?45:15;
   $('#voice-form').dataset.maximumSeconds=String(maximumSeconds);
-  $('#voice-reference-intro').textContent=`Record or import a clean 3–${maximumSeconds} second sample from a speaker who gave permission.`;
+  $('#voice-reference-intro').textContent=model?.capabilities.voice_file_import
+    ?'Choose a preset or import an exported Phonon voice file. Your voices stay on this device.'
+    :model?.capabilities.voice_cloning?`Record or import a clean 3–${maximumSeconds} second sample from a speaker who gave permission.`:'Choose a built-in voice and preview it locally.';
   $('#voice-recording-script').textContent=usesTranscript?longVoicePassage:shortVoicePassage;
   $('#voice-recording-limit').textContent=`Speak naturally and stop after the last word. The microphone records up to ${maximumSeconds} seconds.`;
   $('#voice-transcript-note').textContent=usesTranscript
@@ -76,14 +80,15 @@ function renderVoices(voices,settings,models){
   }).join('');
   const noVoice=!builtIns&&!voices.length?'<p class="empty">This model needs a cloned voice. Record or import a permitted reference sample below.</p>':'';
   const clones=voices.map(voice=>{
+    const embedding=voice.reference_kind==='phonon-embedding';
     const active=voice.id===selected;
     const quality=voice.quality||{};
     const issues=(quality.issues||[]).map(issue=>`<li>${escapeHtml(issue)}</li>`).join('');
     const transcriptStatus=usesTranscript?`<p>${voice.reference_text?'Transcript saved · used for voice cloning.':'Add the transcript of this recording to improve voice similarity.'}</p>`:'';
-    const tuning=usesTranscript
+    const tuning=embedding?'':usesTranscript
       ?`<button class="action secondary" data-voice="${voice.id}" data-voice-action="transcript">${voice.reference_text?'Edit':'Add'} transcript</button>`
       :`<button class="action secondary" data-voice="${voice.id}" data-voice-action="tune" data-refinement-steps="${voice.refinement_steps||5}">Tune</button>`;
-    return `<article class="data-card"><header><h3>${escapeHtml(voice.name)}</h3><div><span>${voice.reference_duration_seconds.toFixed(1)} sec</span>${active?' <span class="tag accent">Selected</span>':''}</div></header><p>Local reference profile · created ${new Date(voice.created_at).toLocaleDateString()}${usesTranscript?'':` · refinement ${voice.refinement_steps||5}/8`}</p>${transcriptStatus}${quality.sample_rate?`<div class="voice-quality"><strong>${quality.quality_score}/100</strong><span>${Math.round(quality.sample_rate/1000)} kHz · RMS ${quality.rms_dbfs.toFixed(1)} dBFS · clipped ${quality.clipped_sample_percent.toFixed(2)}%</span></div>${issues?`<ul class="quality-issues">${issues}</ul>`:''}`:''}<div class="card-actions"><button class="action" data-voice="${voice.id}" data-voice-action="preview">Preview</button>${active?'<button class="action secondary" disabled>In use</button>':`<button class="action secondary" data-voice="${voice.id}" data-voice-action="select">Use this voice</button>`}${tuning}<button class="action secondary" data-voice="${voice.id}" data-voice-action="rename" data-voice-name="${escapeHtml(voice.name)}">Rename</button>${active?'':`<button class="action secondary danger" data-voice="${voice.id}" data-voice-action="delete">Delete</button>`}</div></article>`;
+    return `<article class="data-card"><header><h3>${escapeHtml(voice.name)}</h3><div><span>${embedding?'Phonon voice file':`${voice.reference_duration_seconds.toFixed(1)} sec`}</span>${active?' <span class="tag accent">Selected</span>':''}</div></header><p>${embedding?'Imported voice file':'Local reference profile'} · created ${new Date(voice.created_at).toLocaleDateString()}${usesTranscript||embedding?'':` · refinement ${voice.refinement_steps||5}/8`}</p>${transcriptStatus}${quality.sample_rate?`<div class="voice-quality"><strong>${quality.quality_score}/100</strong><span>${Math.round(quality.sample_rate/1000)} kHz · RMS ${quality.rms_dbfs.toFixed(1)} dBFS · clipped ${quality.clipped_sample_percent.toFixed(2)}%</span></div>${issues?`<ul class="quality-issues">${issues}</ul>`:''}`:''}<div class="card-actions"><button class="action" data-voice="${voice.id}" data-voice-action="preview">Preview</button>${active?'<button class="action secondary" disabled>In use</button>':`<button class="action secondary" data-voice="${voice.id}" data-voice-action="select">Use this voice</button>`}${tuning}<button class="action secondary" data-voice="${voice.id}" data-voice-action="rename" data-voice-name="${escapeHtml(voice.name)}">Rename</button>${active?'':`<button class="action secondary danger" data-voice="${voice.id}" data-voice-action="delete">Delete</button>`}</div></article>`;
   }).join('');
   $('#voice-list').innerHTML=builtIns+noVoice+clones;
   document.querySelectorAll('[data-voice]').forEach(button=>button.onclick=()=>voiceAction(button));
@@ -220,6 +225,19 @@ $('#voice-form').onsubmit=async event=>{
   }catch(error){toast(String(error))}finally{button.disabled=false}
 };
 $('#history-search').oninput=()=>renderHistory(historyItems);
+$('#browse-voice-file').onclick=async()=>{
+  try {
+    const path=await window.__TAURI__.dialog.open({multiple:false,directory:false,filters:[{name:'Phonon voice',extensions:['safetensors']}]});
+    if(path)$('#voice-file-form').elements.path.value=path;
+  }catch(error){toast(String(error))}
+};
+$('#voice-file-form').onsubmit=async event=>{
+  event.preventDefault();const form=event.target,button=form.querySelector('[type=submit]');button.disabled=true;
+  try {
+    await post('voices/import',{kind:'phonon-embedding',name:form.elements.name.value,path:form.elements.path.value});
+    form.reset();await refreshVoices();toast('Phonon voice imported · choose “Use this voice” to select it');
+  }catch(error){toast(String(error))}finally{button.disabled=false}
+};
 $('#settings-form').onsubmit=async event=>{event.preventDefault();const data=new FormData(event.target);try{const settings=await post('settings',{compute_device:String(data.get('compute_device')),speaking_pace:event.target.elements.speaking_pace.disabled?null:Number(data.get('speaking_pace')),model_unload_delay_seconds:Number(data.get('model_timeout_minutes'))*60,history_retention_days:Number(data.get('history_retention_days')),history_quota_bytes:Number(data.get('history_quota_mb'))*1048576,long_text_confirmation_characters:Number(data.get('long_text_characters')),text_cleaning:{enabled:data.get('cleaning_enabled')==='on',strip_markdown:data.get('strip_markdown')==='on',strip_html:data.get('strip_html')==='on',strip_code_blocks:data.get('strip_code_blocks')==='on',strip_special_characters:data.get('strip_special_characters')==='on',normalize_whitespace:data.get('normalize_whitespace')==='on'}});renderSettings(settings);toast('Settings saved')}catch(error){toast(String(error))}};
 async function checkForUpdates(manual=false){const button=$('#check-updates');button.disabled=true;if(manual)$('#update-status').textContent='Checking the official GitHub release…';try{availableUpdate=await invoke('check_for_updates');const install=$('#install-update');install.hidden=!availableUpdate.update_available;if(availableUpdate.update_available){install.textContent=`Install ${availableUpdate.latest_version}`;$('#update-status').textContent=`${availableUpdate.latest_version} is ready${availableUpdate.size_bytes?` · ${Math.round(availableUpdate.size_bytes/1048576)} MB`:''}.`}else{$('#update-status').textContent=`You are up to date · version ${availableUpdate.current_version}.`}}catch(error){availableUpdate=null;$('#install-update').hidden=true;$('#update-status').textContent=`Automatic check failed · ${String(error)}`;if(manual)toast('Update check failed')}finally{button.disabled=false}}
 $('#check-updates').onclick=()=>checkForUpdates(true);

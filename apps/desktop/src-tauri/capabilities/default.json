@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Main desktop window",
   "windows": ["main", "player"],
-  "permissions": ["core:default", "dialog:allow-save"]
+  "permissions": ["core:default", "dialog:allow-save", "dialog:allow-open"]
 }

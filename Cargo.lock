@@ -4337,6 +4337,7 @@ dependencies = [
  "ptts",
  "sayit-core",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

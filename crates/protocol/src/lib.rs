@@ -301,6 +301,8 @@ pub struct HuggingFaceModelImportRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelCapabilities {
+    #[serde(default)]
+    pub voice_file_import: bool,
     pub preset_voices: bool,
     pub voice_cloning: bool,
     pub voice_description: bool,
@@ -342,6 +344,9 @@ pub struct VoiceProfile {
     pub name: String,
     #[serde(default)]
     pub model_id: String,
+    #[serde(default)]
+    pub reference_kind: VoiceReferenceKind,
+    /// Legacy field name; for Phonon profiles this is the imported embedding.
     pub reference_audio_path: String,
     #[serde(default)]
     pub reference_text: Option<String>,
@@ -351,6 +356,21 @@ pub struct VoiceProfile {
     pub quality: VoiceQuality,
     #[serde(default = "default_voice_refinement_steps")]
     pub refinement_steps: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VoiceReferenceKind {
+    #[default]
+    Audio,
+    PhononEmbedding,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct VoiceImportRequest {
+    pub name: String,
+    pub path: String,
+    pub kind: VoiceReferenceKind,
 }
 
 fn default_voice_refinement_steps() -> u32 {

@@ -52,7 +52,7 @@ Exact parity tracks SayIt's v0.2.0 bundled catalog at upstream commit
 family works. Each entry requires an installed-model synthesis smoke test on Linux and Windows,
 and capability tests for every feature advertised by that model.
 
-- [ ] Phonon 31M English, custom voice files, and voice-pack updates (native Q8 worker implemented and tested on Linux; catalog, voice workflow, and Windows validation remain)
+- [ ] Phonon 31M English, custom voice files, and voice-pack updates (catalog, 38 presets, file import, and cached updates pass Linux acceptance; Windows matrix pending)
 - [ ] Kokoro (synthesis exists; multilingual/preset coverage remains)
 - [x] Kitten Mini and Kitten Nano (real synthesis, progressive callbacks, worker transport, and cancellation pass on Linux and Windows)
 - [ ] Pocket TTS (cloning exists; preset coverage remains)
@@ -162,6 +162,35 @@ runtime requires no Python and makes no model/voice network requests during
 synthesis. Native speaking pace is rejected explicitly; listening speed remains
 the separate pitch-preserving player control.
 
+Phonon now installs from pinned, SHA-256-checked assets with all 38 upstream
+presets. Linux real-worker acceptance synthesized every preset and compared its
+streamed PCM with every archived sample. Imported F32, F16, and BF16 voice files
+also produced valid audio. Import validation rejects invalid shapes, unsafe
+sizes, non-finite values, and silent latents. Profiles are copied into private
+storage and survive restarts; importing a voice file does not require uploading
+audio or using a Gradium account inside this application.
+
+The native management UI passed 12 checks covering preset selection, invalid-file
+feedback, import, selection, real preview, archive publication, and deletion.
+The test exposed and verified fixes for lost service error details and a race
+where playback could report completion before its history item was available.
+Fresh catalog installation, selected-voice preservation across update, and silent
+device playback passed in a separate isolated release service. The latest install
+took 38.09 s and a cached update took 1.00 s. A simulated voice-pack revision at
+unchanged paths verified that the next request reloads the resident voice.
+Failed/cancelled updates preserve the active installation and custom profiles.
+
+```sh
+python3 scripts/test-preset-model-install.py --model phonon-31m-en
+python3 scripts/test-phonon-voices.py --model /path/to/phonon --worker target/release/sayit-inference-worker
+python3 scripts/test-desktop-ui.py --config /path/to/phonon-config.json --window main --script scripts/desktop-phonon-ui-smoke.js --voice-file /path/to/export.safetensors
+```
+
+The release matrix covers Phonon installation/update without opening an audio
+device, plus all presets, imported formats, progressive delivery, exact archives,
+cancellation, and recovery against its packaged worker. Linux native
+UI/device evidence does not establish Windows GUI or audio-device behavior.
+
 Linux and Windows release candidates must pass the same behavior suite. Platform-specific selection tests run against representative native, Chromium, Electron, terminal, and office applications. Model/provider changes must compare audio quality and report cold start, warm p50/p95/p99, peak memory, time to first audio, and real-time factor on the supported hardware matrix.
 
 The job journal is written through a synced temporary file with a last-known-good backup. On
@@ -171,6 +200,12 @@ causing an endless service crash loop. Automated tests cover malformed and missi
 backup restoration, retry, cleanup, and the repeated-interruption guard.
 
 ## Release evidence
+
+The compact-player commit `664dc6e` passed the Linux/Windows workspace, reader
+timing, package, real Kitten, and clipboard-preservation matrix. Native Linux UI
+acceptance is documented above; Windows GUI acceptance remains separate.
+GitHub Actions run:
+[39949872621](https://github.com/a1denvalu3/SayTheRest/actions/runs/39949872621).
 
 Commit `0f03465` passed the complete Linux/Windows release matrix on 2026-10-23,
 including workspace tests, real Mini/Nano progressive synthesis through the

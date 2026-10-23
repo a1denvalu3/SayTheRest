@@ -29,8 +29,10 @@ pub fn install(app: &tauri::AppHandle) {
         app.listen("ui-test-snapshot", move |event| {
             let Ok(theme) = serde_json::from_str::<String>(event.payload()) else { return; };
             if !["light","dark","idle"].contains(&theme.as_str()) { return; }
-            let Some(window) = handle.get_webview_window("player") else { return; };
-            let destination = directory.join(format!("player-{theme}.png"));
+            let label = std::env::var("SAYIT_UI_TEST_WINDOW").unwrap_or_else(|_|"player".into());
+            if !["main","player"].contains(&label.as_str()) { return; }
+            let Some(window) = handle.get_webview_window(&label) else { return; };
+            let destination = directory.join(format!("{label}-{theme}.png"));
             let sender = handle.clone();
             let _ = window.with_webview(move |platform| {
                 use webkit2gtk::WebViewExt;
@@ -49,8 +51,9 @@ pub fn install(app: &tauri::AppHandle) {
 }
 
 pub fn page_loaded(webview: &tauri::Webview, payload: &tauri::webview::PageLoadPayload<'_>) {
+    let label = std::env::var("SAYIT_UI_TEST_WINDOW").unwrap_or_else(|_| "player".into());
     if !crate::desktop_test_mode()
-        || webview.label() != "player"
+        || webview.label() != label
         || payload.event() != tauri::webview::PageLoadEvent::Finished
     {
         return;
