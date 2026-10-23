@@ -9,6 +9,7 @@
 #include "sonic.h"
 
 #include <limits.h>
+#include <stdint.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -750,7 +751,9 @@ static int findPitchPeriodInRange(short* samples, int minPeriod, int maxPeriod,
   short* s;
   short* p;
   short sVal, pVal;
-  unsigned long diff, minDiff = 1, maxDiff = 0;
+  /* sayIt portability correction (2026-10-23): unsigned long is 32-bit on
+     Windows. Full-resolution quality=1 pitch comparisons require 64 bits. */
+  uint64_t diff, minDiff = 1, maxDiff = 0;
   int i;
 
   for (period = minPeriod; period <= maxPeriod; period++) {
@@ -763,9 +766,8 @@ static int findPitchPeriodInRange(short* samples, int minPeriod, int maxPeriod,
       diff += sVal >= pVal ? (unsigned short)(sVal - pVal)
                            : (unsigned short)(pVal - sVal);
     }
-    /* Note that the highest number of samples we add into diff will be less
-       than 256, since we skip samples.  Thus, diff is a 24 bit number, and
-       we can safely multiply by numSamples without overflow */
+    /* quality=1 does not downsample. Keep the products wide enough for
+       full-resolution periods at every supported sample rate. */
     if (bestPeriod == 0 || diff * bestPeriod < minDiff * period) {
       minDiff = diff;
       bestPeriod = period;

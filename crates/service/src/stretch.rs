@@ -154,7 +154,7 @@ mod tests {
                 let frequency = crossings as f64 * sample_rate as f64 / middle.len() as f64;
                 assert!(
                     (frequency - 220.0).abs() < 5.0,
-                    "pitch changed at {rate}: {frequency}"
+                    "pitch changed at {rate} and {sample_rate} Hz sample rate: {frequency}"
                 );
                 if rate == 1.0 {
                     assert_eq!(source, output);
