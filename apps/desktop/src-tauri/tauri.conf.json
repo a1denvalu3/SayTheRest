@@ -11,6 +11,7 @@
     "windows": [
       {
         "label": "main",
+        "visible": false,
         "title": "sayIt",
         "width": 1040,
         "height": 720,
@@ -19,6 +20,19 @@
         "center": true,
         "decorations": true,
         "transparent": false
+      },
+      {
+        "label": "player",
+        "title": "sayIt player",
+        "url": "player.html",
+        "width": 360,
+        "height": 460,
+        "resizable": false,
+        "center": true,
+        "visible": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true
       }
     ],
     "security": {

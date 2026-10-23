@@ -1,6 +1,7 @@
 use crate::stretch::TimeStretch;
 use anyhow::{Context as _, Result, ensure};
 use rminiaudio::{Context, Device, DeviceConfig, DeviceType, Format};
+use sayit_protocol::PlaybackTextChunk;
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -37,6 +38,7 @@ pub struct PlayerSnapshot {
     pub generation_complete: bool,
     pub amplitudes: Vec<f32>,
     pub error: Option<String>,
+    pub spoken_chunks: Vec<PlaybackTextChunk>,
 }
 
 /// Retains original mono PCM for seeking. The device callback consumes ready
@@ -56,6 +58,7 @@ struct AudioBuffer {
     amplitudes: Vec<f32>,
     amplitude_energy: f64,
     amplitude_frames: usize,
+    spoken_chunks: Vec<PlaybackTextChunk>,
 }
 impl Default for AudioBuffer {
     fn default() -> Self {
@@ -74,6 +77,7 @@ impl Default for AudioBuffer {
             amplitudes: Vec::new(),
             amplitude_energy: 0.0,
             amplitude_frames: 0,
+            spoken_chunks: Vec::new(),
         }
     }
 }
@@ -142,6 +146,18 @@ impl AudioBuffer {
 
 type Reply = mpsc::Sender<Result<()>>;
 enum Command {
+    TextBlock {
+        id: Uuid,
+        start: usize,
+        end: usize,
+        finished: bool,
+        reply: Reply,
+    },
+    RestoreChunks {
+        id: Uuid,
+        chunks: Vec<PlaybackTextChunk>,
+        reply: Reply,
+    },
     Begin {
         id: Uuid,
         rate: f64,
@@ -158,13 +174,13 @@ enum Command {
         id: Uuid,
         reply: Reply,
     },
-    Pause,
-    Resume,
-    Stop,
+    Pause(Reply),
+    Resume(Reply),
+    Stop(Reply),
     Abort(Uuid),
-    Seek(f64),
-    SetRate(f64),
-    SetVolume(f64),
+    Seek(f64, Reply),
+    SetRate(f64, Reply),
+    SetVolume(f64, Reply),
 }
 impl PlaybackController {
     pub fn new() -> Self {
@@ -202,6 +218,18 @@ impl PlaybackController {
     }
     pub fn finish_stream(&self, id: Uuid) -> Result<()> {
         self.request(|reply| Command::Finish { id, reply })
+    }
+    pub fn text_block(&self, id: Uuid, start: usize, end: usize, finished: bool) -> Result<()> {
+        self.request(|reply| Command::TextBlock {
+            id,
+            start,
+            end,
+            finished,
+            reply,
+        })
+    }
+    pub fn restore_chunks(&self, id: Uuid, chunks: Vec<PlaybackTextChunk>) -> Result<()> {
+        self.request(|reply| Command::RestoreChunks { id, chunks, reply })
     }
     pub fn abort_stream(&self, id: Uuid) -> Result<()> {
         self.tx.send(Command::Abort(id))?;
@@ -247,31 +275,25 @@ impl PlaybackController {
         result
     }
     pub fn pause(&self) -> Result<()> {
-        self.tx.send(Command::Pause)?;
-        Ok(())
+        self.request(Command::Pause)
     }
     pub fn resume(&self) -> Result<()> {
-        self.tx.send(Command::Resume)?;
-        Ok(())
+        self.request(Command::Resume)
     }
     pub fn stop(&self) -> Result<()> {
-        self.tx.send(Command::Stop)?;
-        Ok(())
+        self.request(Command::Stop)
     }
     pub fn seek(&self, seconds: f64) -> Result<()> {
         ensure!(seconds.is_finite(), "seconds must be finite");
-        self.tx.send(Command::Seek(seconds))?;
-        Ok(())
+        self.request(|reply| Command::Seek(seconds, reply))
     }
     pub fn set_rate(&self, rate: f64) -> Result<()> {
         valid_rate(rate)?;
-        self.tx.send(Command::SetRate(rate))?;
-        Ok(())
+        self.request(|reply| Command::SetRate(rate, reply))
     }
     pub fn set_volume(&self, volume: f64) -> Result<()> {
         valid_volume(volume)?;
-        self.tx.send(Command::SetVolume(volume))?;
-        Ok(())
+        self.request(|reply| Command::SetVolume(volume, reply))
     }
     pub fn snapshot(&self) -> PlayerSnapshot {
         let state = self.shared.lock().unwrap();
@@ -292,6 +314,7 @@ impl PlaybackController {
             generation_complete: state.complete,
             amplitudes,
             error: state.error.clone(),
+            spoken_chunks: state.spoken_chunks.clone(),
         }
     }
 }
@@ -388,6 +411,44 @@ fn player_thread(rx: mpsc::Receiver<Command>, shared: Arc<Mutex<AudioBuffer>>) {
     loop {
         match rx.recv_timeout(Duration::from_millis(5)) {
             Ok(command) => match command {
+                Command::TextBlock {
+                    id,
+                    start,
+                    end,
+                    finished,
+                    reply,
+                } => {
+                    let mut state = shared.lock().unwrap();
+                    let result = if state.job_id != Some(id) {
+                        Err(anyhow::anyhow!("speech was stopped or replaced"))
+                    } else {
+                        let time = state.source.len() as f64 / f64::from(state.sample_rate.max(1));
+                        if finished {
+                            if let Some(chunk) = state.spoken_chunks.last_mut() {
+                                chunk.audio_end_seconds = Some(time);
+                            }
+                        } else {
+                            state.spoken_chunks.push(PlaybackTextChunk {
+                                text_start: start,
+                                text_end: end,
+                                audio_start_seconds: time,
+                                audio_end_seconds: None,
+                            });
+                        }
+                        Ok(())
+                    };
+                    let _ = reply.send(result);
+                }
+                Command::RestoreChunks { id, chunks, reply } => {
+                    let mut state = shared.lock().unwrap();
+                    let result = if state.job_id == Some(id) {
+                        state.spoken_chunks = chunks;
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!("speech was stopped or replaced"))
+                    };
+                    let _ = reply.send(result);
+                }
                 Command::Begin {
                     id,
                     rate,
@@ -433,10 +494,11 @@ fn player_thread(rx: mpsc::Receiver<Command>, shared: Arc<Mutex<AudioBuffer>>) {
                     };
                     let _ = reply.send(result);
                 }
-                Command::Stop => {
+                Command::Stop(reply) => {
                     device.take();
                     *shared.lock().unwrap() = AudioBuffer::default();
                     renderer = Renderer::default();
+                    let _ = reply.send(Ok(()));
                 }
                 Command::Abort(id) => {
                     if shared.lock().unwrap().job_id == Some(id) {
@@ -445,32 +507,46 @@ fn player_thread(rx: mpsc::Receiver<Command>, shared: Arc<Mutex<AudioBuffer>>) {
                         renderer = Renderer::default();
                     }
                 }
-                Command::Pause => {
+                Command::Pause(reply) => {
                     let mut state = shared.lock().unwrap();
                     if state.job_id.is_some() {
                         state.status = PlayerStatus::Paused;
                     }
+                    let _ = reply.send(Ok(()));
                 }
-                Command::Resume => {
+                Command::Resume(reply) => {
                     let mut state = shared.lock().unwrap();
+                    if state.status == PlayerStatus::Finished {
+                        state.cursor = 0.0;
+                        renderer.reset(&mut state);
+                    }
                     if state.status == PlayerStatus::Paused {
                         state.status = PlayerStatus::Playing;
                     }
+                    let _ = reply.send(Ok(()));
                 }
-                Command::Seek(seconds) => {
+                Command::Seek(seconds, reply) => {
                     let mut state = shared.lock().unwrap();
+                    if state.status == PlayerStatus::Finished {
+                        state.status = PlayerStatus::Paused;
+                    }
                     state.cursor = (seconds.max(0.0) * f64::from(state.sample_rate))
                         .min(state.source.len() as f64);
                     renderer.reset(&mut state);
+                    let _ = reply.send(Ok(()));
                 }
-                Command::SetRate(rate) => {
+                Command::SetRate(rate, reply) => {
                     let mut state = shared.lock().unwrap();
                     if state.rate != rate {
                         state.rate = rate;
                         renderer.reset(&mut state);
                     }
+                    let _ = reply.send(Ok(()));
                 }
-                Command::SetVolume(volume) => shared.lock().unwrap().volume = volume,
+                Command::SetVolume(volume, reply) => {
+                    shared.lock().unwrap().volume = volume;
+                    let _ = reply.send(Ok(()));
+                }
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -500,6 +576,34 @@ fn start_device(sample_rate: u32, shared: &Arc<Mutex<AudioBuffer>>) -> Result<De
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn acknowledged_controls_are_visible_to_immediate_snapshots() {
+        let player = PlaybackController::new();
+        let id = Uuid::new_v4();
+        player.begin_stream(id, 1.0, 1.0).unwrap();
+        // Exercise the real command thread without opening an audio device.
+        {
+            let mut state = player.shared.lock().unwrap();
+            state.sample_rate = 24_000;
+            state.source = vec![0.1; 48_000];
+            state.complete = true;
+            state.status = PlayerStatus::Finished;
+        }
+        player.seek(0.75).unwrap();
+        assert_eq!(player.snapshot().position_seconds, 0.75);
+        assert_eq!(player.snapshot().status, PlayerStatus::Paused);
+        player.set_rate(1.5).unwrap();
+        player.set_volume(0.25).unwrap();
+        assert_eq!(player.snapshot().rate, 1.5);
+        assert_eq!(player.snapshot().volume, 0.25);
+        assert_eq!(player.snapshot().status, PlayerStatus::Paused);
+        player.resume().unwrap();
+        assert_eq!(player.snapshot().status, PlayerStatus::Playing);
+        player.pause().unwrap();
+        assert_eq!(player.snapshot().status, PlayerStatus::Paused);
+        player.stop().unwrap();
+        assert_eq!(player.snapshot().job_id, None);
+    }
     #[test]
     fn rejects_invalid_controls_without_audio_device() {
         let player = PlaybackController::new();

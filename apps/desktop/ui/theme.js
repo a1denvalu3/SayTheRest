@@ -13,6 +13,7 @@ function applyTheme(preference = savedThemePreference()) {
 }
 
 applyTheme();
+window.addEventListener('storage', event => { if (event.key === themePreferenceKey) applyTheme(); });
 systemTheme.addEventListener('change', () => {
   if (savedThemePreference() === 'system') applyTheme('system');
 });

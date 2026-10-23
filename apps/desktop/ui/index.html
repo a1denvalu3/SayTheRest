@@ -30,27 +30,23 @@
     <header><div><p class="eyebrow" id="eyebrow">NOW SPEAKING</p><h1 id="view-title">Listen without leaving.</h1></div><div class="service-pill" id="service-pill"><i></i>Connecting</div></header>
 
     <section class="view active" id="player-view">
-      <article class="player-card">
-        <div class="quote-mark">“</div>
+      <article class="playback-panel player-card">
+        <p id="playback-status" class="playback-status" role="status">Ready to read</p>
         <h2 id="now-title" class="now-title" hidden></h2>
-        <p id="spoken-text" class="spoken-text">Select text anywhere, then use your shortcut. Your words will appear here as they’re spoken.</p>
-        <div id="generation-indicator" class="generation-indicator" role="status" aria-live="polite" hidden>
-          <span class="generation-wave" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-          <span><strong>Building the waveform</strong><small id="generation-detail">Generating speech locally</small></span>
-        </div>
-        <label class="timeline" for="timeline"><span class="visually-hidden">Playback position</span><input id="timeline" type="range" min="0" max="0" value="0" step="0.1" aria-label="Playback position"></label>
+        <div id="generation-indicator" class="generation-indicator" role="status" hidden><i class="preparing-dot" aria-hidden="true"></i><span id="generation-detail">Generating speech locally</span></div>
+        <div class="waveform-track"><canvas id="waveform" aria-hidden="true"></canvas><input id="timeline" type="range" min="0" max="0" value="0" step="0.1" aria-label="Playback position" disabled></div>
         <div class="time-row"><span id="position">0:00</span><span id="duration">0:00</span></div>
-        <p id="playback-status" class="playback-status" role="status">Ready for selected text</p>
         <div class="transport" aria-label="Playback controls">
-          <button data-control="seek-back" aria-label="Back 15 seconds">−15</button>
-          <button class="primary-control" id="play-toggle" aria-label="Pause or resume">Ⅱ</button>
-          <button data-control="seek-forward" aria-label="Forward 15 seconds">+15</button>
-          <button data-control="stop" aria-label="Stop playback">■<span class="visually-hidden">Stop</span></button>
+          <button id="volume-toggle" aria-label="Playback volume" aria-expanded="false" title="Volume"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9h4l5-4v14l-5-4H3z" fill="currentColor"/><path d="M16 8c3 2 3 6 0 8m3-11c5 4 5 10 0 14" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>
+          <button id="rate-toggle" aria-label="Playback speed" aria-expanded="false" title="Speed">1×</button>
+          <button data-control="seek-back" aria-label="Back 15 seconds" title="Back 15 seconds"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7a8 8 0 1 1-1 9M5 2v6H0" fill="none" stroke="currentColor" stroke-width="1.8"/><text x="12" y="16" text-anchor="middle" font-size="9" fill="currentColor">15</text></svg></button>
+          <button class="primary-control" id="play-toggle" aria-label="Play" data-playing="false" disabled><svg class="play-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 4 13 8-13 8z" fill="currentColor"/></svg><svg class="pause-glyph" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1" fill="currentColor"/><rect x="14" y="4" width="4" height="16" rx="1" fill="currentColor"/></svg></button>
+          <button data-control="seek-forward" aria-label="Forward 30 seconds" title="Forward 30 seconds"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 7a8 8 0 1 0 1 9M19 2v6h5" fill="none" stroke="currentColor" stroke-width="1.8"/><text x="12" y="16" text-anchor="middle" font-size="9" fill="currentColor">30</text></svg></button>
+          <button data-control="stop" aria-label="Stop speech" title="Clear recording"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
         </div>
-        <div class="player-options">
-          <label>Speed <select id="rate"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label>
-          <label>Volume <input id="volume" type="range" min="0" max="1" value="1" step="0.05"></label>
-        </div>
+        <div class="adjustment-pane" id="rate-pane" hidden><label for="rate">Playback speed</label><input id="rate" type="range" min="0.5" max="3" step="0.05" value="1"><output id="rate-value" for="rate">1×</output></div>
+        <div class="adjustment-pane" id="volume-pane" hidden><label for="volume">Volume</label><input id="volume" type="range" min="0" max="1" step="0.05" value="1"><output id="volume-value" for="volume">100%</output></div>
+        <div class="reader-section" id="reader-section" hidden><div id="reader-viewport" class="reader-viewport" tabindex="0" role="region" aria-label="Spoken text. Choose a word to seek."><p id="spoken-text" class="spoken-text"></p></div><button id="follow-reader" class="follow-reader" hidden>Follow spoken text</button></div>
       </article>
       <div class="shortcut-strip"><div><kbd id="selection-shortcut-label">Ctrl + Alt + S</kbd><span>Read selection</span></div><div><kbd id="clipboard-shortcut-label">Ctrl + Alt + V</kbd><span>Read clipboard</span></div></div>
     </section>
@@ -128,6 +124,8 @@
     </form>
   </dialog>
   <dialog id="onboarding"><form method="dialog"><p class="eyebrow">WELCOME</p><h2>Your computer can speak for itself.</h2><ol><li>Choose and download a model. Piper is the quick preset; PocketTTS enables local voice cloning.</li><li>Select text in another app and press <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>S</kbd>.</li><li>Use <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>V</kbd> only when you intentionally want to read the clipboard.</li></ol><p>Everything is processed locally. Voice cloning requires permission from the recorded speaker.</p><button class="action" value="ready">Get started</button></form></dialog>
+  <script src="reader-timing.js"></script>
+  <script src="playback-ui.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -43,6 +43,7 @@ use uuid::Uuid;
 mod model_manager;
 mod player;
 pub mod qwen_runtime;
+mod speech_blocks;
 mod stretch;
 use model_manager::ModelManager;
 use player::{PlaybackController, PlayerStatus};
@@ -264,7 +265,13 @@ impl ServiceState {
             let mut was_active = false;
             loop {
                 interval.tick().await;
-                let active = state.player.snapshot().job_id.is_some();
+                let playback = state.player.snapshot();
+                let active = playback.job_id.is_some()
+                    && (!playback.generation_complete
+                        || matches!(
+                            playback.status,
+                            PlayerStatus::Playing | PlayerStatus::Buffering
+                        ));
                 if active || was_active {
                     state.emit("playback");
                 }
@@ -406,24 +413,69 @@ impl ServiceState {
             let slot = resident
                 .as_mut()
                 .context("resident engine was not loaded")?;
-            let result = slot.engine.synthesize_streaming(
-                &SynthesisRequest {
-                    text: &text,
-                    output: &output,
-                    reference_audio: reference_audio.as_deref(),
-                    reference_text: reference_text.as_deref(),
-                    speaking_pace,
-                },
-                Some(&cancelled),
-                &mut |samples, sample_rate| {
+            let result = (|| -> Result<()> {
+                let pending =
+                    tempfile::NamedTempFile::new_in(output.parent().unwrap())?.into_temp_path();
+                let mut archive = None;
+                let mut archive_rate = None;
+                for block in speech_blocks::speech_blocks(&text, 160) {
                     anyhow::ensure!(
                         !cancelled.load(Ordering::Relaxed),
                         "speech generation cancelled"
                     );
-                    player.append(job.id, sample_rate, samples)?;
-                    Ok(())
-                },
-            );
+                    player.text_block(job.id, block.start, block.end, false)?;
+                    let part =
+                        tempfile::NamedTempFile::new_in(output.parent().unwrap())?.into_temp_path();
+                    slot.engine.synthesize_streaming(
+                        &SynthesisRequest {
+                            text: block.text,
+                            output: part.as_ref(),
+                            reference_audio: reference_audio.as_deref(),
+                            reference_text: reference_text.as_deref(),
+                            speaking_pace,
+                        },
+                        Some(&cancelled),
+                        &mut |samples, sample_rate| {
+                            anyhow::ensure!(
+                                !cancelled.load(Ordering::Relaxed),
+                                "speech generation cancelled"
+                            );
+                            anyhow::ensure!(
+                                archive_rate.is_none_or(|rate| rate == sample_rate),
+                                "sample rate changed between speech blocks"
+                            );
+                            if archive.is_none() {
+                                archive = Some(hound::WavWriter::create(
+                                    &pending,
+                                    hound::WavSpec {
+                                        channels: 1,
+                                        sample_rate,
+                                        bits_per_sample: 16,
+                                        sample_format: hound::SampleFormat::Int,
+                                    },
+                                )?);
+                                archive_rate = Some(sample_rate);
+                            }
+                            for sample in samples {
+                                archive.as_mut().unwrap().write_sample(
+                                    (sample.clamp(-1.0, 1.0) * 32767.0).round() as i16,
+                                )?;
+                            }
+                            player.append(job.id, sample_rate, samples)
+                        },
+                    )?;
+                    player.text_block(job.id, block.start, block.end, true)?;
+                }
+                archive
+                    .context("inference generated empty audio")?
+                    .finalize()?;
+                anyhow::ensure!(
+                    !cancelled.load(Ordering::Relaxed),
+                    "speech generation cancelled"
+                );
+                pending.persist(&output).map_err(|error| error.error)?;
+                Ok(())
+            })();
             *last_device.lock().unwrap() = Some(inference_device(&slot.engine));
             if cancelled.load(Ordering::Relaxed) {
                 *resident = None;
@@ -479,7 +531,6 @@ impl ServiceState {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        let _ = self.player.abort_stream(id);
         if self
             .inner
             .read()
@@ -527,9 +578,16 @@ impl ServiceState {
         inner.jobs[index].error = error;
         let completed = inner.jobs[index].clone();
         inner.recovery_attempts.remove(&id);
+        let playback = self.player.snapshot();
+        let spoken_chunks = if playback.job_id == Some(id) {
+            playback.spoken_chunks
+        } else {
+            Vec::new()
+        };
         inner.history.insert(
             0,
             HistoryItem {
+                spoken_chunks,
                 job: completed,
                 audio_path,
                 duration_seconds: duration,
@@ -670,6 +728,7 @@ fn recover_interrupted_jobs(inner: &mut InnerState, audio_dir: &Path) -> bool {
             inner.history.insert(
                 0,
                 HistoryItem {
+                    spoken_chunks: Vec::new(),
                     job,
                     audio_path: None,
                     duration_seconds: None,
@@ -962,7 +1021,8 @@ async fn snapshot(State(state): State<ServiceState>) -> Json<ServiceSnapshot> {
             player.job_id,
         ),
         PlayerStatus::Paused => (Some(JobState::Paused), player.job_id),
-        PlayerStatus::Idle | PlayerStatus::Finished | PlayerStatus::Failed => (
+        PlayerStatus::Finished => (Some(JobState::Completed), player.job_id),
+        PlayerStatus::Idle | PlayerStatus::Failed => (
             processing.map(|_| JobState::Synthesizing),
             processing.map(|job| job.id),
         ),
@@ -972,7 +1032,11 @@ async fn snapshot(State(state): State<ServiceState>) -> Json<ServiceSnapshot> {
         .map(|job| job.text.clone())
         .unwrap_or_default();
     let current_title = speech_title(&spoken_text);
-    let spoken_chunks = playback_text_chunks(&spoken_text, player.duration_seconds);
+    let spoken_chunks = if player.spoken_chunks.is_empty() && player.generation_complete {
+        playback_text_chunks(&spoken_text, player.duration_seconds)
+    } else {
+        player.spoken_chunks
+    };
     Json(ServiceSnapshot {
         inference_device: state.last_inference_device.lock().unwrap().clone(),
         protocol_version: PROTOCOL_VERSION,
@@ -1077,6 +1141,7 @@ fn playback_text_chunks(text: &str, duration_seconds: f64) -> Vec<PlaybackTextCh
         .map(|(text_start, text_end)| PlaybackTextChunk {
             text_start,
             text_end,
+            audio_end_seconds: Some(duration_seconds * text_end as f64 / total_characters),
             audio_start_seconds: if duration_seconds > 0.0 {
                 duration_seconds * text_start as f64 / total_characters
             } else {
@@ -1141,7 +1206,7 @@ async fn replay_history(
     State(state): State<ServiceState>,
     RoutePath(id): RoutePath<Uuid>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let (path, rate, volume) = {
+    let (path, rate, volume, chunks) = {
         let inner = state.inner.read().await;
         let item = inner
             .history
@@ -1157,7 +1222,12 @@ async fn replay_history(
                 StatusCode::NOT_FOUND,
                 "archived audio is unavailable".into(),
             ))?;
-        (path, inner.settings.playback_rate, inner.settings.volume)
+        (
+            path,
+            inner.settings.playback_rate,
+            inner.settings.volume,
+            item.spoken_chunks.clone(),
+        )
     };
     let previously_active = state.player.snapshot().job_id;
     if previously_active.is_some_and(|active| active != id) {
@@ -1168,12 +1238,22 @@ async fn replay_history(
         .player
         .play(id, path, rate, volume)
         .map_err(internal_error)?;
+    state
+        .player
+        .restore_chunks(id, chunks)
+        .map_err(internal_error)?;
     {
         let mut inner = state.inner.write().await;
         mark_replay_started(&mut inner, id, previously_active);
     }
     state.persist().await.map_err(internal_error)?;
-    let replay_state = state.clone();
+    monitor_replay(state.clone(), id);
+    state.emit("jobs");
+    state.emit("playback");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn monitor_replay(replay_state: ServiceState, id: Uuid) {
     tokio::spawn(async move {
         loop {
             let player = replay_state.player.snapshot();
@@ -1187,7 +1267,6 @@ async fn replay_history(
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        let _ = replay_state.player.abort_stream(id);
         {
             let mut inner = replay_state.inner.write().await;
             mark_replay_finished(&mut inner, id);
@@ -1196,9 +1275,6 @@ async fn replay_history(
         replay_state.emit("jobs");
         replay_state.emit("playback");
     });
-    state.emit("jobs");
-    state.emit("playback");
-    Ok(StatusCode::NO_CONTENT)
 }
 
 fn mark_replay_started(inner: &mut InnerState, replay_id: Uuid, active_id: Option<Uuid>) {
@@ -1586,15 +1662,34 @@ async fn delete_voice(
 }
 
 async fn pause(State(state): State<ServiceState>) -> Result<StatusCode, (StatusCode, String)> {
-    state.player.pause().map_err(internal_error)?;
-    set_active_job_state(&state, JobState::Paused).await;
-    state.emit("playback");
+    if matches!(
+        state.player.snapshot().status,
+        PlayerStatus::Playing | PlayerStatus::Buffering
+    ) {
+        state.player.pause().map_err(internal_error)?;
+        set_active_job_state(&state, JobState::Paused).await;
+        state.emit("playback");
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn resume(State(state): State<ServiceState>) -> Result<StatusCode, (StatusCode, String)> {
+    let player = state.player.snapshot();
+    if player.job_id.is_none() {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    let completed = state
+        .inner
+        .read()
+        .await
+        .jobs
+        .iter()
+        .any(|job| Some(job.id) == player.job_id && job.state == JobState::Completed);
     state.player.resume().map_err(internal_error)?;
     set_active_job_state(&state, JobState::Playing).await;
+    if completed && let Some(id) = player.job_id {
+        monitor_replay(state.clone(), id);
+    }
     state.emit("playback");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1602,14 +1697,13 @@ async fn resume(State(state): State<ServiceState>) -> Result<StatusCode, (Status
 async fn stop(State(state): State<ServiceState>) -> Result<StatusCode, (StatusCode, String)> {
     let active = state.player.snapshot().job_id;
     state.player.stop().map_err(internal_error)?;
-    if let Some(job) = state
-        .inner
-        .write()
-        .await
-        .jobs
-        .iter_mut()
-        .find(|job| Some(job.id) == active || job.state == JobState::Synthesizing)
-    {
+    if let Some(job) = state.inner.write().await.jobs.iter_mut().find(|job| {
+        (Some(job.id) == active || job.state == JobState::Synthesizing)
+            && matches!(
+                job.state,
+                JobState::Synthesizing | JobState::Playing | JobState::Paused
+            )
+    }) {
         job.state = JobState::Cancelled;
         state.synthesis_cancelled.store(true, Ordering::Relaxed);
     }
@@ -3460,6 +3554,7 @@ for line in sys.stdin:
         fs::write(&pinned_path, b"pinned").unwrap();
         fs::write(&fresh_path, b"fresh").unwrap();
         let make_item = |text: &str, created_at, path: &std::path::Path, pinned| HistoryItem {
+            spoken_chunks: Vec::new(),
             job: SpeechJob {
                 id: Uuid::new_v4(),
                 text: text.into(),
@@ -3521,6 +3616,7 @@ for line in sys.stdin:
     async fn changing_retention_applies_immediately() {
         let state = ServiceState::default();
         state.inner.write().await.history.push(HistoryItem {
+            spoken_chunks: Vec::new(),
             job: SpeechJob {
                 id: Uuid::new_v4(),
                 text: "old".into(),

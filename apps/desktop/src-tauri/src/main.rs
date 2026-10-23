@@ -5,15 +5,47 @@ use tauri::{
     Emitter, Manager,
     image::Image,
     menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
+mod api_cache;
+mod presentation;
 mod recorder;
 mod selection;
+#[cfg(debug_assertions)]
+mod ui_test;
 use selection::CaptureKind;
 
-const SERVICE: &str = "http://127.0.0.1:55391/v1";
+const DEFAULT_SERVICE: &str = "http://127.0.0.1:55391/v1";
+fn service_url() -> &'static str {
+    static URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    URL.get_or_init(|| {
+        let value = std::env::var("SAYIT_SERVICE_URL").unwrap_or_else(|_| DEFAULT_SERVICE.into());
+        let parsed =
+            url::Url::parse(&value).expect("SAYIT_SERVICE_URL must be a localhost HTTP /v1 URL");
+        let local = match parsed.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            _ => false,
+        };
+        assert!(
+            local
+                && parsed.scheme() == "http"
+                && parsed.path().trim_end_matches('/') == "/v1"
+                && parsed.username().is_empty()
+                && parsed.password().is_none()
+                && parsed.query().is_none()
+                && parsed.fragment().is_none(),
+            "SAYIT_SERVICE_URL must be a localhost HTTP /v1 URL"
+        );
+        value.trim_end_matches('/').to_owned()
+    })
+}
+fn desktop_test_mode() -> bool {
+    cfg!(debug_assertions) && std::env::var("SAYIT_DESKTOP_TEST_MODE").as_deref() == Ok("1")
+}
+
 const RELEASES_API: &str = "https://api.github.com/repos/a1denvalu3/SayTheRest/releases?per_page=1";
 const RELEASES_PAGE: &str = "https://github.com/a1denvalu3/SayTheRest/releases";
 
@@ -716,9 +748,19 @@ fn authorized_read(request: reqwest::RequestBuilder) -> Result<reqwest::RequestB
 }
 
 #[tauri::command]
-async fn service_get(resource: String) -> Result<Value, String> {
+async fn service_get(
+    resource: String,
+    cache: tauri::State<'_, api_cache::SnapshotCache>,
+) -> Result<Value, String> {
     let resource = safe_resource(&resource)?;
-    authorized_read(reqwest::Client::new().get(format!("{SERVICE}/{resource}")))?
+    if resource == "state" {
+        return cache.get(|| read_service_resource(resource)).await;
+    }
+    read_service_resource(resource).await
+}
+
+async fn read_service_resource(resource: &str) -> Result<Value, String> {
+    authorized_read(reqwest::Client::new().get(format!("{}/{resource}", service_url())))?
         .send()
         .await
         .map_err(|error| error.to_string())?
@@ -730,9 +772,13 @@ async fn service_get(resource: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
-async fn service_post(resource: String, body: Option<Value>) -> Result<Option<Value>, String> {
+async fn service_post(
+    resource: String,
+    body: Option<Value>,
+    cache: tauri::State<'_, api_cache::SnapshotCache>,
+) -> Result<Option<Value>, String> {
     let resource = safe_resource(&resource)?;
-    let request = authorized(reqwest::Client::new().post(format!("{SERVICE}/{resource}")))?;
+    let request = authorized(reqwest::Client::new().post(format!("{}/{resource}", service_url())))?;
     let response = match body {
         Some(body) => request.json(&body),
         None => request,
@@ -742,6 +788,7 @@ async fn service_post(resource: String, body: Option<Value>) -> Result<Option<Va
     .map_err(|error| error.to_string())?
     .error_for_status()
     .map_err(|error| error.to_string())?;
+    cache.invalidate();
     let bytes = response.bytes().await.map_err(|error| error.to_string())?;
     if bytes.is_empty() {
         return Ok(None);
@@ -752,14 +799,18 @@ async fn service_post(resource: String, body: Option<Value>) -> Result<Option<Va
 }
 
 #[tauri::command]
-async fn service_delete(resource: String) -> Result<(), String> {
+async fn service_delete(
+    resource: String,
+    cache: tauri::State<'_, api_cache::SnapshotCache>,
+) -> Result<(), String> {
     let resource = safe_resource(&resource)?;
-    authorized(reqwest::Client::new().delete(format!("{SERVICE}/{resource}")))?
+    authorized(reqwest::Client::new().delete(format!("{}/{resource}", service_url())))?
         .send()
         .await
         .map_err(|error| error.to_string())?
         .error_for_status()
         .map_err(|error| error.to_string())?;
+    cache.invalidate();
     Ok(())
 }
 
@@ -805,22 +856,23 @@ fn handle_capture(app: tauri::AppHandle, kind: CaptureKind) {
         let status = match result {
             Ok(text) => {
                 let client = reqwest::Client::new();
-                let threshold = match authorized_read(client.get(format!("{SERVICE}/settings"))) {
-                    Ok(request) => match request.send().await {
-                        Ok(response) => response
-                            .json::<Value>()
-                            .await
-                            .ok()
-                            .and_then(|settings| {
-                                settings
-                                    .get("long_text_confirmation_characters")
-                                    .and_then(Value::as_u64)
-                            })
-                            .unwrap_or(20_000),
+                let threshold =
+                    match authorized_read(client.get(format!("{}/settings", service_url()))) {
+                        Ok(request) => match request.send().await {
+                            Ok(response) => response
+                                .json::<Value>()
+                                .await
+                                .ok()
+                                .and_then(|settings| {
+                                    settings
+                                        .get("long_text_confirmation_characters")
+                                        .and_then(Value::as_u64)
+                                })
+                                .unwrap_or(20_000),
+                            Err(_) => 20_000,
+                        },
                         Err(_) => 20_000,
-                    },
-                    Err(_) => 20_000,
-                };
+                    };
                 let character_count = text.chars().count();
                 if character_count as u64 > threshold {
                     let _ = app.emit(
@@ -832,13 +884,10 @@ fn handle_capture(app: tauri::AppHandle, kind: CaptureKind) {
                             "threshold": threshold
                         }),
                     );
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    let _ = presentation::show_management(&app, "player");
                     return;
                 }
-                let response = match authorized(client.post(format!("{SERVICE}/jobs"))) {
+                let response = match authorized(client.post(format!("{}/jobs", service_url()))) {
                     Ok(request) => request,
                     Err(error) => {
                         return app
@@ -898,9 +947,8 @@ fn handle_capture(app: tauri::AppHandle, kind: CaptureKind) {
             eprintln!("shortcut capture submitted: {}", kind.source());
         }
         let _ = app.emit("capture-status", status);
-        if failed && let Some(window) = app.get_webview_window("main") {
-            let _ = window.show();
-            let _ = window.set_focus();
+        if failed {
+            let _ = presentation::show_player(&app, None);
         }
     });
 }
@@ -909,16 +957,17 @@ fn handle_tray_playback(app: tauri::AppHandle, toggle: bool) {
     tauri::async_runtime::spawn(async move {
         let result = async {
             let resource = if toggle {
-                let state =
-                    authorized_read(reqwest::Client::new().get(format!("{SERVICE}/state")))?
-                        .send()
-                        .await
-                        .map_err(|error| error.to_string())?
-                        .error_for_status()
-                        .map_err(|error| error.to_string())?
-                        .json::<Value>()
-                        .await
-                        .map_err(|error| error.to_string())?;
+                let state = authorized_read(
+                    reqwest::Client::new().get(format!("{}/state", service_url())),
+                )?
+                .send()
+                .await
+                .map_err(|error| error.to_string())?
+                .error_for_status()
+                .map_err(|error| error.to_string())?
+                .json::<Value>()
+                .await
+                .map_err(|error| error.to_string())?;
                 match state.pointer("/playback/state").and_then(Value::as_str) {
                     Some("paused") => "playback/resume",
                     Some("playing") => "playback/pause",
@@ -927,7 +976,7 @@ fn handle_tray_playback(app: tauri::AppHandle, toggle: bool) {
             } else {
                 "playback/stop"
             };
-            authorized(reqwest::Client::new().post(format!("{SERVICE}/{resource}")))?
+            authorized(reqwest::Client::new().post(format!("{}/{resource}", service_url())))?
                 .send()
                 .await
                 .map_err(|error| error.to_string())?
@@ -946,9 +995,8 @@ fn handle_tray_playback(app: tauri::AppHandle, toggle: bool) {
             Err(error) => serde_json::json!({"ok": false, "message": error}),
         };
         let _ = app.emit("desktop-action-status", status);
-        if failed && let Some(window) = app.get_webview_window("main") {
-            let _ = window.show();
-            let _ = window.set_focus();
+        if failed {
+            let _ = presentation::show_player(&app, None);
         }
     });
 }
@@ -1003,16 +1051,17 @@ fn start_tray_status_poll(
 ) {
     tauri::async_runtime::spawn(async move {
         loop {
-            let state =
-                match authorized_read(reqwest::Client::new().get(format!("{SERVICE}/state"))) {
-                    Ok(request) => match request.send().await {
-                        Ok(response) if response.status().is_success() => {
-                            response.json::<Value>().await.ok()
-                        }
-                        _ => None,
-                    },
-                    Err(_) => None,
-                };
+            let state = match authorized_read(
+                reqwest::Client::new().get(format!("{}/state", service_url())),
+            ) {
+                Ok(request) => match request.send().await {
+                    Ok(response) if response.status().is_success() => {
+                        response.json::<Value>().await.ok()
+                    }
+                    _ => None,
+                },
+                Err(_) => None,
+            };
             let (status, pause, controls_enabled) = state
                 .as_ref()
                 .map(tray_status_text)
@@ -1029,15 +1078,16 @@ fn start_tray_status_poll(
 fn start_service_event_bridge(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
-            let response =
-                match authorized_read(reqwest::Client::new().get(format!("{SERVICE}/events"))) {
-                    Ok(request) => request.send().await,
-                    Err(error) => {
-                        eprintln!("service event stream unavailable: {error}");
-                        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-                        continue;
-                    }
-                };
+            let response = match authorized_read(
+                reqwest::Client::new().get(format!("{}/events", service_url())),
+            ) {
+                Ok(request) => request.send().await,
+                Err(error) => {
+                    eprintln!("service event stream unavailable: {error}");
+                    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                    continue;
+                }
+            };
             let Ok(mut response) = response else {
                 tokio::time::sleep(std::time::Duration::from_secs(15)).await;
                 continue;
@@ -1060,6 +1110,12 @@ fn start_service_event_bridge(app: tauri::AppHandle) {
                                 .map(str::trim_start)
                                 .collect::<String>();
                             if let Ok(event) = serde_json::from_str::<Value>(&data) {
+                                if matches!(
+                                    event["resource"].as_str(),
+                                    Some("playback" | "jobs" | "settings")
+                                ) {
+                                    app.state::<api_cache::SnapshotCache>().invalidate();
+                                }
                                 let _ = app.emit("service-event", event);
                             }
                         }
@@ -1073,9 +1129,9 @@ fn start_service_event_bridge(app: tauri::AppHandle) {
 }
 
 fn main() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+    let mut builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    if !desktop_test_mode() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if args.iter().any(|arg| arg == "--read-selection") {
                 handle_capture(app.clone(), CaptureKind::Selection);
                 return;
@@ -1084,13 +1140,18 @@ fn main() {
                 handle_capture(app.clone(), CaptureKind::Clipboard);
                 return;
             }
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-        }))
+            let _ = presentation::show_player(app, None);
+        }));
+    }
+    builder
         .invoke_handler(tauri::generate_handler![
+            presentation::open_management,
+            presentation::open_player,
+            presentation::close_player,
+            presentation::window_visible,
+            presentation::desktop_context,
+            presentation::read_clipboard,
+            presentation::quit_desktop,
             service_get,
             service_post,
             service_delete,
@@ -1106,9 +1167,13 @@ fn main() {
             cancel_voice_recording,
             discard_voice_recording
         ])
+        .manage(presentation::PresentationState::default())
+        .manage(api_cache::SnapshotCache::default())
         .manage(DesktopState(RwLock::new(load_desktop_settings())))
         .manage(recorder::RecorderState(std::sync::Mutex::new(None)))
         .setup(|app| {
+            #[cfg(debug_assertions)]
+            ui_test::install(app.handle());
             app.handle().plugin(
                 tauri_plugin_global_shortcut::Builder::new()
                     .with_handler(|app, shortcut, event| {
@@ -1139,7 +1204,9 @@ fn main() {
                 .read()
                 .map_err(|_| "desktop settings lock is unavailable")?
                 .clone();
-            register_shortcuts(app.handle(), &settings)?;
+            if !desktop_test_mode() {
+                register_shortcuts(app.handle(), &settings)?;
+            }
             let status = MenuItem::with_id(
                 app,
                 "status",
@@ -1147,7 +1214,8 @@ fn main() {
                 false,
                 None::<&str>,
             )?;
-            let open = MenuItem::with_id(app, "open", "Open sayIt", true, None::<&str>)?;
+            let open = MenuItem::with_id(app, "open", "Show player", true, None::<&str>)?;
+            let management = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
             let read_selection =
                 MenuItem::with_id(app, "read-selection", "Read selection", true, None::<&str>)?;
             let read_clipboard =
@@ -1161,6 +1229,7 @@ fn main() {
                 &[
                     &status,
                     &open,
+                    &management,
                     &read_selection,
                     &read_clipboard,
                     &pause_resume,
@@ -1168,32 +1237,62 @@ fn main() {
                     &quit,
                 ],
             )?;
-            TrayIconBuilder::new()
-                .icon(tray_image())
-                .menu(&menu)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "open" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
+            if !desktop_test_mode() {
+                TrayIconBuilder::new()
+                    .icon(tray_image())
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            rect,
+                            ..
+                        } = event
+                        {
+                            let _ = presentation::show_player(tray.app_handle(), Some(rect));
                         }
-                    }
-                    "read-selection" => handle_capture(app.clone(), CaptureKind::Selection),
-                    "read-clipboard" => handle_capture(app.clone(), CaptureKind::Clipboard),
-                    "pause-resume" => handle_tray_playback(app.clone(), true),
-                    "stop" => handle_tray_playback(app.clone(), false),
-                    "quit" => app.exit(0),
-                    _ => {}
-                })
-                .build(app)?;
+                    })
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "open" => {
+                            let _ = presentation::show_player(app, None);
+                        }
+                        "settings" => {
+                            let _ = presentation::show_management(app, "settings");
+                        }
+                        "read-selection" => handle_capture(app.clone(), CaptureKind::Selection),
+                        "read-clipboard" => handle_capture(app.clone(), CaptureKind::Clipboard),
+                        "pause-resume" => handle_tray_playback(app.clone(), true),
+                        "stop" => handle_tray_playback(app.clone(), false),
+                        "quit" => app.exit(0),
+                        _ => {}
+                    })
+                    .build(app)?;
+            }
             start_service_event_bridge(app.handle().clone());
             start_tray_status_poll(status, pause_resume, stop);
             Ok(())
         })
+        .on_page_load(|webview, payload| {
+            #[cfg(debug_assertions)]
+            ui_test::page_loaded(webview, payload);
+            #[cfg(not(debug_assertions))]
+            let _ = (webview, payload);
+        })
         .on_window_event(|window, event| {
+            if window.label() == "player"
+                && let tauri::WindowEvent::Focused(focused) = event
+            {
+                let state = window.state::<presentation::PresentationState>();
+                if *focused {
+                    state.0.store(true, std::sync::atomic::Ordering::Relaxed);
+                } else if state.0.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    let _ = presentation::hide(window.app_handle(), "player");
+                }
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                let _ = presentation::hide(window.app_handle(), window.label());
             }
         })
         .run(tauri::generate_context!())

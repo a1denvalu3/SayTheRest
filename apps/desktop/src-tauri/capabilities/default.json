@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Main desktop window",
-  "windows": ["main"],
+  "windows": ["main", "player"],
   "permissions": ["core:default", "dialog:allow-save"]
 }

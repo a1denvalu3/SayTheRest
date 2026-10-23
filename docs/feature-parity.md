@@ -28,10 +28,11 @@ The copy fallback snapshots advertised raw formats (including text, HTML/RTF, im
 
 ## Player and history
 
-- [ ] Tray/menu-bar status and compact player (tray command menu exists; compact popover remains).
+- [ ] Tray/menu-bar status and compact player (implemented; Linux native UI acceptance passes, Windows GUI acceptance remains).
 - [x] Play, pause, resume, stop, seek, skip forward/back, rate, and volume.
 - [x] Progressive PCM playback with buffering and pitch-preserving listening speed.
 - [x] Current title, progress, duration, current spoken text, and chunk separators.
+- [x] Amplitude waveform, word seeking, and reader follow controls (measured block boundaries with estimated word timing within each block).
 - [x] Persistent history with search, pinning, replay, regeneration, deletion, and audio export.
 - [x] Configurable history retention and disk quota.
 
@@ -53,7 +54,7 @@ and capability tests for every feature advertised by that model.
 
 - [ ] Phonon 31M English, custom voice files, and voice-pack updates
 - [ ] Kokoro (synthesis exists; multilingual/preset coverage remains)
-- [ ] Kitten Mini and Kitten Nano (progressive callback tests now run with both real models in the release matrix)
+- [x] Kitten Mini and Kitten Nano (real synthesis, progressive callbacks, worker transport, and cancellation pass on Linux and Windows)
 - [ ] Pocket TTS (cloning exists; preset coverage remains)
 - [ ] Soprano
 - [ ] Qwen3 TTS Base, VoiceDesign, and CustomVoice
@@ -120,6 +121,35 @@ the final WAV. This establishes progressive delivery, while making clear that
 Qwen CPU first-audio latency still needs improvement. CUDA and Windows hardware
 acceptance are not established by these Linux CPU results.
 
+The compact player is a separate 360-pixel native window opened from the tray.
+It retains completed recordings for replay and word seeking, offers an actual
+amplitude waveform, keyboard navigation, and a reader that follows speech until
+the user scrolls away. Text offsets use Unicode scalar positions across service
+and desktop. Synthesis records the audio start/end of each short text block;
+word timing within a block is approximate, matching the upstream approach rather
+than claiming forced alignment. These boundaries persist in history and survive
+replay. Older recordings use a fixed-duration estimate.
+
+On 2026-10-23, the native Linux Tauri/WebKit acceptance run passed 20 checks with
+an isolated Piper service and a real audio device at zero volume. It checked the
+360-pixel layout, idle controls, pause during generation, real amplitudes, measured
+blocks, word seeking while paused, manual/follow scrolling, keyboard navigation,
+speed changes, volume preview, retained completion, replay without duplicate
+history, clear/recent history, and opening management settings. Native screenshots
+were inspected in light, dark, and idle states. The suite is reproducible with:
+
+```sh
+cargo build -p sayit-service-app -p sayit-desktop --locked
+python3 scripts/test-desktop-ui.py --config /path/to/installed/preset/config.json --snapshots /tmp/sayit-ui
+node --test apps/desktop/tests/reader-timing.test.cjs
+```
+
+The native UI runner currently targets Linux and requires an active display;
+it does not establish Windows GUI or compositor-specific tray placement. Linux
+AppIndicator exposes the player through its menu because Tauri does not provide
+tray click coordinates/events there. Windows uses direct tray clicks. On Wayland,
+window placement follows the compositor when explicit positioning is unavailable.
+
 Linux and Windows release candidates must pass the same behavior suite. Platform-specific selection tests run against representative native, Chromium, Electron, terminal, and office applications. Model/provider changes must compare audio quality and report cold start, warm p50/p95/p99, peak memory, time to first audio, and real-time factor on the supported hardware matrix.
 
 The job journal is written through a synced temporary file with a last-known-good backup. On
@@ -129,6 +159,14 @@ causing an endless service crash loop. Automated tests cover malformed and missi
 backup restoration, retry, cleanup, and the repeated-interruption guard.
 
 ## Release evidence
+
+Commit `0f03465` passed the complete Linux/Windows release matrix on 2026-10-23,
+including workspace tests, real Mini/Nano progressive synthesis through the
+packaged resident runtime and isolated worker, cancellation, and package audits.
+The Windows run exposed and verified a fix for 32-bit overflow in Sonic's
+full-rate pitch comparison; the signal tests retain their original pitch bounds.
+GitHub Actions run:
+[39947527253](https://github.com/a1denvalu3/SayTheRest/actions/runs/39947527253).
 
 The 2026-08-10 release-candidate matrix for commit `3061cb9` ran the same workspace test suite on
 Ubuntu 24.04 and Windows Server 2025, then built and inspected every native package. Before

@@ -30,6 +30,8 @@ clipboard-win = "5.4.1"
 uiautomation = { version = "0.25", default-features = false, features = ["pattern", "input", "control"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = "2.0"
+cairo-rs = { version = "0.18", features = ["png"] }
 atspi = "0.30"
 arboard = { version = "3.6.1", default-features = false }
 ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "clipboard", "remote_desktop", "screencast"] }

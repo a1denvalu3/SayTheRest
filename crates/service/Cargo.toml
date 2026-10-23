@@ -19,6 +19,7 @@ rminiaudio.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 tar.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 uuid.workspace = true
@@ -29,5 +30,4 @@ zip.workspace = true
 cc = "1.2"
 
 [dev-dependencies]
-tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }

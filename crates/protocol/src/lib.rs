@@ -113,6 +113,8 @@ pub struct PlaybackTextChunk {
     /// Exclusive Unicode character offset in `spoken_text`.
     pub text_end: usize,
     pub audio_start_seconds: f64,
+    #[serde(default)]
+    pub audio_end_seconds: Option<f64>,
 }
 
 impl Default for PlaybackSnapshot {
@@ -140,6 +142,8 @@ pub struct HistoryItem {
     pub audio_path: Option<String>,
     pub duration_seconds: Option<f64>,
     pub pinned: bool,
+    #[serde(default)]
+    pub spoken_chunks: Vec<PlaybackTextChunk>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

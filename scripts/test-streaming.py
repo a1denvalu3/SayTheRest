@@ -86,6 +86,17 @@ def main():
                 with wave.open(history["audio_path"]) as audio:
                     assert audio.getnframes() > 0
                     assert abs(audio.getnframes() / audio.getframerate() - history["duration_seconds"]) < 0.01
+                retained = api("state")["playback"]
+                assert retained["job_id"] == job["id"] and retained["state"] == "completed"
+                assert retained["spoken_text"] == text.strip()
+                chunks = retained["spoken_chunks"]
+                assert len(chunks) > 1 and all(c["audio_end_seconds"] > c["audio_start_seconds"] for c in chunks)
+                assert abs(chunks[-1]["audio_end_seconds"] - history["duration_seconds"]) < 0.01
+                assert history["spoken_chunks"] == chunks
+                api("playback/seek", {"seconds": history["duration_seconds"] - 0.5})
+                api("playback/resume", {})
+                until(lambda: api("state")["playback"]["state"] == "completed")
+                assert sum(h["job"]["id"] == job["id"] for h in api("history")) == 1
                 # A second long request must stop immediately and stay stopped.
                 cancelled = api("jobs", {"text": text * 2, "queue_policy": "append"})
                 until(lambda: api("state")["playback"]["job_id"] == cancelled["id"])
@@ -100,7 +111,9 @@ def main():
                 until(lambda: next(j for j in api("jobs") if j["id"] == replaced["id"])["state"] == "cancelled")
                 replay = until(lambda: (p if (p := api("state")["playback"])["job_id"] == job["id"] else None))
                 api("playback/seek", {"seconds": replay["duration_seconds"] - 0.5})
-                until(lambda: api("state")["playback"]["job_id"] is None)
+                until(lambda: api("state")["playback"]["state"] == "completed")
+                api("playback/stop", {})
+                assert api("state")["playback"]["job_id"] is None
                 print(json.dumps({"result": "passed", "progressive_snapshots": len(progressive),
                     "first_audio_poll_seconds": round(first_audio, 2), "generation_seconds": round(generation_seconds, 2),
                     "acceptance_seconds": round(time.monotonic() - started, 2),
