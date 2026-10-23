@@ -294,6 +294,16 @@ impl EngineConfig {
         matches!(self, Self::Qwen3Tts(_) | Self::Qwen3TtsOnnx(_))
     }
 
+    pub fn is_sherpa(&self) -> bool {
+        matches!(
+            self,
+            Self::SherpaOnnxVits(_)
+                | Self::SherpaOnnxKokoro(_)
+                | Self::SherpaOnnxKitten(_)
+                | Self::SherpaOnnxPocket(_)
+        )
+    }
+
     pub fn requires_reference(&self) -> bool {
         matches!(self, Self::SherpaOnnxPocket(_) | Self::Qwen3TtsOnnx(_))
             || matches!(self, Self::Qwen3Tts(qwen) if matches!(qwen.mode, Qwen3TtsMode::VoiceClone))

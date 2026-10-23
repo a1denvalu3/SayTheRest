@@ -307,7 +307,7 @@ impl ModelManager {
         fs::create_dir_all(&root)?;
         let executable = initial_config
             .and_then(|path| EngineConfig::from_path(path).ok())
-            .filter(|config| !config.is_qwen())
+            .filter(EngineConfig::is_sherpa)
             .map(|config| SherpaOnnxEngine::from_config(config).executable())
             .unwrap_or_else(|| {
                 let name = if cfg!(windows) {

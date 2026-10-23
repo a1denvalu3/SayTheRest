@@ -313,6 +313,23 @@ mod tests {
     }
 
     #[test]
+    fn initial_phonon_config_keeps_the_sherpa_runtime_independent() {
+        let root = tempfile::tempdir().unwrap();
+        let (manager, _, _) = fixture(&root.path().join("models"));
+        let bootstrap = ModelManager::new(
+            root.path().join("other-models"),
+            Some(&manager.config_path(ID)),
+        )
+        .unwrap();
+        let expected = if cfg!(windows) {
+            "sherpa-onnx-offline-tts.exe"
+        } else {
+            "sherpa-onnx-offline-tts"
+        };
+        assert_eq!(bootstrap.executable.file_name().unwrap(), expected);
+    }
+
+    #[test]
     fn cached_update_preserves_selection_and_separate_custom_profiles() {
         let root = tempfile::tempdir().unwrap();
         let models = root.path().join("models");
