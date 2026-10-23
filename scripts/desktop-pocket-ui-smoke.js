@@ -34,7 +34,7 @@
     const historyCount=(await get('history')).length;
     await invoke('open_management',{section:'voices'});
     await until(()=>document.querySelectorAll('[data-preset-action=preview]').length===8);
-    check(!$('#voice-form').hidden&&$('#voice-file-form').hidden,'Pocket keeps optional audio cloning available');
+    check(getComputedStyle($('#voice-form')).display!=='none'&&getComputedStyle($('#voice-file-form')).display==='none','Pocket keeps optional audio cloning available');
     check($('[data-preset-voice=cosette]').closest('article').textContent.includes('CC-BY-NC-4.0'),'preset recording license is visible');
     $('[data-preset-voice=cosette][data-preset-action=preview]').click();
     await until(async()=>{const p=(await get('state')).playback;return p.job_id&&p.job_id!==job.id;});
@@ -61,6 +61,9 @@
     $(`[data-voice="${profile.id}"][data-voice-action=delete]`).click();
     await until(async()=>(await get('voices')).length===0);
     check(true,'unused cloned profile can be removed');
+    await invoke('open_management',{section:'settings'});
+    await until(()=>$('#settings-form').elements.speaking_pace.disabled);
+    check(getComputedStyle($('#speech-language-field')).display==='none','models without language selection hide the unsupported control');
     await window.__TAURI__.event.emit('ui-test-result',{passed:true,checks});
   }catch(error){
     await window.__TAURI__.event.emit('ui-test-result',{passed:false,error:String(error),stack:error.stack,toast:$('#toast')?.textContent,checks,

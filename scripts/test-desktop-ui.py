@@ -23,13 +23,14 @@ def main():
     parser.add_argument('--script',type=Path,help='Native UI acceptance script (defaults to player checks)')
     parser.add_argument('--window',choices=['player','main'],default='player')
     parser.add_argument('--voice-file',type=Path,help='Reference audio or exported voice file for management UI acceptance')
+    parser.add_argument('--reference-text',help='Exact words spoken in the reference audio for Qwen acceptance')
     parser.add_argument('--timeout',type=float,default=120,help='Native test deadline in seconds')
     parser.add_argument('--model-cache',type=Path,help='Seed isolated model asset directories for a verified-cache install test')
     args=parser.parse_args()
     repo=Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix='sayit-native-ui-') as temporary:
         root=Path(temporary)
-        fixture={'voice_file':str(args.voice_file.resolve()) if args.voice_file else None,'bad_voice_file':str(root/'invalid.safetensors')}
+        fixture={'voice_file':str(args.voice_file.resolve()) if args.voice_file else None,'bad_voice_file':str(root/'invalid.safetensors'),'reference_text':args.reference_text}
         (root/'invalid.safetensors').write_bytes(b'invalid exported voice')
         script=args.script or repo/'scripts/desktop-ui-smoke.js'
         driver=root/'driver.js'

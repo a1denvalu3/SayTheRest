@@ -16,11 +16,29 @@
         "type": "object",
         "description": "Additive fields on each /models entry. Voice cloning can be optional when a model also supplies a default preset.",
         "properties": {
+          "capabilities": { "type": "object", "properties": { "language_selection": { "type": "boolean", "description": "This model accepts a separately selected speech language." } } },
+          "selected_language": { "type": ["string", "null"], "description": "Saved per-model language code, including auto for automatic detection. Null when the model has no separate language selection." },
           "requires_voice_profile": { "type": "boolean", "description": "The current installed configuration requires a saved voice profile before speech can be queued. Older Pocket installations need a preset-pack update to make profiles optional." },
           "preset_voices": { "type": "array", "items": { "type": "object", "properties": {
             "id": { "type": "string" }, "name": { "type": "string" }, "language": { "type": "string" }, "selected": { "type": "boolean" },
             "license": { "type": "string" }, "license_url": { "type": "string", "format": "uri" }, "attribution": { "type": "string" }
           } } }
+        }
+      },
+      "ModelLanguageRequest": {
+        "type": "object", "additionalProperties": false, "required": ["language"],
+        "properties": { "language": { "type": "string", "enum": ["auto", "zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"], "description": "Qwen language code. Stored per model and retained across updates and backend changes." } }
+      },
+      "SpeechSubmission": {
+        "type": "object", "required": ["text"],
+        "properties": {
+          "text": { "type": "string" },
+          "language": { "type": ["string", "null"], "description": "Optional per-request language code for models with language selection. The effective language is captured when queued and returned on the job and its history entry; changing the saved default does not change queued jobs." },
+          "voice_profile_id": { "type": ["string", "null"], "format": "uuid" },
+          "source": { "type": "string", "enum": ["selection", "clipboard", "cli", "api", "history", "desktop"] },
+          "queue_policy": { "type": "string", "enum": ["append", "replace", "interrupt"] },
+          "confirmed_long_text": { "type": "boolean" },
+          "speaking_pace": { "type": ["number", "null"], "description": "Optional native generation pace for supported models." }
         }
       },
       "PlaybackProgress": {
@@ -64,7 +82,7 @@
         "properties": {
           "compute_device": { "type": "string", "enum": ["auto", "cpu"], "description": "Automatic prefers a compatible GPU for every inference path, including previews and benchmarks. CPU forces CPU execution. Pinned GPU runtimes are prepared on first use. The last selected backend and CPU fallback reason appear in /state.inference_device; loaded models expose inference_device in /models." },
           "playback_rate": { "type": "number", "minimum": 0.5, "maximum": 3.0 },
-          "speaking_pace": { "type": "number", "enum": [0.75, 0.9, 1.0, 1.1, 1.25, 1.5], "description": "Native pace for models supporting it. Pocket and Phonon use natural pace (1.0) regardless of this saved preference; non-1.0 per-job requests are rejected. playback_rate remains independent." },
+          "speaking_pace": { "type": "number", "enum": [0.75, 0.9, 1.0, 1.1, 1.25, 1.5], "description": "Native pace for models supporting it. Pocket, Phonon, and Qwen use natural pace (1.0) regardless of this saved preference; non-1.0 per-job requests are rejected. playback_rate remains independent." },
           "volume": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
           "model_unload_delay_seconds": { "type": "integer", "minimum": 30, "maximum": 86400 },
           "history_quota_bytes": { "type": "integer", "minimum": 16777216, "maximum": 107374182400 },
@@ -96,11 +114,12 @@
     "/state": { "get": { "summary": "Service and playback snapshot", "responses": { "200": { "description": "Current state" } } } },
     "/jobs": {
       "get": { "summary": "List speech jobs", "responses": { "200": { "description": "Jobs" } } },
-      "post": { "security": [{ "controlToken": [] }], "summary": "Queue speech with an optional native speaking pace", "responses": { "202": { "description": "Queued" }, "413": { "description": "Long text requires confirmation" } } }
+      "post": { "security": [{ "controlToken": [] }], "summary": "Queue speech with optional language and native speaking pace", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SpeechSubmission" } } } }, "responses": { "202": { "description": "Queued; job includes its effective language" }, "413": { "description": "Long text requires confirmation" }, "422": { "description": "Invalid text, language, or pace" } } }
     },
     "/playback/{action}": { "post": { "security": [{ "controlToken": [] }], "summary": "Pause, resume, stop, seek, set rate, or set volume", "parameters": [{ "in": "path", "name": "action", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Applied" } } } },
     "/models/{id}/backend": {"post": {"summary": "Prepare and select the Qwen native ONNX or PyTorch backend without changing saved voice IDs", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ModelBackendRequest"}}}}, "responses": {"202": {"description": "Asynchronous backend setup started; inspect model download progress"}, "422": {"description": "Unsupported model, backend, or precision"}}, "security": [{"controlToken": []}]}},
     "/models": { "get": { "summary": "Model catalog and installation state", "responses": { "200": { "description": "Models" } } } },
+    "/models/{id}/language": { "post": { "security": [{ "controlToken": [] }], "summary": "Save an installed model's speech language without changing the selected voice profile", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ModelLanguageRequest" } } } }, "responses": { "204": { "description": "Language saved; applies to new submissions" }, "422": { "description": "Unsupported language, unavailable model, or model without language selection" } } } },
     "/models/{id}/update": { "post": { "security": [{ "controlToken": [] }], "summary": "Download, verify, and replace an outdated curated model", "responses": { "202": { "description": "Update started" } } } },
     "/models/{id}/voices/{voice_id}/select": { "post": { "security": [{ "controlToken": [] }], "summary": "Select a built-in voice exposed by an installed model", "responses": { "204": { "description": "Voice selected" } } } },
     "/models/{id}/unload": { "post": { "security": [{ "controlToken": [] }], "summary": "Release the resident inference engine without changing model selection", "responses": { "204": { "description": "Model unloaded" } } } },

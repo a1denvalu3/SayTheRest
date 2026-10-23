@@ -3,6 +3,7 @@ mod config;
 mod device;
 mod engine;
 mod inference;
+pub mod language;
 pub mod onnx_runtime;
 pub mod phonon;
 pub mod pocket;

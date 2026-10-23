@@ -479,6 +479,7 @@ impl ModelManager {
                         EngineConfig::Qwen3Tts(_) | EngineConfig::Qwen3TtsOnnx(_) | EngineConfig::Phonon(_) => None,
                     });
                 ModelDescriptor {
+                    selected_language: installed_config.as_ref().and_then(EngineConfig::language).and_then(|value| sayit_core::language::qwen_language(value).ok()).map(|language| language.code.into()),
                     inference_backend: match installed_config.as_ref() {
                         Some(EngineConfig::Qwen3TtsOnnx(_)) => Some("onnx".into()),
                         Some(EngineConfig::Qwen3Tts(_)) => Some("pytorch".into()),
@@ -503,6 +504,7 @@ impl ModelManager {
                     selected: installed && selected == Some(entry.id),
                     requires_voice_profile: installed_config.as_ref().map_or(entry.capabilities.voice_cloning,EngineConfig::requires_reference),
                     capabilities: ModelCapabilities {
+                        language_selection: entry.id == "qwen3-tts-06b-base",
                         voice_file_import: entry.id == "phonon-31m-en",
                         preset_voices: entry.capabilities.preset_voices,
                         voice_cloning: entry.capabilities.voice_cloning,
@@ -515,7 +517,7 @@ impl ModelManager {
                     speed_note: speed_note.into(),
                     benchmark: benchmarks.get(entry.id).cloned(),
                     recommended: recommended == Some(entry.id),
-                    supports_native_speaking_pace: !entry.capabilities.voice_cloning && entry.id != "phonon-31m-en",
+                    supports_native_speaking_pace: installed_config.as_ref().map_or(!entry.capabilities.voice_cloning && entry.id != "phonon-31m-en", EngineConfig::supports_native_speaking_pace),
                     preset_voices: if entry.id=="phonon-31m-en" {phonon::presets(installed_config.as_ref())} else if entry.id=="pocket-tts-int8" {pocket::presets(installed_config.as_ref())} else {entry
                         .preset_voices
                         .iter()
@@ -532,6 +534,14 @@ impl ModelManager {
             .collect::<Vec<_>>();
         descriptors.extend(self.community.lock().unwrap().iter().map(|entry| {
             ModelDescriptor {
+                selected_language: EngineConfig::from_path(&self.config_path(&entry.id))
+                    .ok()
+                    .and_then(|config| {
+                        config
+                            .language()
+                            .and_then(|value| sayit_core::language::qwen_language(value).ok())
+                            .map(|language| language.code.into())
+                    }),
                 inference_backend: None,
                 weight_precision: None,
                 inference_device: None,
@@ -549,6 +559,8 @@ impl ModelManager {
                 requires_voice_profile: EngineConfig::from_path(&self.config_path(&entry.id))
                     .map_or(entry.voice_cloning, |config| config.requires_reference()),
                 capabilities: ModelCapabilities {
+                    language_selection: EngineConfig::from_path(&self.config_path(&entry.id))
+                        .is_ok_and(|config| config.is_qwen()),
                     voice_file_import: false,
                     preset_voices: !entry.voice_cloning,
                     voice_cloning: entry.voice_cloning,
@@ -561,7 +573,12 @@ impl ModelManager {
                 speed_note: "Run the local benchmark before relying on this model.".into(),
                 benchmark: benchmarks.get(&entry.id).cloned(),
                 recommended: recommended == Some(entry.id.as_str()),
-                supports_native_speaking_pace: !entry.voice_cloning,
+                supports_native_speaking_pace: EngineConfig::from_path(
+                    &self.config_path(&entry.id),
+                )
+                .map_or(!entry.voice_cloning, |config| {
+                    config.supports_native_speaking_pace()
+                }),
                 preset_voices: Vec::new(),
             }
         }));
@@ -582,6 +599,17 @@ impl ModelManager {
         let path = self.config_path(id);
         let config = self.preset_voice_config(id, voice_id)?;
         let temporary = path.with_extension("json.tmp");
+        fs::write(&temporary, serde_json::to_vec_pretty(&config)?)?;
+        fs::rename(temporary, path)?;
+        Ok(())
+    }
+
+    pub fn select_language(&self, id: &str, language: &str) -> Result<()> {
+        let path = self.config_path(id);
+        let mut config = EngineConfig::from_path(&path)?;
+        config.set_language(language)?;
+        config.validate()?;
+        let temporary = path.with_extension("json.language-tmp");
         fs::write(&temporary, serde_json::to_vec_pretty(&config)?)?;
         fs::rename(temporary, path)?;
         Ok(())
@@ -856,7 +884,9 @@ impl ModelManager {
         anyhow::ensure!(!cancelled.load(Ordering::Relaxed), "download cancelled");
         let backup = directory.join("sayit-config.pytorch.json");
         if backup.is_file() {
-            let config = EngineConfig::from_path(&backup)?;
+            let language = saved_qwen_language(&directory);
+            let mut config = EngineConfig::from_path(&backup)?;
+            config.set_language(&language)?;
             anyhow::ensure!(
                 matches!(config, EngineConfig::Qwen3Tts(_)),
                 "invalid PyTorch backend backup"
@@ -1352,7 +1382,7 @@ impl ModelManager {
             mode: Qwen3TtsMode::VoiceClone,
             device: "auto".into(),
             dtype: "auto".into(),
-            language: "Auto".into(),
+            language: saved_qwen_language(destination),
             speaker: None,
             voice_description: None,
         });
@@ -1517,6 +1547,19 @@ fn preset_voice_language(id: &str) -> &'static str {
         Some("ef" | "em" | "ff" | "hf" | "hm" | "if" | "im" | "jf" | "jm" | "pf" | "pm") => "en",
         _ => "en-US",
     }
+}
+
+fn saved_qwen_language(directory: &Path) -> String {
+    fs::read(directory.join(SAYIT_CONFIG))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<EngineConfig>(&bytes).ok())
+        .and_then(|config| {
+            config
+                .language()
+                .and_then(|value| sayit_core::language::qwen_language(value).ok())
+                .map(|language| language.name.to_owned())
+        })
+        .unwrap_or_else(|| "Auto".into())
 }
 
 fn replace_model_directory(staged: &Path, destination: &Path) -> Result<()> {
@@ -2147,6 +2190,41 @@ mod tests {
             panic!("expected Qwen config")
         };
         assert_eq!(rebound.worker, manager.qwen_runtime.worker());
+        assert_eq!(
+            fs::read(directory.join("config.json")).unwrap(),
+            QWEN_BASE_CONFIG
+        );
+    }
+
+    #[test]
+    fn qwen_language_selection_survives_updates_and_restarts_and_rejects_unknown_values() {
+        let storage = tempfile::tempdir().unwrap();
+        let (manager, directory) = qwen_fixture(storage.path());
+        let id = "qwen3-tts-06b-base";
+        manager.select_language(id, "es").unwrap();
+        let path = manager.config_path(id);
+        let before = fs::read(&path).unwrap();
+        assert_eq!(
+            EngineConfig::from_path(&path).unwrap().language(),
+            Some("Spanish")
+        );
+        assert!(manager.select_language(id, "unsupported").is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        manager
+            .write_qwen_engine_config(&directory, &directory)
+            .unwrap();
+        let manager = ModelManager::new(storage.path().join("models"), None).unwrap();
+        assert_eq!(
+            EngineConfig::from_path(&path).unwrap().language(),
+            Some("Spanish")
+        );
+        let descriptor = manager
+            .descriptors(Some(id), &HashMap::new())
+            .into_iter()
+            .find(|model| model.id == id)
+            .unwrap();
+        assert!(descriptor.capabilities.language_selection);
+        assert_eq!(descriptor.selected_language.as_deref(), Some("es"));
         assert_eq!(
             fs::read(directory.join("config.json")).unwrap(),
             QWEN_BASE_CONFIG

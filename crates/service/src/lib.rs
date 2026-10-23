@@ -400,12 +400,15 @@ impl ServiceState {
         let player = self.player.clone();
         let synthesis = tokio::task::spawn_blocking(move || -> Result<(PathBuf, f64)> {
             let mut config = EngineConfig::from_path(&config_path)?;
+            if let Some(language) = &job.language {
+                config.set_language(language)?;
+            }
             if let (EngineConfig::SherpaOnnxPocket(pocket), Some(steps)) =
                 (&mut config, refinement_steps)
             {
                 pocket.num_steps = steps as usize;
             }
-            let mut config_bytes = fs::read(&config_path)?;
+            let mut config_bytes = serde_json::to_vec(&config)?;
             // Model/voice-pack revisions can change while the engine settings
             // retain the same paths. Reload on the next request after an update.
             if let Some(directory) = config_path.parent()
@@ -910,6 +913,7 @@ pub fn router(state: ServiceState) -> Router {
             post(import_hugging_face_model),
         )
         .route("/v1/models/{id}/install", post(install_model))
+        .route("/v1/models/{id}/language", post(select_model_language))
         .route("/v1/models/{id}/update", post(install_model))
         .route("/v1/models/{id}/cancel", post(cancel_model_install))
         .route("/v1/models/{id}/select", post(select_model))
@@ -1228,15 +1232,27 @@ async fn regenerate_history(
         .find(|item| item.job.id == id)
         .cloned()
         .ok_or((StatusCode::NOT_FOUND, "history item not found".into()))?;
+    // Older Qwen entries could retain a pace that the backend ignored.
+    // Regenerate those at the natural pace actually used by that model.
+    let speaking_pace = if let Some(path) = state.resolve_engine_config().await
+        && !EngineConfig::from_path(&path)
+            .map_err(unprocessable)?
+            .supports_native_speaking_pace()
+    {
+        Some(1.0)
+    } else {
+        item.job.speaking_pace
+    };
     submit_job(
         State(state),
         Json(SpeechSubmission {
+            language: item.job.language,
             text: item.job.text,
             voice_profile_id: item.job.voice_profile_id,
             source: SpeechSource::History,
             queue_policy: QueuePolicy::Replace,
             confirmed_long_text: true,
-            speaking_pace: item.job.speaking_pace,
+            speaking_pace,
         }),
     )
     .await
@@ -1581,6 +1597,7 @@ async fn preview_voice(
     submit_job(
         State(state),
         Json(SpeechSubmission {
+            language: None,
             text: format!("This is a preview of the voice {}.", voice.name),
             voice_profile_id: Some(id),
             source: SpeechSource::Desktop,
@@ -2073,6 +2090,20 @@ async fn install_model(
     Ok(StatusCode::ACCEPTED)
 }
 
+async fn select_model_language(
+    State(state): State<ServiceState>,
+    RoutePath(id): RoutePath<String>,
+    Json(request): Json<sayit_protocol::ModelLanguageRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    state
+        .models
+        .select_language(&id, &request.language)
+        .map_err(unprocessable)?;
+    state.emit("models");
+    state.emit("settings");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn cancel_model_install(
     State(state): State<ServiceState>,
     RoutePath(id): RoutePath<String>,
@@ -2196,10 +2227,7 @@ async fn preview_preset_voice(
         voice.name
     );
     let preview_text = text.clone();
-    let speaking_pace = if matches!(
-        config,
-        EngineConfig::Phonon(_) | EngineConfig::SherpaOnnxPocket(_)
-    ) {
+    let speaking_pace = if !config.supports_native_speaking_pace() {
         1.0
     } else {
         state.inner.read().await.settings.speaking_pace
@@ -2268,8 +2296,21 @@ async fn submit_job(
     ))?;
     let config = EngineConfig::from_path(&config_path).map_err(unprocessable)?;
     let requires_voice_profile = config.requires_reference();
+    let language = match submission.language.as_deref().or(config.language()) {
+        Some(language) => {
+            let mut checked = config.clone();
+            checked.set_language(language).map_err(unprocessable)?;
+            Some(
+                sayit_core::language::qwen_language(language)
+                    .map_err(unprocessable)?
+                    .code
+                    .to_owned(),
+            )
+        }
+        None => None,
+    };
     let phonon = matches!(config, EngineConfig::Phonon(_));
-    let natural_pace = phonon || matches!(config, EngineConfig::SherpaOnnxPocket(_));
+    let natural_pace = !config.supports_native_speaking_pace();
     if natural_pace && submission.speaking_pace.is_some_and(|pace| pace != 1.0) {
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -2383,6 +2424,7 @@ async fn submit_job(
         }
     }
     let job = SpeechJob {
+        language,
         id: Uuid::new_v4(),
         text,
         source: submission.source,
@@ -2686,6 +2728,7 @@ mod tests {
         let state = ServiceState::default();
         let job_id = Uuid::new_v4();
         state.inner.write().await.jobs.push_back(SpeechJob {
+            language: None,
             id: job_id,
             text: "Visible while synthesis is running.".into(),
             source: SpeechSource::Selection,
@@ -2709,6 +2752,7 @@ mod tests {
         let active_id = Uuid::new_v4();
         let replay_id = Uuid::new_v4();
         let make_job = |id, state| SpeechJob {
+            language: None,
             id,
             text: id.to_string(),
             source: SpeechSource::History,
@@ -2746,6 +2790,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state = ServiceState::open(directory.path().to_owned(), None).unwrap();
         let submission = SpeechSubmission {
+            language: None,
             text: "persist me".into(),
             voice_profile_id: None,
             source: Default::default(),
@@ -2754,6 +2799,7 @@ mod tests {
             speaking_pace: None,
         };
         let job = SpeechJob {
+            language: None,
             id: Uuid::new_v4(),
             text: submission.text,
             source: submission.source,
@@ -2775,6 +2821,7 @@ mod tests {
         let state = ServiceState::open(directory.path().to_owned(), None).unwrap();
         let job_id = Uuid::new_v4();
         state.inner.write().await.jobs.push_back(SpeechJob {
+            language: None,
             id: job_id,
             text: "recover after a crash".into(),
             source: SpeechSource::Clipboard,
@@ -2821,6 +2868,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state = ServiceState::open(directory.path().to_owned(), None).unwrap();
         state.inner.write().await.jobs.push_back(SpeechJob {
+            language: None,
             id: Uuid::new_v4(),
             text: "survives journal corruption".into(),
             source: SpeechSource::Api,
@@ -3035,6 +3083,7 @@ for line in sys.stdin:
         let state = qwen_voice_test_state(directory.path());
         let id = Uuid::new_v4();
         state.inner.write().await.jobs.push_back(SpeechJob {
+            language: None,
             id,
             text: "hello".into(),
             source: SpeechSource::Cli,
@@ -3081,6 +3130,106 @@ for line in sys.stdin:
         }
         assert!(state.inner.read().await.voices.is_empty());
         assert_eq!(fs::read_dir(&state.voices_dir).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn language_is_captured_when_queued_and_invalid_overrides_do_not_enter_the_queue() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = qwen_voice_test_state(directory.path());
+        let voice = Uuid::new_v4();
+        state.inner.write().await.voices.push(VoiceProfile {
+            id: voice,
+            name: "Reference".into(),
+            model_id: "qwen3-tts".into(),
+            reference_kind: sayit_protocol::VoiceReferenceKind::Audio,
+            reference_audio_path: "reference.wav".into(),
+            reference_text: Some("Reference text.".into()),
+            reference_duration_seconds: 4.0,
+            created_at: chrono::Utc::now(),
+            quality: VoiceQuality::default(),
+            refinement_steps: 5,
+        });
+        state.models.select_language("qwen3-tts", "es").unwrap();
+        state.inner.write().await.settings.speaking_pace = 1.25;
+        let submission = SpeechSubmission {
+            text: "Buenos días.".into(),
+            language: None,
+            voice_profile_id: Some(voice),
+            source: SpeechSource::Api,
+            queue_policy: QueuePolicy::Append,
+            confirmed_long_text: false,
+            speaking_pace: None,
+        };
+        let (_, Json(first)) = submit_job(State(state.clone()), Json(submission.clone()))
+            .await
+            .unwrap();
+        assert_eq!(first.language.as_deref(), Some("es"));
+        assert_eq!(first.speaking_pace, Some(1.0));
+        state.models.select_language("qwen3-tts", "fr").unwrap();
+        let (_, Json(second)) = submit_job(State(state.clone()), Json(submission.clone()))
+            .await
+            .unwrap();
+        assert_eq!(second.language.as_deref(), Some("fr"));
+        assert_eq!(
+            state.inner.read().await.jobs[0].language.as_deref(),
+            Some("es")
+        );
+        let count = state.inner.read().await.jobs.len();
+        let error = submit_job(
+            State(state.clone()),
+            Json(SpeechSubmission {
+                language: Some("unknown".into()),
+                ..submission
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(state.inner.read().await.jobs.len(), count);
+        let error = submit_job(
+            State(state.clone()),
+            Json(SpeechSubmission {
+                language: None,
+                speaking_pace: Some(1.25),
+                text: "Unsupported pace.".into(),
+                voice_profile_id: Some(voice),
+                source: SpeechSource::Api,
+                queue_policy: QueuePolicy::Append,
+                confirmed_long_text: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(state.inner.read().await.jobs.len(), count);
+        state.inner.write().await.history.push(HistoryItem {
+            job: SpeechJob {
+                speaking_pace: Some(1.25),
+                state: JobState::Completed,
+                ..first.clone()
+            },
+            audio_path: None,
+            duration_seconds: None,
+            pinned: false,
+            spoken_chunks: Vec::new(),
+        });
+        let (_, Json(regenerated)) = regenerate_history(State(state.clone()), RoutePath(first.id))
+            .await
+            .unwrap();
+        assert_eq!(regenerated.language.as_deref(), Some("es"));
+        assert_eq!(regenerated.speaking_pace, Some(1.0));
+        assert_eq!(
+            EngineConfig::from_path(&state.models.config_path("qwen3-tts"))
+                .unwrap()
+                .language(),
+            Some("French")
+        );
+        state.persist().await.unwrap();
+        let restored = ServiceState::open(directory.path().join("data"), None).unwrap();
+        assert_eq!(
+            restored.inner.read().await.jobs[0].language.as_deref(),
+            Some("es")
+        );
     }
 
     #[tokio::test]
@@ -3205,6 +3354,7 @@ for line in sys.stdin:
         for transcript in [Some("Mi voz, con su transcripción exacta."), None] {
             state.inner.write().await.voices[0].reference_text = transcript.map(str::to_owned);
             let job = SpeechJob {
+                language: Some("es".into()),
                 id: Uuid::new_v4(),
                 text: "Text to generate, different from the reference transcript.".into(),
                 source: SpeechSource::Desktop,
@@ -3222,6 +3372,7 @@ for line in sys.stdin:
             )
             .unwrap();
             assert_eq!(payload["text"], job.text);
+            assert_eq!(payload["language"], "Spanish");
             assert_eq!(payload["reference_audio"], "reference.wav");
             assert_eq!(
                 payload.get("reference_text").and_then(|v| v.as_str()),
@@ -3310,6 +3461,7 @@ for line in sys.stdin:
         let error = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                language: None,
                 text: "This must not enter the queue.".into(),
                 voice_profile_id: None,
                 source: SpeechSource::Desktop,
@@ -3338,6 +3490,7 @@ for line in sys.stdin:
         state.inner.write().await.settings.speaking_pace = 1.25;
         let submission = |pace| {
             Json(SpeechSubmission {
+                language: None,
                 text: "A preset is ready without a saved profile.".into(),
                 voice_profile_id: None,
                 source: SpeechSource::Desktop,
@@ -3435,6 +3588,7 @@ for line in sys.stdin:
             .settings
             .long_text_confirmation_characters = 500;
         let submission = SpeechSubmission {
+            language: None,
             text: "x".repeat(501),
             voice_profile_id: None,
             source: SpeechSource::Selection,
@@ -3447,6 +3601,7 @@ for line in sys.stdin:
             .unwrap_err();
         assert_eq!(error.0, StatusCode::PAYLOAD_TOO_LARGE);
         let confirmed = SpeechSubmission {
+            language: None,
             confirmed_long_text: true,
             ..submission
         };
@@ -3460,6 +3615,7 @@ for line in sys.stdin:
         let error = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                language: None,
                 text: "This must not become a failed history item.".into(),
                 voice_profile_id: None,
                 source: SpeechSource::Clipboard,
@@ -3482,6 +3638,7 @@ for line in sys.stdin:
             let _ = submit_job(
                 State(state.clone()),
                 Json(SpeechSubmission {
+                    language: None,
                     text: text.into(),
                     voice_profile_id: None,
                     source: SpeechSource::Api,
@@ -3496,6 +3653,7 @@ for line in sys.stdin:
         let _ = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                language: None,
                 text: "replacement".into(),
                 voice_profile_id: None,
                 source: SpeechSource::Api,
@@ -3620,6 +3778,7 @@ for line in sys.stdin:
         let (_, Json(job)) = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                language: None,
                 text: raw,
                 voice_profile_id: None,
                 source: SpeechSource::Selection,
@@ -3646,6 +3805,7 @@ for line in sys.stdin:
         let (_, Json(job)) = submit_job(
             State(state),
             Json(SpeechSubmission {
+                language: None,
                 text: raw.into(),
                 voice_profile_id: None,
                 source: SpeechSource::Api,
@@ -3673,6 +3833,7 @@ for line in sys.stdin:
         let make_item = |text: &str, created_at, path: &std::path::Path, pinned| HistoryItem {
             spoken_chunks: Vec::new(),
             job: SpeechJob {
+                language: None,
                 id: Uuid::new_v4(),
                 text: text.into(),
                 source: SpeechSource::Desktop,
@@ -3735,6 +3896,7 @@ for line in sys.stdin:
         state.inner.write().await.history.push(HistoryItem {
             spoken_chunks: Vec::new(),
             job: SpeechJob {
+                language: None,
                 id: Uuid::new_v4(),
                 text: "old".into(),
                 source: SpeechSource::Desktop,

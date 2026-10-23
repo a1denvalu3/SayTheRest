@@ -31,6 +31,8 @@ pub enum QueuePolicy {
 pub struct SpeechSubmission {
     pub text: String,
     #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
     pub voice_profile_id: Option<Uuid>,
     #[serde(default)]
     pub source: SpeechSource,
@@ -70,6 +72,8 @@ pub enum JobState {
 pub struct SpeechJob {
     pub id: Uuid,
     pub text: String,
+    #[serde(default)]
+    pub language: Option<String>,
     pub source: SpeechSource,
     pub state: JobState,
     pub created_at: DateTime<Utc>,
@@ -235,6 +239,8 @@ pub struct ModelDescriptor {
     pub id: String,
     pub name: String,
     pub languages: Vec<String>,
+    #[serde(default)]
+    pub selected_language: Option<String>,
     pub size_bytes: u64,
     pub license: String,
     pub license_url: String,
@@ -310,12 +316,20 @@ pub struct HuggingFaceModelImportRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelCapabilities {
     #[serde(default)]
+    pub language_selection: bool,
+    #[serde(default)]
     pub voice_file_import: bool,
     pub preset_voices: bool,
     pub voice_cloning: bool,
     pub voice_description: bool,
     pub streaming: bool,
     pub long_form: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelLanguageRequest {
+    pub language: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

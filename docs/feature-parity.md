@@ -70,7 +70,7 @@ unavailable upstream. They are not requirements for parity with working upstream
 
 ## Voices
 
-- [ ] Built-in voice and language selection where supported (presets exist; general language controls remain).
+- [ ] Built-in voice and language selection where supported (Qwen language controls pass Linux native UI acceptance; Kokoro language coverage and Windows acceptance remain).
 - [x] Per-model voice selection and speaking pace.
 - [ ] Voice descriptions where supported.
 - [x] Local recording/import, quality analysis, trimming, and voice cloning where supported.
@@ -231,6 +231,35 @@ python3 scripts/test-desktop-ui.py --config /path/to/preset/config.json --window
 ```
 
 Linux and Windows release candidates must pass the same behavior suite. Platform-specific selection tests run against representative native, Chromium, Electron, terminal, and office applications. Model/provider changes must compare audio quality and report cold start, warm p50/p95/p99, peak memory, time to first audio, and real-time factor on the supported hardware matrix.
+
+Qwen language selection is available in Speech & storage for installed models
+that support it. It saves a separate default for each model, keeps the selected
+voice profile, and accepts automatic detection or one of the ten upstream
+language codes. Each queued job captures its effective language; history and
+regeneration retain it after the default changes. Unsupported languages fail
+before synthesis instead of silently using automatic detection. Native and
+PyTorch backends receive the same canonical language names. Both use natural
+speaking pace; unsupported per-request pace values are rejected explicitly.
+
+Linux native-worker acceptance produced nonempty, nonsilent 24 kHz audio for
+English, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish,
+Italian, and automatic detection. A rejected unknown language left no output and
+the worker remained usable. The desktop passed 12 checks with a real Qwen
+model and silent device playback, including Spanish/French selection, profile
+preservation, queued-language isolation, and history metadata. A separate real
+PyTorch service run produced Spanish audio while respecting natural pace after a
+different global pace preference was saved. These checks establish valid audio
+and working controls; pronunciation quality still needs listening evaluation.
+Native visibility checks also verify that unsupported controls are hidden in
+Pocket and Phonon. A shared hidden-state rule prevents grid layout styles from
+leaving those controls visible. Windows Qwen synthesis and GUI acceptance remain
+separate requirements.
+
+```sh
+python3 scripts/test-qwen-languages.py --config /path/to/native-config.json --reference /path/to/reference.wav
+python3 scripts/test-qwen-service.py --config /path/to/qwen-config.json --reference /path/to/reference.wav --reference-text 'Exact words in the recording.'
+python3 scripts/test-desktop-ui.py --config /path/to/native-config.json --window main --script scripts/desktop-language-ui-smoke.js --voice-file /path/to/reference.wav --reference-text 'Exact words in the recording.' --timeout 240
+```
 
 The job journal is written through a synced temporary file with a last-known-good backup. On
 startup, queued work remains queued; interrupted synthesis or playback is requeued once after

@@ -311,8 +311,15 @@ impl NativeQwenPipeline {
         let h = self.hidden;
         let (bos, rest) = special.split_at(h);
         let (eos, pad) = rest.split_at(h);
-        let language = request.language.to_lowercase();
-        let language_id = self.config["talker_config"]["codec_language_id"][language].as_i64();
+        let language = crate::language::qwen_language(&request.language)?
+            .name
+            .to_lowercase();
+        let language_id =
+            self.config["talker_config"]["codec_language_id"][language.as_str()].as_i64();
+        ensure!(
+            language == "auto" || language_id.is_some(),
+            "native model has no token for the selected language"
+        );
         let prefix = if let Some(id) = language_id {
             vec![
                 self.id("codec_think_id")?,
@@ -542,6 +549,7 @@ impl NativeQwenPipeline {
         sink: &mut crate::AudioSink<'_>,
     ) -> Result<()> {
         ensure!(!request.text.trim().is_empty(), "text must not be empty");
+        crate::language::qwen_language(&request.language)?;
         ensure!(
             (1..=2048).contains(&request.max_new_tokens),
             "generation limit must be between 1 and 2048"

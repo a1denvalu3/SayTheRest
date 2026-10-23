@@ -140,6 +140,7 @@ mod tests {
         let (_, Json(job)) = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                language: None,
                 text: "Imported voice preview".into(),
                 source: SpeechSource::Desktop,
                 queue_policy: QueuePolicy::Append,
@@ -215,6 +216,7 @@ mod tests {
         let result = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                language: None,
                 text: "Please read".into(),
                 source: SpeechSource::Desktop,
                 queue_policy: QueuePolicy::Append,

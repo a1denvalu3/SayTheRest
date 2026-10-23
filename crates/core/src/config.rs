@@ -266,6 +266,24 @@ impl EngineConfig {
         )
     }
 
+    pub fn language(&self) -> Option<&str> {
+        match self {
+            Self::Qwen3Tts(config) => Some(&config.language),
+            Self::Qwen3TtsOnnx(config) => Some(&config.language),
+            _ => None,
+        }
+    }
+
+    pub fn set_language(&mut self, language: &str) -> Result<()> {
+        let target = match self {
+            Self::Qwen3Tts(config) => &mut config.language,
+            Self::Qwen3TtsOnnx(config) => &mut config.language,
+            _ => bail!("the selected model does not support language selection"),
+        };
+        *target = crate::language::qwen_language(language)?.name.into();
+        Ok(())
+    }
+
     pub fn requires_reference(&self) -> bool {
         matches!(self, Self::SherpaOnnxPocket(config) if config.reference_audio.is_none())
             || matches!(self, Self::Qwen3TtsOnnx(_))
@@ -277,7 +295,17 @@ impl EngineConfig {
             || matches!(self, Self::Qwen3Tts(qwen) if matches!(qwen.mode,Qwen3TtsMode::VoiceClone))
     }
 
+    pub fn supports_native_speaking_pace(&self) -> bool {
+        matches!(
+            self,
+            Self::SherpaOnnxVits(_) | Self::SherpaOnnxKokoro(_) | Self::SherpaOnnxKitten(_)
+        )
+    }
+
     pub fn validate(&self) -> Result<()> {
+        if let Some(language) = self.language() {
+            crate::language::qwen_language(language)?;
+        }
         match self {
             Self::Phonon(phonon) => {
                 for name in ["config.json", "tokenizer.json", "model.q8.gguf"] {

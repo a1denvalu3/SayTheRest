@@ -137,6 +137,7 @@ impl ResidentSpeechWorker {
         Ok((engine, fallback))
     }
     pub fn load(config: &Qwen3TtsConfig) -> Result<Self> {
+        let language = crate::language::qwen_language(&config.language)?.name;
         let mode = match config.mode {
             Qwen3TtsMode::CustomVoice => "custom-voice",
             Qwen3TtsMode::VoiceDesign => "voice-design",
@@ -161,13 +162,14 @@ impl ResidentSpeechWorker {
             .with_context(|| format!("failed to start {}", config.python.display()))?;
         Self::from_child(
             child,
-            &config.language,
+            language,
             config.speaker.clone(),
             config.voice_description.clone(),
         )
     }
 
     pub fn load_native(config: &QwenOnnxConfig) -> Result<Self> {
+        let language = crate::language::qwen_language(&config.language)?.name;
         let runtime = config
             .runtime
             .as_ref()
@@ -205,7 +207,7 @@ impl ResidentSpeechWorker {
                     config.worker.display()
                 )
             })?;
-        Self::from_child(child, &config.language, None, None)
+        Self::from_child(child, language, None, None)
     }
 
     fn from_child(
