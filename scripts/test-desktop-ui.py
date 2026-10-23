@@ -7,6 +7,7 @@ configuration and API tokens are isolated from the user's running application.
 import argparse
 import json
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -21,7 +22,9 @@ def main():
     parser.add_argument('--snapshots',type=Path,help='Save native Linux WebKit screenshots in this directory')
     parser.add_argument('--script',type=Path,help='Native UI acceptance script (defaults to player checks)')
     parser.add_argument('--window',choices=['player','main'],default='player')
-    parser.add_argument('--voice-file',type=Path,help='Phonon voice file for management UI acceptance')
+    parser.add_argument('--voice-file',type=Path,help='Reference audio or exported voice file for management UI acceptance')
+    parser.add_argument('--timeout',type=float,default=120,help='Native test deadline in seconds')
+    parser.add_argument('--model-cache',type=Path,help='Seed isolated model asset directories for a verified-cache install test')
     args=parser.parse_args()
     repo=Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix='sayit-native-ui-') as temporary:
@@ -37,6 +40,8 @@ def main():
                  SAYIT_DESKTOP_TEST_MODE='1',SAYIT_SERVICE_URL=f'http://127.0.0.1:{port}/v1',
                  SAYIT_UI_TEST_SCRIPT=str(driver),SAYIT_UI_TEST_RESULT=str(root/'result.json'),SAYIT_UI_TEST_WINDOW=args.window)
         data=root/'state/sayit'
+        if args.model_cache:
+            shutil.copytree(args.model_cache,data/'models',dirs_exist_ok=True)
         if args.snapshots:
             args.snapshots.mkdir(parents=True,exist_ok=True)
             env['SAYIT_UI_TEST_SNAPSHOTS']=str(args.snapshots.resolve())
@@ -54,7 +59,7 @@ def main():
                         assert time.monotonic()<deadline,'service startup timed out'
                         time.sleep(0.1)
                 desktop=subprocess.Popen([str(repo/'target/debug/sayit-desktop')],env=env,stdout=desktop_log,stderr=subprocess.STDOUT)
-                desktop.wait(timeout=120)
+                desktop.wait(timeout=args.timeout)
                 assert (root/'result.json').exists(),'native UI did not return an acceptance result'
                 result=json.loads((root/'result.json').read_text())
                 print(json.dumps(result,indent=2))

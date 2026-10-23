@@ -52,10 +52,10 @@ Exact parity tracks SayIt's v0.2.0 bundled catalog at upstream commit
 family works. Each entry requires an installed-model synthesis smoke test on Linux and Windows,
 and capability tests for every feature advertised by that model.
 
-- [ ] Phonon 31M English, custom voice files, and voice-pack updates (catalog, 38 presets, file import, and cached updates pass Linux acceptance; Windows matrix pending)
+- [x] Phonon 31M English, custom voice files, and voice-pack updates (38 presets, three import formats, exact streamed archives, cancellation, recovery, and cached updates pass Linux and Windows)
 - [ ] Kokoro (synthesis exists; multilingual/preset coverage remains)
 - [x] Kitten Mini and Kitten Nano (real synthesis, progressive callbacks, worker transport, and cancellation pass on Linux and Windows)
-- [ ] Pocket TTS (cloning exists; preset coverage remains)
+- [ ] Pocket TTS (eight presets, optional cloning, and update repair pass Linux real-model and native UI acceptance; Windows matrix pending)
 - [ ] Soprano
 - [ ] Qwen3 TTS Base, VoiceDesign, and CustomVoice
 - [ ] Chatterbox, Chatterbox Turbo, and Chatterbox Multilingual
@@ -191,6 +191,45 @@ device, plus all presets, imported formats, progressive delivery, exact archives
 cancellation, and recovery against its packaged worker. Linux native
 UI/device evidence does not establish Windows GUI or audio-device behavior.
 
+Pocket installs the eight upstream English preset recordings: Alba, Azelma,
+Cosette, Eponine, Fantine, Javert, Jean, and Marius. Each recording is pinned to
+an immutable source revision and SHA-256 digest; its recording license and
+attribution accompany the installation. The voice list shows each recording's
+license separately from the model license. A default preset enables immediate
+speech while keeping local voice cloning optional. Existing installations keep
+their saved profiles and can update to obtain the preset pack.
+
+Real Linux resident-runtime acceptance synthesized all eight presets, including
+24/32/48 kHz reference resampling, compared every streamed sample with the saved
+WAV, and verified cancellation, recovery, explicit profile-reference overrides,
+and isolated-worker transport. Sherpa's post-generation silence scaling is
+disabled so an archived recording cannot differ from audio already streamed to
+the player. Pocket uses its natural speaking pace; listening speed remains a
+separate player control. The same change passed Piper's real-device progressive
+playback regression.
+
+Updates validate installed weight checksums before reuse. A real isolated-service
+acceptance run restored a missing selected Eponine recording in 6.53 s without
+redownloading valid weights or losing the selected voice. Unit coverage also
+checks legacy configurations, optional cloning, damaged weight rejection, and
+cancellation preserving the installed files.
+
+The native Linux management UI passed 15 checks with both a fresh download and
+verified cached assets, covering default playback, optional profile creation, preset/profile
+switching, licensing, previews, reader text, history isolation, and profile
+deletion. A separate native run verifies that the visible catalog reflects an
+installation started through the API without reopening the model pane. Model
+descriptors read installation progress before filesystem state to avoid a
+terminal status paired with a stale uninstalled flag; the visible catalog also
+refreshes periodically after external changes. The fresh-download repeat passed
+after these changes; Windows model-family acceptance remains pending.
+
+```sh
+scripts/test-pocket-model.sh <rust-target>
+python3 scripts/test-preset-model-install.py --model pocket-tts-int8
+python3 scripts/test-desktop-ui.py --config /path/to/preset/config.json --window main --script scripts/desktop-pocket-ui-smoke.js --voice-file /path/to/permitted-reference.wav --timeout 720
+```
+
 Linux and Windows release candidates must pass the same behavior suite. Platform-specific selection tests run against representative native, Chromium, Electron, terminal, and office applications. Model/provider changes must compare audio quality and report cold start, warm p50/p95/p99, peak memory, time to first audio, and real-time factor on the supported hardware matrix.
 
 The job journal is written through a synced temporary file with a last-known-good backup. On
@@ -200,6 +239,13 @@ causing an endless service crash loop. Automated tests cover malformed and missi
 backup restoration, retry, cleanup, and the repeated-interruption guard.
 
 ## Release evidence
+
+Commit `b7d1d38` passed the complete Linux/Windows matrix, including real Phonon
+synthesis with all 38 presets, F32/F16/BF16 voice imports, cancellation and
+recovery, and installation/update against the packaged service. This establishes
+the Phonon family coverage; Windows GUI and audio-device acceptance remain separate.
+GitHub Actions run:
+[39956271231](https://github.com/a1denvalu3/SayTheRest/actions/runs/39956271231).
 
 The compact-player commit `664dc6e` passed the Linux/Windows workspace, reader
 timing, package, real Kitten, and clipboard-preservation matrix. Native Linux UI

@@ -1,0 +1,155 @@
+{
+  "repository": "kyutai/tts-voices",
+  "revision": "323332d33f997de8394f24a193e1a76df720e01a",
+  "voices": [
+    {
+      "id": "alba",
+      "source_path": "alba-mackenna/casual.wav",
+      "path": "voices/alba.wav",
+      "size": 958542,
+      "sha256": "46264e83cb99115c3d210260e029117566d9c64f20266d10daa78107759ede3e",
+      "language": "en",
+      "name": "Alba",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices/blob/323332d33f997de8394f24a193e1a76df720e01a/README.md",
+      "attribution": "Alba MacKenna, Casual voice; distributed by Kyutai."
+    },
+    {
+      "id": "azelma",
+      "source_path": "vctk/p303_023_enhanced.wav",
+      "path": "voices/azelma.wav",
+      "size": 823852,
+      "sha256": "60e3d26cdf2efdec5df712152c839928f4d5522821e6554ae11fd96c57ab1026",
+      "language": "en",
+      "name": "Azelma",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices/blob/323332d33f997de8394f24a193e1a76df720e01a/README.md",
+      "attribution": "VCTK speaker p303, CSTR at the University of Edinburgh; enhanced by ai-coustics and curated by Kyutai."
+    },
+    {
+      "id": "cosette",
+      "source_path": "expresso/ex04-ex02_confused_001_channel1_499s.wav",
+      "path": "voices/cosette.wav",
+      "size": 960044,
+      "sha256": "7f8a92c1b60040f93d82093099a456f0fa997c715065078800a8e95db60bea77",
+      "language": "en",
+      "name": "Cosette",
+      "license": "CC-BY-NC-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices/blob/323332d33f997de8394f24a193e1a76df720e01a/README.md",
+      "attribution": "Expresso conversational recording ex04-ex02_confused_001, channel 1 at 499 seconds; selected by Kyutai."
+    },
+    {
+      "id": "eponine",
+      "source_path": "vctk/p262_023_enhanced.wav",
+      "path": "voices/eponine.wav",
+      "size": 716330,
+      "sha256": "a13c27fb47627b05223691a0ef2974358a18c886e6c2f9d2762ff1d02c20926b",
+      "language": "en",
+      "name": "Eponine",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices/blob/323332d33f997de8394f24a193e1a76df720e01a/README.md",
+      "attribution": "VCTK speaker p262, CSTR at the University of Edinburgh; enhanced by ai-coustics and curated by Kyutai."
+    },
+    {
+      "id": "fantine",
+      "source_path": "vctk/p244_023_enhanced.wav",
+      "path": "voices/fantine.wav",
+      "size": 674852,
+      "sha256": "5f07d4e2a3f20a15572aae885156b43ef3fc12ef3812996fd135680d9956448b",
+      "language": "en",
+      "name": "Fantine",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices/blob/323332d33f997de8394f24a193e1a76df720e01a/README.md",
+      "attribution": "VCTK speaker p244, CSTR at the University of Edinburgh; enhanced by ai-coustics and curated by Kyutai."
+    },
+    {
+      "id": "javert",
+      "source_path": "voice-donations/Butter.wav",
+      "path": "voices/javert.wav",
+      "size": 480044,
+      "sha256": "b889e080eec3efa824bddaf875b4f531d75464f88128d08941ae648d9d3ade70",
+      "language": "en",
+      "name": "Javert",
+      "license": "CC0-1.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices/blob/323332d33f997de8394f24a193e1a76df720e01a/README.md",
+      "attribution": "Butter recording from the Kyutai Unmute Voice Donation Project."
+    },
+    {
+      "id": "jean",
+      "source_path": "ears/p010/freeform_speech_01_enhanced.wav",
+      "path": "voices/jean.wav",
+      "size": 640044,
+      "sha256": "a5a00cb7dd838006bb43f6a9d0c505e79be7ddca9ef1e472d80191d22cb8a784",
+      "language": "en",
+      "name": "Jean",
+      "license": "CC-BY-NC-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices/blob/323332d33f997de8394f24a193e1a76df720e01a/README.md",
+      "attribution": "EARS speaker p010; enhanced by ai-coustics and curated by Kyutai."
+    },
+    {
+      "id": "marius",
+      "source_path": "voice-donations/Selfie.wav",
+      "path": "voices/marius.wav",
+      "size": 480044,
+      "sha256": "076968c3122520f3412eb7090e8c1c3f75fe57be1e24a2f96465583d84c71e16",
+      "language": "en",
+      "name": "Marius",
+      "license": "CC0-1.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices/blob/323332d33f997de8394f24a193e1a76df720e01a/README.md",
+      "attribution": "Selfie recording from the Kyutai Unmute Voice Donation Project."
+    }
+  ],
+  "source_code": "https://github.com/kyutai-labs/pocket-tts/blob/44cb63eaa4144f32ff80863968515165a5554353/pocket_tts/utils/utils.py",
+  "archive": {
+    "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2",
+    "sha256": "2f3b88823cbbb9bf0b2477ec8ae7b3fec417b3a87b6bb5f256dba66f2ad967cb",
+    "root": "sherpa-onnx-pocket-tts-int8-2026-01-26"
+  },
+  "files": [
+    {
+      "path": "lm_flow.int8.onnx",
+      "size": 9962530,
+      "sha256": "8d627d235c44a597da908e1085ebe241cbbe358964c502c5a5063d18851a5529"
+    },
+    {
+      "path": "lm_main.int8.onnx",
+      "size": 76341079,
+      "sha256": "bfc0c7e7e3d72864fa3bb2ee499f62f21ddc1474b885f5f3ca570f8be73e787e"
+    },
+    {
+      "path": "encoder.onnx",
+      "size": 72713165,
+      "sha256": "e8f2f6d301ffb96e398b138a7dc6d3038622d236044636b73d920bab85890260"
+    },
+    {
+      "path": "decoder.int8.onnx",
+      "size": 22693618,
+      "sha256": "12b0857402d31aead94df19d6783b4350d1f740e811f3a3202c70ad89ae11eea"
+    },
+    {
+      "path": "text_conditioner.onnx",
+      "size": 16388343,
+      "sha256": "0b84e837d7bfaf2c896627b03e3f080320309f37f4fc7df7698c644f7ba5e6b1"
+    },
+    {
+      "path": "vocab.json",
+      "size": 69478,
+      "sha256": "6fb646346cf931016f70c4921aab0900ce7a304b893cb02135c74e294abfea01"
+    },
+    {
+      "path": "token_scores.json",
+      "size": 123616,
+      "sha256": "5be2f278caf9b9800741f0fd82bff677f4943ec764c356f907213434b622d958"
+    },
+    {
+      "path": "LICENSE",
+      "size": 18655,
+      "sha256": "fe7b4ce83b8381cc5b216bbb4af73c570688d1b819c73bbaed8ca401f4677cd6"
+    },
+    {
+      "path": "README.md",
+      "size": 389,
+      "sha256": "2d05e627fe4fa3c625e822efcd20ad2ca62eb3b4fc1d67ae2625cb106b4f689c"
+    }
+  ]
+}

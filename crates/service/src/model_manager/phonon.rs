@@ -19,6 +19,9 @@ pub(super) fn presets(config: Option<&EngineConfig>) -> Vec<ModelPresetVoice> {
                 .map(|voice| (voice.id.as_str(), voice.language.as_str())),
         )
         .map(|(id, language)| ModelPresetVoice {
+            license: None,
+            license_url: None,
+            attribution: None,
             id: id.into(),
             name: if id == "default" {
                 "Default".into()

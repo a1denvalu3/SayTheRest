@@ -51,48 +51,6 @@ impl PhononConfig {
     }
 }
 
-#[cfg(test)]
-mod phonon_tests {
-    use super::*;
-
-    #[test]
-    fn selected_voice_stays_inside_the_model_and_is_required() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = PhononConfig {
-            worker: native_worker_path(),
-            model: directory.path().into(),
-            voice: "default".into(),
-        };
-        for voice in [
-            "",
-            ".",
-            "..",
-            "../escape",
-            "..\\escape",
-            "C:voice",
-            "voice\nname",
-        ] {
-            config.voice = voice.into();
-            assert!(config.voice_path().is_err(), "must reject {voice:?}");
-        }
-        config.voice = "Old Mortlake".into();
-        assert_eq!(
-            config.voice_path().unwrap(),
-            directory.path().join("voices/Old Mortlake.safetensors")
-        );
-        for file in ["config.json", "tokenizer.json", "model.q8.gguf"] {
-            fs::write(directory.path().join(file), b"fixture").unwrap();
-        }
-        assert!(
-            EngineConfig::Phonon(config.clone()).validate().is_err(),
-            "a missing selected voice cannot fall back silently"
-        );
-        fs::create_dir(directory.path().join("voices")).unwrap();
-        fs::write(config.voice_path().unwrap(), b"fixture").unwrap();
-        EngineConfig::Phonon(config).validate().unwrap();
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct QwenOnnxConfig {
     #[serde(default = "native_worker_path")]
@@ -181,6 +139,10 @@ pub struct PocketConfig {
     pub num_threads: usize,
     #[serde(default = "default_steps")]
     pub num_steps: usize,
+    #[serde(default)]
+    pub reference_audio: Option<PathBuf>,
+    #[serde(default)]
+    pub preset_voice: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -305,8 +267,14 @@ impl EngineConfig {
     }
 
     pub fn requires_reference(&self) -> bool {
-        matches!(self, Self::SherpaOnnxPocket(_) | Self::Qwen3TtsOnnx(_))
+        matches!(self, Self::SherpaOnnxPocket(config) if config.reference_audio.is_none())
+            || matches!(self, Self::Qwen3TtsOnnx(_))
             || matches!(self, Self::Qwen3Tts(qwen) if matches!(qwen.mode, Qwen3TtsMode::VoiceClone))
+    }
+
+    pub fn supports_voice_cloning(&self) -> bool {
+        matches!(self, Self::SherpaOnnxPocket(_) | Self::Qwen3TtsOnnx(_))
+            || matches!(self, Self::Qwen3Tts(qwen) if matches!(qwen.mode,Qwen3TtsMode::VoiceClone))
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -386,6 +354,12 @@ impl EngineConfig {
             Self::SherpaOnnxPocket(pocket) => {
                 if pocket.num_threads == 0 || pocket.num_steps == 0 {
                     bail!("num_threads and num_steps must be at least 1");
+                }
+                if let Some(reference) = &pocket.reference_audio {
+                    anyhow::ensure!(
+                        reference.is_file(),
+                        "Pocket preset reference is not installed"
+                    );
                 }
                 for (name, path) in [
                     ("lm_flow", &pocket.lm_flow),
@@ -467,5 +441,47 @@ impl EngineConfig {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod phonon_tests {
+    use super::*;
+
+    #[test]
+    fn selected_voice_stays_inside_the_model_and_is_required() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = PhononConfig {
+            worker: native_worker_path(),
+            model: directory.path().into(),
+            voice: "default".into(),
+        };
+        for voice in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "..\\escape",
+            "C:voice",
+            "voice\nname",
+        ] {
+            config.voice = voice.into();
+            assert!(config.voice_path().is_err(), "must reject {voice:?}");
+        }
+        config.voice = "Old Mortlake".into();
+        assert_eq!(
+            config.voice_path().unwrap(),
+            directory.path().join("voices/Old Mortlake.safetensors")
+        );
+        for file in ["config.json", "tokenizer.json", "model.q8.gguf"] {
+            fs::write(directory.path().join(file), b"fixture").unwrap();
+        }
+        assert!(
+            EngineConfig::Phonon(config.clone()).validate().is_err(),
+            "a missing selected voice cannot fall back silently"
+        );
+        fs::create_dir(directory.path().join("voices")).unwrap();
+        fs::write(config.voice_path().unwrap(), b"fixture").unwrap();
+        EngineConfig::Phonon(config).validate().unwrap();
     }
 }

@@ -39,6 +39,7 @@ pub struct PlayerSnapshot {
     pub amplitudes: Vec<f32>,
     pub error: Option<String>,
     pub spoken_chunks: Vec<PlaybackTextChunk>,
+    pub preview_text: Option<String>,
 }
 
 /// Retains original mono PCM for seeking. The device callback consumes ready
@@ -59,6 +60,7 @@ struct AudioBuffer {
     amplitude_energy: f64,
     amplitude_frames: usize,
     spoken_chunks: Vec<PlaybackTextChunk>,
+    preview_text: Option<String>,
 }
 impl Default for AudioBuffer {
     fn default() -> Self {
@@ -78,6 +80,7 @@ impl Default for AudioBuffer {
             amplitude_energy: 0.0,
             amplitude_frames: 0,
             spoken_chunks: Vec::new(),
+            preview_text: None,
         }
     }
 }
@@ -146,6 +149,11 @@ impl AudioBuffer {
 
 type Reply = mpsc::Sender<Result<()>>;
 enum Command {
+    PreviewText {
+        id: Uuid,
+        text: String,
+        reply: Reply,
+    },
     TextBlock {
         id: Uuid,
         start: usize,
@@ -231,6 +239,9 @@ impl PlaybackController {
     pub fn restore_chunks(&self, id: Uuid, chunks: Vec<PlaybackTextChunk>) -> Result<()> {
         self.request(|reply| Command::RestoreChunks { id, chunks, reply })
     }
+    pub fn set_preview_text(&self, id: Uuid, text: String) -> Result<()> {
+        self.request(|reply| Command::PreviewText { id, text, reply })
+    }
     pub fn abort_stream(&self, id: Uuid) -> Result<()> {
         self.tx.send(Command::Abort(id))?;
         Ok(())
@@ -315,6 +326,7 @@ impl PlaybackController {
             amplitudes,
             error: state.error.clone(),
             spoken_chunks: state.spoken_chunks.clone(),
+            preview_text: state.preview_text.clone(),
         }
     }
 }
@@ -411,6 +423,16 @@ fn player_thread(rx: mpsc::Receiver<Command>, shared: Arc<Mutex<AudioBuffer>>) {
     loop {
         match rx.recv_timeout(Duration::from_millis(5)) {
             Ok(command) => match command {
+                Command::PreviewText { id, text, reply } => {
+                    let mut state = shared.lock().unwrap();
+                    let result = if state.job_id == Some(id) {
+                        state.preview_text = Some(text);
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!("speech was stopped or replaced"))
+                    };
+                    let _ = reply.send(result);
+                }
                 Command::TextBlock {
                     id,
                     start,

@@ -1046,10 +1046,12 @@ async fn snapshot(State(state): State<ServiceState>) -> Json<ServiceSnapshot> {
         PlayerStatus::Finished => {
             // Completion includes publication to history. The audio callback
             // can finish shortly before the job monitor journals the result.
+            // Untracked preset previews have no history entry to wait for.
             let archived = inner
                 .jobs
                 .iter()
-                .any(|job| Some(job.id) == player.job_id && job.state == JobState::Completed);
+                .find(|job| Some(job.id) == player.job_id)
+                .is_none_or(|job| job.state == JobState::Completed);
             (
                 Some(if archived {
                     JobState::Completed
@@ -1067,6 +1069,7 @@ async fn snapshot(State(state): State<ServiceState>) -> Json<ServiceSnapshot> {
     let spoken_text = active_job_id
         .and_then(|id| inner.jobs.iter().find(|job| job.id == id))
         .map(|job| job.text.clone())
+        .or(player.preview_text)
         .unwrap_or_default();
     let current_title = speech_title(&spoken_text);
     let spoken_chunks = if player.spoken_chunks.is_empty() && player.generation_complete {
@@ -1844,7 +1847,7 @@ async fn create_voice(
         )
     };
     let config = EngineConfig::from_path(&config_path).map_err(unprocessable)?;
-    if !config.requires_reference() {
+    if !config.supports_voice_cloning() {
         return Err((
             StatusCode::CONFLICT,
             "the selected model does not support voice cloning".into(),
@@ -2192,7 +2195,11 @@ async fn preview_preset_voice(
         "Hello! This is a preview of {}. Choose the voice that makes listening feel effortless.",
         voice.name
     );
-    let speaking_pace = if matches!(config, EngineConfig::Phonon(_)) {
+    let preview_text = text.clone();
+    let speaking_pace = if matches!(
+        config,
+        EngineConfig::Phonon(_) | EngineConfig::SherpaOnnxPocket(_)
+    ) {
         1.0
     } else {
         state.inner.read().await.settings.speaking_pace
@@ -2229,6 +2236,10 @@ async fn preview_preset_voice(
         .map_err(unprocessable);
     let _ = fs::remove_file(state.audio_dir.join(format!("preview-{preview_id}.wav")));
     playback?;
+    state
+        .player
+        .set_preview_text(preview_id, preview_text)
+        .map_err(unprocessable)?;
     state.emit("state");
     Ok(StatusCode::ACCEPTED)
 }
@@ -2258,10 +2269,11 @@ async fn submit_job(
     let config = EngineConfig::from_path(&config_path).map_err(unprocessable)?;
     let requires_voice_profile = config.requires_reference();
     let phonon = matches!(config, EngineConfig::Phonon(_));
-    if phonon && submission.speaking_pace.is_some_and(|pace| pace != 1.0) {
+    let natural_pace = phonon || matches!(config, EngineConfig::SherpaOnnxPocket(_));
+    if natural_pace && submission.speaking_pace.is_some_and(|pace| pace != 1.0) {
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
-            "Phonon uses natural speaking pace; adjust playback speed to listen faster or slower"
+            "The selected model uses natural speaking pace; adjust playback speed to listen faster or slower"
                 .into(),
         ));
     }
@@ -2378,7 +2390,7 @@ async fn submit_job(
         created_at: chrono::Utc::now(),
         error: None,
         voice_profile_id,
-        speaking_pace: if phonon {
+        speaking_pace: if natural_pace {
             Some(1.0)
         } else {
             submission.speaking_pace
@@ -3271,12 +3283,14 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
-    async fn pocket_tts_rejects_jobs_until_a_voice_is_selected() {
+    async fn pocket_requires_a_profile_only_until_a_default_reference_is_installed() {
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("pocket.json");
         let asset = directory.path().join("unused");
         fs::write(&asset, []).unwrap();
-        let config = EngineConfig::SherpaOnnxPocket(sayit_core::PocketConfig {
+        let mut config = EngineConfig::SherpaOnnxPocket(sayit_core::PocketConfig {
+            reference_audio: None,
+            preset_voice: None,
             executable: asset.clone(),
             lm_flow: asset.clone(),
             lm_main: asset.clone(),
@@ -3290,7 +3304,8 @@ for line in sys.stdin:
             num_steps: 5,
         });
         fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
-        let state = ServiceState::open(directory.path().join("data"), Some(config_path)).unwrap();
+        let state =
+            ServiceState::open(directory.path().join("data"), Some(config_path.clone())).unwrap();
 
         let error = submit_job(
             State(state.clone()),
@@ -3309,6 +3324,38 @@ for line in sys.stdin:
         assert_eq!(error.0, StatusCode::CONFLICT);
         assert!(error.1.contains("requires a cloned voice"));
         assert!(state.inner.read().await.jobs.is_empty());
+
+        let EngineConfig::SherpaOnnxPocket(pocket) = &mut config else {
+            unreachable!()
+        };
+        pocket.reference_audio = Some(pocket.encoder.clone());
+        pocket.preset_voice = Some("alba".into());
+        // Both the active copy and original config are deliberately updated;
+        // the service resolves the managed copy after bootstrap.
+        for path in [config_path, state.models.config_path("pocket-tts-int8")] {
+            fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+        }
+        state.inner.write().await.settings.speaking_pace = 1.25;
+        let submission = |pace| {
+            Json(SpeechSubmission {
+                text: "A preset is ready without a saved profile.".into(),
+                voice_profile_id: None,
+                source: SpeechSource::Desktop,
+                queue_policy: QueuePolicy::Append,
+                confirmed_long_text: false,
+                speaking_pace: pace,
+            })
+        };
+        let (_, Json(job)) = submit_job(State(state.clone()), submission(None))
+            .await
+            .unwrap();
+        assert_eq!(job.voice_profile_id, None);
+        assert_eq!(job.speaking_pace, Some(1.0));
+        let error = submit_job(State(state), submission(Some(1.25)))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(error.1.contains("natural speaking pace"));
     }
 
     #[tokio::test]
@@ -3767,6 +3814,8 @@ for line in sys.stdin:
             speaker_id: 0,
         });
         let pocket = EngineConfig::SherpaOnnxPocket(sayit_core::PocketConfig {
+            reference_audio: None,
+            preset_voice: None,
             executable: "tts".into(),
             lm_flow: assets.join("flow"),
             lm_main: assets.join("main"),

@@ -8,8 +8,10 @@ Your text, voices, and generated audio stay local.
 
 - **Speak from anywhere.** Select text and press **Ctrl–Alt–S**, or explicitly
   read the clipboard with **Ctrl–Alt–V**. Both shortcuts are configurable.
-- **Choose your voice.** Download Piper, Kokoro, Kitten, PocketTTS, or Qwen3 TTS
-  models in the app. Preview built-in voices before selecting one.
+- **Choose your voice.** Download Piper, Kokoro, Kitten, PocketTTS, Phonon, or Qwen3 TTS
+  models in the app. Preview built-in voices before selecting one. PocketTTS
+  includes eight presets and optional cloning; Phonon offers 38 presets and
+  local voice-file import.
 - **Clone voices locally.** Record or import a short reference in Voice Studio.
   Samples are checked for quality and never uploaded.
 - **Stay in control.** Pause, seek, change playback speed, follow spoken text,

@@ -244,6 +244,8 @@ pub struct ModelDescriptor {
     #[serde(default)]
     pub resident: bool,
     pub selected: bool,
+    #[serde(default)]
+    pub requires_voice_profile: bool,
     pub capabilities: ModelCapabilities,
     pub download: Option<DownloadSnapshot>,
     pub quality_note: String,
@@ -262,6 +264,12 @@ pub struct ModelPresetVoice {
     pub name: String,
     pub language: String,
     pub selected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
 }
 
 fn natural_speaking_pace() -> f64 {

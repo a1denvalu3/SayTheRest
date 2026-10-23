@@ -54,6 +54,9 @@ jobs:
       - name: Test Phonon install, voices, streaming, and recovery
         shell: bash
         run: ./scripts/test-phonon.sh '${{ matrix.target }}'
+      - name: Test Pocket presets, cloning, cancellation, and installation
+        shell: bash
+        run: ./scripts/test-pocket-model.sh '${{ matrix.target }}'
       - name: Audit Linux packages
         if: runner.os == 'Linux'
         shell: bash

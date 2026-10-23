@@ -75,6 +75,7 @@ impl SherpaOnnxEngine {
             EngineConfig::SherpaOnnxPocket(config) => {
                 let reference = request
                     .reference_audio
+                    .or(config.reference_audio.as_deref())
                     .context("the selected PocketTTS model requires a voice profile")?;
                 vec![
                     Self::arg("pocket-lm-flow", &config.lm_flow),
@@ -129,6 +130,7 @@ impl SherpaOnnxEngine {
         args.push(Self::arg("output-filename", request.output));
         args.push(format!("--provider={provider}"));
         args.push(format!("--num-threads={threads}"));
+        args.push("--tts-silence-scale=1.0".into());
         args.push(request.text.to_owned());
         Ok(args)
     }
@@ -313,6 +315,8 @@ mod tests {
     #[test]
     fn pocket_requires_reference_audio() {
         let config = PocketConfig {
+            reference_audio: None,
+            preset_voice: None,
             executable: "tts".into(),
             lm_flow: "flow".into(),
             lm_main: "main".into(),

@@ -25,6 +25,7 @@ use std::{
 const SAYIT_CONFIG: &str = "sayit-config.json";
 const QWEN_BASE_REVISION: &str = "5d83992436eae1d760afd27aff78a71d676296fc";
 mod phonon;
+mod pocket;
 // Original config.json from the immutable catalog revision. Older installers
 // overwrote this architecture with EngineConfig, so repair must work offline.
 // https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/blob/5d83992436eae1d760afd27aff78a71d676296fc/config.json
@@ -149,15 +150,15 @@ const CATALOG: &[CatalogEntry] = &[
         name: "PocketTTS INT8",
         archive_root: "sherpa-onnx-pocket-tts-int8-2026-01-26",
         url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2",
-        sha256: "2f3b88823cbbb9bf0b2477ec8ae7b3fec417b3a87b6bb5f256dba66f2ad967cb",
-        size: 98_336_520,
+        sha256: sayit_core::pocket::MODEL_ARCHIVE_SHA256,
+        size: 104_070_272,
         languages: &["en"],
-        license: "MIT",
-        license_url: "https://github.com/kyutai-labs/pocket-tts",
-        quality_note: "Expressive zero-shot English voice cloning from a short reference.",
+        license: "CC-BY-4.0",
+        license_url: "https://huggingface.co/kyutai/pocket-tts",
+        quality_note: "Eight upstream English presets and optional local voice cloning. Presets show their recording licenses.",
         speed_note: "Heavier than Piper; streaming-capable and still designed for local CPU use.",
         capabilities: ModelCapabilitiesStatic {
-            preset_voices: false,
+            preset_voices: true,
             voice_cloning: true,
             streaming: true,
         },
@@ -441,6 +442,9 @@ impl ModelManager {
         let mut descriptors = CATALOG
             .iter()
             .map(|entry| {
+                // Publication precedes terminal progress. Read progress first
+                // so completion cannot accompany a stale `installed=false`.
+                let download = self.progress.lock().unwrap().get(entry.id).cloned();
                 let installed = self.config_path(entry.id).is_file();
                 let installed_config = EngineConfig::from_path(&self.config_path(entry.id)).ok();
                 let native = match &installed_config {
@@ -497,6 +501,7 @@ impl ModelManager {
                     update_available: self.catalog_update_available(entry),
                     resident: false,
                     selected: installed && selected == Some(entry.id),
+                    requires_voice_profile: installed_config.as_ref().map_or(entry.capabilities.voice_cloning,EngineConfig::requires_reference),
                     capabilities: ModelCapabilities {
                         voice_file_import: entry.id == "phonon-31m-en",
                         preset_voices: entry.capabilities.preset_voices,
@@ -505,16 +510,17 @@ impl ModelManager {
                         streaming: entry.capabilities.streaming,
                         long_form: true,
                     },
-                    download: self.progress.lock().unwrap().get(entry.id).cloned(),
+                    download,
                     quality_note: entry.quality_note.into(),
                     speed_note: speed_note.into(),
                     benchmark: benchmarks.get(entry.id).cloned(),
                     recommended: recommended == Some(entry.id),
                     supports_native_speaking_pace: !entry.capabilities.voice_cloning && entry.id != "phonon-31m-en",
-                    preset_voices: if entry.id=="phonon-31m-en" {phonon::presets(installed_config.as_ref())} else {entry
+                    preset_voices: if entry.id=="phonon-31m-en" {phonon::presets(installed_config.as_ref())} else if entry.id=="pocket-tts-int8" {pocket::presets(installed_config.as_ref())} else {entry
                         .preset_voices
                         .iter()
                         .map(|id| ModelPresetVoice {
+                            license: None,license_url: None,attribution: None,
                             id: (*id).into(),
                             name: preset_voice_name(id),
                             language: preset_voice_language(id).into(),
@@ -524,43 +530,41 @@ impl ModelManager {
                 }
             })
             .collect::<Vec<_>>();
-        descriptors.extend(
-            self.community
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|entry| ModelDescriptor {
-                    inference_backend: None,
-                    weight_precision: None,
-                    inference_device: None,
-                    id: entry.id.clone(),
-                    name: entry.name.clone(),
-                    languages: Vec::new(),
-                    size_bytes: entry.size,
-                    license: entry.license.clone(),
-                    license_url: entry.license_url.clone(),
-                    installed: self.config_path(&entry.id).is_file(),
-                    update_available: false,
-                    resident: false,
-                    selected: self.config_path(&entry.id).is_file()
-                        && selected == Some(entry.id.as_str()),
-                    capabilities: ModelCapabilities {
-                        voice_file_import: false,
-                        preset_voices: !entry.voice_cloning,
-                        voice_cloning: entry.voice_cloning,
-                        voice_description: false,
-                        streaming: entry.voice_cloning,
-                        long_form: true,
-                    },
-                    download: None,
-                    quality_note: "Community model — not tested by sayIt.".into(),
-                    speed_note: "Run the local benchmark before relying on this model.".into(),
-                    benchmark: benchmarks.get(&entry.id).cloned(),
-                    recommended: recommended == Some(entry.id.as_str()),
-                    supports_native_speaking_pace: !entry.voice_cloning,
-                    preset_voices: Vec::new(),
-                }),
-        );
+        descriptors.extend(self.community.lock().unwrap().iter().map(|entry| {
+            ModelDescriptor {
+                inference_backend: None,
+                weight_precision: None,
+                inference_device: None,
+                id: entry.id.clone(),
+                name: entry.name.clone(),
+                languages: Vec::new(),
+                size_bytes: entry.size,
+                license: entry.license.clone(),
+                license_url: entry.license_url.clone(),
+                installed: self.config_path(&entry.id).is_file(),
+                update_available: false,
+                resident: false,
+                selected: self.config_path(&entry.id).is_file()
+                    && selected == Some(entry.id.as_str()),
+                requires_voice_profile: EngineConfig::from_path(&self.config_path(&entry.id))
+                    .map_or(entry.voice_cloning, |config| config.requires_reference()),
+                capabilities: ModelCapabilities {
+                    voice_file_import: false,
+                    preset_voices: !entry.voice_cloning,
+                    voice_cloning: entry.voice_cloning,
+                    voice_description: false,
+                    streaming: entry.voice_cloning,
+                    long_form: true,
+                },
+                download: None,
+                quality_note: "Community model — not tested by sayIt.".into(),
+                speed_note: "Run the local benchmark before relying on this model.".into(),
+                benchmark: benchmarks.get(&entry.id).cloned(),
+                recommended: recommended == Some(entry.id.as_str()),
+                supports_native_speaking_pace: !entry.voice_cloning,
+                preset_voices: Vec::new(),
+            }
+        }));
         descriptors
     }
 
@@ -586,6 +590,9 @@ impl ModelManager {
     pub fn preset_voice_config(&self, id: &str, voice_id: &str) -> Result<EngineConfig> {
         if id == "phonon-31m-en" {
             return self.phonon_preset_config(voice_id);
+        }
+        if id == "pocket-tts-int8" {
+            return self.pocket_preset_config(voice_id);
         }
         let entry = CATALOG
             .iter()
@@ -622,6 +629,9 @@ impl ModelManager {
     fn catalog_update_available(&self, entry: &CatalogEntry) -> bool {
         if entry.id == "phonon-31m-en" {
             return self.phonon_update_available();
+        }
+        if entry.id == "pocket-tts-int8" {
+            return self.pocket_update_available();
         }
         if let Ok(EngineConfig::Qwen3TtsOnnx(_)) =
             EngineConfig::from_path(&self.config_path(entry.id))
@@ -1202,6 +1212,9 @@ impl ModelManager {
         if entry.id == "phonon-31m-en" {
             return self.install_phonon(cancelled);
         }
+        if entry.id == "pocket-tts-int8" && self.install_pocket_from_verified_files(cancelled)? {
+            return Ok(());
+        }
         if entry.hf_repository.is_some() {
             self.install_hugging_face_catalog(entry, cancelled)
         } else {
@@ -1363,7 +1376,16 @@ impl ModelManager {
         let staging = downloads.join(format!("{}-staging", entry.id));
         let result = (|| {
             let mut response = reqwest::blocking::get(url)?.error_for_status()?;
-            let total = response.content_length().unwrap_or(entry.size);
+            let total = response.content_length().unwrap_or(entry.size)
+                + if entry.id == "pocket-tts-int8" {
+                    sayit_core::pocket::voice_pack()
+                        .voices
+                        .iter()
+                        .map(|voice| voice.size)
+                        .sum()
+                } else {
+                    0
+                };
             let mut output = File::create(&archive_path)?;
             let mut downloaded = 0u64;
             let mut buffer = [0u8; 128 * 1024];
@@ -1407,7 +1429,17 @@ impl ModelManager {
             let unpacked = staging.join(entry.archive_root);
             validate_model_files(entry.id, &unpacked)?;
             let destination = self.root.join(entry.id);
-            let config = config_for(entry.id, &destination, &self.executable)?;
+            let mut config = config_for(entry.id, &destination, &self.executable)?;
+            if entry.id == "pocket-tts-int8" {
+                self.prepare_pocket_presets(
+                    &unpacked,
+                    &destination,
+                    &mut config,
+                    cancelled,
+                    &mut downloaded,
+                    total,
+                )?;
+            }
             fs::write(
                 unpacked.join("config.json"),
                 serde_json::to_vec_pretty(&config)?,
@@ -1416,7 +1448,11 @@ impl ModelManager {
                 unpacked.join("catalog-install.json"),
                 serde_json::to_vec_pretty(&CatalogInstallManifest {
                     id: entry.id.into(),
-                    sha256: expected_sha256.into(),
+                    sha256: if entry.id == "pocket-tts-int8" {
+                        sayit_core::pocket::manifest_fingerprint()
+                    } else {
+                        expected_sha256.into()
+                    },
                 })?,
             )?;
             replace_model_directory(&unpacked, &destination)?;
@@ -1683,6 +1719,8 @@ fn relocate_config(
         })),
         EngineConfig::SherpaOnnxPocket(config) => {
             Ok(EngineConfig::SherpaOnnxPocket(PocketConfig {
+                reference_audio: config.reference_audio.map(relocate).transpose()?,
+                preset_voice: config.preset_voice,
                 executable: executable.into(),
                 lm_flow: relocate(config.lm_flow)?,
                 lm_main: relocate(config.lm_main)?,
@@ -1770,7 +1808,7 @@ fn validate_community_metadata(display_name: &str, license: &str, license_url: &
 }
 
 fn supports_voice_cloning(config: &EngineConfig) -> bool {
-    config.requires_reference()
+    config.supports_voice_cloning()
 }
 
 fn valid_hf_revision(value: &str) -> bool {
@@ -1809,15 +1847,21 @@ fn config_requirements(config: &EngineConfig) -> Result<Vec<(String, bool)>> {
             }
             Ok(required)
         }
-        EngineConfig::SherpaOnnxPocket(config) => Ok(vec![
-            path(&config.lm_flow, false)?,
-            path(&config.lm_main, false)?,
-            path(&config.encoder, false)?,
-            path(&config.decoder, false)?,
-            path(&config.text_conditioner, false)?,
-            path(&config.vocab_json, false)?,
-            path(&config.token_scores_json, false)?,
-        ]),
+        EngineConfig::SherpaOnnxPocket(config) => {
+            let mut required = vec![
+                path(&config.lm_flow, false)?,
+                path(&config.lm_main, false)?,
+                path(&config.encoder, false)?,
+                path(&config.decoder, false)?,
+                path(&config.text_conditioner, false)?,
+                path(&config.vocab_json, false)?,
+                path(&config.token_scores_json, false)?,
+            ];
+            if let Some(reference) = &config.reference_audio {
+                required.push(path(reference, false)?);
+            }
+            Ok(required)
+        }
         EngineConfig::SherpaOnnxKokoro(config) => {
             let mut required = vec![
                 path(&config.model, false)?,
@@ -1999,6 +2043,8 @@ fn config_for(id: &str, root: &Path, executable: &Path) -> Result<EngineConfig> 
             speaker_id: 0,
         })),
         "pocket-tts-int8" => Ok(EngineConfig::SherpaOnnxPocket(PocketConfig {
+            reference_audio: None,
+            preset_voice: None,
             executable: executable.into(),
             lm_flow: root.join("lm_flow.int8.onnx"),
             lm_main: root.join("lm_main.int8.onnx"),

@@ -17,13 +17,16 @@ def main():
     parser.add_argument('--model',default='phonon-31m-en')
     parser.add_argument('--bin-dir',type=Path,default=Path('target/release'))
     parser.add_argument('--install-only',action='store_true',help='Do not open an audio device')
+    parser.add_argument('--config',type=Path,help='Optional baseline config for a development build without a bundled runtime')
     args=parser.parse_args()
     binary=args.bin_dir.resolve()/('sayit-service.exe' if os.name=='nt' else 'sayit-service')
     with tempfile.TemporaryDirectory(prefix='sayit-model-install-') as directory:
         root=Path(directory)
         with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
         with (root/'service.log').open('w+') as log:
-            process=subprocess.Popen([str(binary),'--data-dir',str(root),'--port',str(port)],stdout=log,stderr=subprocess.STDOUT)
+            command=[str(binary),'--data-dir',str(root),'--port',str(port)]
+            if args.config:command+=['--config',str(args.config.resolve())]
+            process=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT)
             try:
                 deadline=time.monotonic()+15
                 while not (root/'api-token').exists():
@@ -62,6 +65,12 @@ def main():
                 api(f"models/{args.model}/voices/{chosen['id']}/select",{})
                 assert next(voice for voice in model()['preset_voices'] if voice['id']==chosen['id'])['selected']
                 manifest=root/'models'/args.model/'catalog-install.json';previous=manifest.stat().st_mtime_ns
+                if args.model=='pocket-tts-int8':
+                    # Repair a missing selected preset during an update without
+                    # losing the user's choice or redownloading valid weights.
+                    config=json.loads((manifest.parent/'config.json').read_text())
+                    Path(config['reference_audio']).unlink()
+                    assert model()['update_available'],'missing preset must offer repair'
                 start=time.monotonic();api(f'models/{args.model}/update',{})
                 def updated():
                     try:changed=manifest.stat().st_mtime_ns!=previous
@@ -70,6 +79,8 @@ def main():
                 until(updated,timeout=600,interval=1)
                 update=time.monotonic()-start
                 assert next(voice for voice in model()['preset_voices'] if voice['id']==chosen['id'])['selected'],'update lost the selected voice'
+                if args.model=='pocket-tts-int8':
+                    assert Path(config['reference_audio']).is_file(),'update did not restore the selected preset'
                 revision_reload=None
                 if not args.install_only:
                     def speak():

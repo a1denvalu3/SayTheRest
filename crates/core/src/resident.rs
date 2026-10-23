@@ -199,6 +199,7 @@ pub struct ResidentSherpaEngine {
     speaker_id: i32,
     num_steps: i32,
     needs_reference: bool,
+    default_reference: Option<PathBuf>,
     _library: Library,
 }
 
@@ -292,7 +293,9 @@ impl ResidentSherpaEngine {
             }
         };
         native.max_num_sentences = 2;
-        native.silence_scale = 0.2;
+        // Callbacks contain the original PCM. A post-generation silence edit
+        // would change audio that has already reached the streaming player.
+        native.silence_scale = 1.0;
         let tts = unsafe { create(&native) };
         if tts.is_null() {
             bail!("sherpa-onnx could not load the selected model")
@@ -309,6 +312,10 @@ impl ResidentSherpaEngine {
             speaker_id,
             num_steps,
             needs_reference,
+            default_reference: match config {
+                EngineConfig::SherpaOnnxPocket(config) => config.reference_audio.clone(),
+                _ => None,
+            },
             _library: library,
         })
     }
@@ -333,13 +340,14 @@ impl ResidentSherpaEngine {
             read_reference(
                 request
                     .reference_audio
+                    .or(self.default_reference.as_deref())
                     .context("the selected model requires a voice profile")?,
             )?
         } else {
             (Vec::new(), 0)
         };
         let generation = GenerationConfig {
-            silence_scale: 0.2,
+            silence_scale: 1.0,
             speed: request.speaking_pace as f32,
             sid: self.speaker_id,
             reference_audio: if reference.is_empty() {
@@ -516,6 +524,138 @@ mod tests {
     use super::{ResidentSherpaEngine, c_api_library};
     use crate::{EngineConfig, KittenConfig, SynthesisRequest, wav_duration_seconds};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    #[ignore = "requires real Pocket assets, all eight public voice recordings, runtime and worker via SAYIT_POCKET_TEST_*/SAYIT_TTS_TEST_RUNTIME/SAYIT_TEST_WORKER"]
+    fn pocket_presets_stream_without_a_user_voice_profile() {
+        use std::{
+            sync::atomic::{AtomicBool, Ordering},
+            time::Instant,
+        };
+        let asset =
+            |key| PathBuf::from(std::env::var_os(key).expect("real-model acceptance asset"));
+        let model = asset("SAYIT_POCKET_TEST_MODEL");
+        let voices = asset("SAYIT_POCKET_TEST_VOICES");
+        let directory = tempfile::tempdir().unwrap();
+        let config = |voice: &str| {
+            EngineConfig::SherpaOnnxPocket(crate::PocketConfig {
+                executable: asset("SAYIT_TTS_TEST_RUNTIME"),
+                lm_flow: model.join("lm_flow.int8.onnx"),
+                lm_main: model.join("lm_main.int8.onnx"),
+                encoder: model.join("encoder.onnx"),
+                decoder: model.join("decoder.int8.onnx"),
+                text_conditioner: model.join("text_conditioner.onnx"),
+                vocab_json: model.join("vocab.json"),
+                token_scores_json: model.join("token_scores.json"),
+                provider: "cpu".into(),
+                num_threads: 2,
+                num_steps: 5,
+                reference_audio: Some(voices.join(format!("{voice}.wav"))),
+                preset_voice: Some(voice.into()),
+            })
+        };
+        for name in [
+            "alba", "azelma", "cosette", "eponine", "fantine", "javert", "jean", "marius",
+        ] {
+            let config = config(name);
+            config.validate().unwrap();
+            assert!(!config.requires_reference());
+            assert!(config.supports_voice_cloning());
+            let mut engine = ResidentSherpaEngine::load(&config).unwrap();
+            let output = directory.path().join(format!("{name}.wav"));
+            let start = Instant::now();
+            let mut first = None;
+            let mut callbacks = 0;
+            let mut samples = Vec::new();
+            engine
+                .synthesize_streaming(
+                    &SynthesisRequest {
+                        text: "Hello from this voice. These words arrive while the next piece of speech is still being decoded.",
+                        output: &output,
+                        reference_audio: None,
+                        reference_text: None,
+                        speaking_pace: 1.0,
+                    },
+                    None,
+                    &mut |pcm, rate| {
+                        assert!(!output.exists());
+                        assert_eq!(rate, 24_000);
+                        assert!(pcm.iter().all(|sample| sample.is_finite()));
+                        first.get_or_insert(start.elapsed());
+                        callbacks += 1;
+                        samples.extend_from_slice(pcm);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            let mut wav = hound::WavReader::open(&output).unwrap();
+            assert_eq!(wav.len() as usize, samples.len());
+            assert!(samples.len() > 2400);
+            assert!(callbacks > 1, "speech must arrive in multiple PCM chunks");
+            for (archived, streamed) in wav.samples::<i16>().zip(&samples) {
+                assert_eq!(
+                    archived.unwrap(),
+                    (streamed * 32767.0).clamp(-32768.0, 32767.0) as i16
+                );
+            }
+            let samples = samples.len();
+            eprintln!(
+                "Pocket {name}: first PCM {:.3}s, complete {:.3}s, {samples} samples",
+                first.unwrap().as_secs_f64(),
+                start.elapsed().as_secs_f64()
+            );
+        }
+        let config = config("alba");
+        let mut engine = ResidentSherpaEngine::load(&config).unwrap();
+        let output = directory.path().join("cancelled.wav");
+        let request = SynthesisRequest {
+            text: "This recording should stop before it is finished.",
+            output: &output,
+            reference_audio: None,
+            reference_text: None,
+            speaking_pace: 1.0,
+        };
+        let cancelled = AtomicBool::new(false);
+        assert!(
+            engine
+                .synthesize_streaming(&request, Some(&cancelled), &mut |_, _| {
+                    cancelled.store(true, Ordering::Relaxed);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!output.exists());
+        let recovered = directory.path().join("override.wav");
+        let reference = voices.join("marius.wav");
+        engine
+            .synthesize(&SynthesisRequest {
+                output: &recovered,
+                reference_audio: Some(&reference),
+                ..request
+            })
+            .unwrap();
+        assert!(wav_duration_seconds(&recovered).unwrap() > 0.1);
+        let isolated = directory.path().join("isolated.wav");
+        let mut samples = 0;
+        crate::SherpaOnnxEngine::from_config(config)
+            .synthesize_streaming_with_worker(
+                &SynthesisRequest {
+                    output: &isolated,
+                    ..request
+                },
+                None,
+                &mut |pcm, _| {
+                    samples += pcm.len();
+                    Ok(())
+                },
+                &asset("SAYIT_TEST_WORKER"),
+            )
+            .unwrap();
+        assert_eq!(
+            hound::WavReader::open(isolated).unwrap().len() as usize,
+            samples
+        );
+    }
 
     #[test]
     fn resolves_c_api_next_to_the_packaged_runtime() {
