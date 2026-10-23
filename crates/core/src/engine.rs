@@ -13,6 +13,10 @@ pub struct SynthesisRequest<'a> {
     pub speaking_pace: f64,
 }
 
+/// Mono PCM delivered during synthesis, in source sample order. Returning an
+/// error cancels generation. The sink runs on the inference thread.
+pub type AudioSink<'a> = dyn FnMut(&[f32], u32) -> Result<()> + 'a;
+
 pub trait TtsEngine {
     fn synthesize(&self, request: &SynthesisRequest<'_>) -> Result<()>;
     fn name(&self) -> &'static str;
@@ -134,6 +138,63 @@ impl SherpaOnnxEngine {
             EngineConfig::Qwen3Tts(config) => config.python.clone(),
             EngineConfig::Qwen3TtsOnnx(config) => config.worker.clone(),
         }
+    }
+
+    pub(crate) fn synthesize_streaming(
+        &self,
+        request: &SynthesisRequest<'_>,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
+        sink: &mut AudioSink<'_>,
+    ) -> Result<()> {
+        self.synthesize_streaming_with_worker(
+            request,
+            cancelled,
+            sink,
+            &crate::native_worker_path(),
+        )
+    }
+
+    pub(crate) fn synthesize_streaming_with_worker(
+        &self,
+        request: &SynthesisRequest<'_>,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
+        sink: &mut AudioSink<'_>,
+        executable: &Path,
+    ) -> Result<()> {
+        // Isolate CUDA provider faults from the service, while retaining native
+        // callbacks. The worker exits after this request; CPU engines stay resident.
+        let parent = request
+            .output
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let pending = tempfile::NamedTempFile::new_in(parent)?.into_temp_path();
+        let bounded = SynthesisRequest {
+            output: pending.as_ref(),
+            ..request.clone()
+        };
+        let (mut worker, fallback) = crate::ResidentQwenEngine::load_sherpa_with_worker(
+            &self.config,
+            &self.environment,
+            executable,
+        )?;
+        let result = worker.synthesize_streaming(&bounded, cancelled, sink);
+        drop(worker); // Drain every provider log before reporting success.
+        anyhow::ensure!(
+            self.config.provider() != "cuda"
+                || !fallback.load(std::sync::atomic::Ordering::Relaxed),
+            "CUDA execution provider fell back to CPU during inference"
+        );
+        result?;
+        anyhow::ensure!(
+            crate::wav_duration_seconds(pending.as_ref())? > 0.0,
+            "inference generated empty audio"
+        );
+        pending
+            .persist(request.output)
+            .map_err(|error| error.error)?;
+        Ok(())
     }
 }
 

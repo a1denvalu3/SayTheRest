@@ -4,6 +4,7 @@ set -euo pipefail
 TARGET=${1:?usage: test-kitten-models.sh <rust-target>}
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 MODEL_ROOT=$(mktemp -d)
+trap 'rm -rf -- "$MODEL_ROOT"' EXIT
 
 fetch_and_extract() {
   name=$1
@@ -28,15 +29,18 @@ case "$TARGET" in
   *windows*)
     TEST_ROOT=$(cygpath -w "$MODEL_ROOT")
     TEST_RUNTIME=$(cygpath -w "$ROOT_DIR/dist/sayit-$TARGET/runtime/bin/sherpa-onnx-offline-tts.exe")
+    TEST_WORKER=$(cygpath -w "${SAYIT_TEST_WORKER:-$ROOT_DIR/dist/sayit-$TARGET/sayit-inference-worker.exe}")
     ;;
   *)
     TEST_ROOT=$MODEL_ROOT
     TEST_RUNTIME="$ROOT_DIR/dist/sayit-$TARGET/runtime/bin/sherpa-onnx-offline-tts"
+    TEST_WORKER=${SAYIT_TEST_WORKER:-$ROOT_DIR/dist/sayit-$TARGET/sayit-inference-worker}
     ;;
 esac
 
 SAYIT_KITTEN_TEST_ROOT="$TEST_ROOT" \
 SAYIT_TTS_TEST_RUNTIME="$TEST_RUNTIME" \
+SAYIT_TEST_WORKER="$TEST_WORKER" \
   cargo test -p sayit-core --locked --target "$TARGET" \
     resident::tests::kitten_models_synthesize_through_resident_runtime -- \
     --ignored --exact

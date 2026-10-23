@@ -533,6 +533,14 @@ impl NativeQwenPipeline {
     }
 
     pub fn synthesize(&mut self, request: &NativeRequest) -> Result<()> {
+        self.synthesize_streaming(request, &mut |_, _| Ok(()))
+    }
+
+    pub fn synthesize_streaming(
+        &mut self,
+        request: &NativeRequest,
+        sink: &mut crate::AudioSink<'_>,
+    ) -> Result<()> {
         ensure!(!request.text.trim().is_empty(), "text must not be empty");
         ensure!(
             (1..=2048).contains(&request.max_new_tokens),
@@ -567,10 +575,14 @@ impl NativeQwenPipeline {
                 sample_format: hound::SampleFormat::Int,
             },
         )?;
-        for text in text_chunks(&request.text, 400) {
+        for text in text_chunks(&request.text, 160) {
             let codes = self.generate(request, &text, &reference, &mut rng)?;
-            for sample in self.decode(&codes)? {
-                output.write_sample((sample.clamp(-1.0, 1.0) * 32767.0).round() as i16)?;
+            let samples = self.decode(&codes)?;
+            for chunk in samples.chunks(4096) {
+                for &sample in chunk {
+                    output.write_sample((sample.clamp(-1.0, 1.0) * 32767.0).round() as i16)?;
+                }
+                sink(chunk, SAMPLE_RATE as u32)?;
             }
         }
         output.finalize()?;

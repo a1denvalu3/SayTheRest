@@ -1,4 +1,4 @@
-use crate::{EngineConfig, SynthesisRequest};
+use crate::{AudioSink, EngineConfig, SynthesisRequest};
 use anyhow::{Context, Result, bail};
 use libloading::Library;
 use std::{
@@ -6,6 +6,7 @@ use std::{
     os::raw::c_char,
     path::{Path, PathBuf},
     ptr,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 #[repr(C)]
@@ -138,6 +139,55 @@ type Generate = unsafe extern "C" fn(
 ) -> *const GeneratedAudio;
 type DestroyAudio = unsafe extern "C" fn(*const GeneratedAudio);
 type WriteWave = unsafe extern "C" fn(*const f32, i32, i32, *const c_char) -> i32;
+type SampleRate = unsafe extern "C" fn(*const OfflineTts) -> i32;
+
+struct CallbackState<'a, 'b> {
+    sink: &'a mut AudioSink<'b>,
+    cancelled: Option<&'a AtomicBool>,
+    sample_rate: u32,
+    emitted: usize,
+    error: Option<anyhow::Error>,
+}
+
+unsafe extern "C" fn audio_callback(
+    samples: *const f32,
+    count: i32,
+    _: f32,
+    arg: *mut std::ffi::c_void,
+) -> i32 {
+    // SAFETY: generate is synchronous; its borrowed state and sample buffer are
+    // live throughout the callback. Never unwind through the C ABI.
+    let state = unsafe { &mut *arg.cast::<CallbackState<'_, '_>>() };
+    if state.error.is_some()
+        || state
+            .cancelled
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+    {
+        return 0;
+    }
+    if count <= 0 || samples.is_null() {
+        return 1;
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let samples = unsafe { std::slice::from_raw_parts(samples, count as usize) };
+        for chunk in samples.chunks(4096) {
+            (state.sink)(chunk, state.sample_rate)?;
+            state.emitted += chunk.len();
+        }
+        anyhow::Ok(())
+    }));
+    match result {
+        Ok(Ok(())) => 1,
+        Ok(Err(error)) => {
+            state.error = Some(error);
+            0
+        }
+        Err(_) => {
+            state.error = Some(anyhow::anyhow!("audio callback panicked"));
+            0
+        }
+    }
+}
 
 pub struct ResidentSherpaEngine {
     tts: *const OfflineTts,
@@ -145,6 +195,7 @@ pub struct ResidentSherpaEngine {
     generate: Generate,
     destroy_audio: DestroyAudio,
     write_wave: WriteWave,
+    sample_rate: u32,
     speaker_id: i32,
     num_steps: i32,
     needs_reference: bool,
@@ -173,6 +224,7 @@ impl ResidentSherpaEngine {
         let destroy_audio: DestroyAudio =
             unsafe { *library.get(b"SherpaOnnxDestroyOfflineTtsGeneratedAudio\0")? };
         let write_wave: WriteWave = unsafe { *library.get(b"SherpaOnnxWriteWave\0")? };
+        let sample_rate: SampleRate = unsafe { *library.get(b"SherpaOnnxOfflineTtsSampleRate\0")? };
 
         let mut strings = Vec::<CString>::new();
         let mut keep = |value: String| -> Result<*const c_char> {
@@ -249,6 +301,9 @@ impl ResidentSherpaEngine {
             generate,
             destroy_audio,
             write_wave,
+            sample_rate: unsafe { sample_rate(tts) }
+                .try_into()
+                .context("invalid model sample rate")?,
             speaker_id,
             num_steps,
             needs_reference,
@@ -257,6 +312,15 @@ impl ResidentSherpaEngine {
     }
 
     pub fn synthesize(&mut self, request: &SynthesisRequest<'_>) -> Result<()> {
+        self.synthesize_streaming(request, None, &mut |_, _| Ok(()))
+    }
+
+    pub fn synthesize_streaming(
+        &mut self,
+        request: &SynthesisRequest<'_>,
+        cancelled: Option<&AtomicBool>,
+        sink: &mut AudioSink<'_>,
+    ) -> Result<()> {
         if request.text.trim().is_empty() {
             bail!("text must not be empty")
         }
@@ -288,12 +352,49 @@ impl ResidentSherpaEngine {
             num_steps: self.num_steps,
             extra: ptr::null(),
         };
-        let audio =
-            unsafe { (self.generate)(self.tts, text.as_ptr(), &generation, None, ptr::null_mut()) };
+        let mut callback = CallbackState {
+            sink,
+            cancelled,
+            sample_rate: self.sample_rate,
+            emitted: 0,
+            error: None,
+        };
+        let audio = unsafe {
+            (self.generate)(
+                self.tts,
+                text.as_ptr(),
+                &generation,
+                Some(audio_callback),
+                (&mut callback as *mut CallbackState<'_, '_>).cast(),
+            )
+        };
         if audio.is_null() {
             bail!("sherpa-onnx synthesis failed")
         }
         let audio_ref = unsafe { &*audio };
+        // Some models return one complete block without invoking a callback.
+        if callback.emitted == 0
+            && callback.error.is_none()
+            && audio_ref.n > 0
+            && !audio_ref.samples.is_null()
+        {
+            unsafe {
+                audio_callback(
+                    audio_ref.samples,
+                    audio_ref.n,
+                    1.0,
+                    (&mut callback as *mut CallbackState<'_, '_>).cast(),
+                );
+            }
+        }
+        if let Some(error) = callback.error.take() {
+            unsafe { (self.destroy_audio)(audio) };
+            return Err(error);
+        }
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            unsafe { (self.destroy_audio)(audio) };
+            bail!("speech generation cancelled");
+        }
         let wrote = if audio_ref.n > 0 && audio_ref.sample_rate > 0 && !audio_ref.samples.is_null()
         {
             unsafe {
@@ -454,16 +555,78 @@ mod tests {
             let mut engine = ResidentSherpaEngine::load(&config).unwrap();
             let temporary = tempfile::tempdir().unwrap();
             let output = temporary.path().join(format!("{directory}.wav"));
+            let mut delivered = 0;
+            let mut callbacks = 0;
             engine
-                .synthesize(&SynthesisRequest {
-                    text: "Kitten speech runs through the resident native engine.",
-                    output: &output,
-                    reference_audio: None,
-                    reference_text: None,
-                    speaking_pace: 1.0,
-                })
+                .synthesize_streaming(
+                    &SynthesisRequest {
+                        text: "Kitten speech runs through the resident native engine.",
+                        output: &output,
+                        reference_audio: None,
+                        reference_text: None,
+                        speaking_pace: 1.0,
+                    },
+                    None,
+                    &mut |samples, sample_rate| {
+                        assert!(
+                            !output.exists(),
+                            "stream must precede final WAV publication"
+                        );
+                        assert!(sample_rate >= 16_000);
+                        assert!(samples.iter().all(|sample| sample.is_finite()));
+                        callbacks += 1;
+                        delivered += samples.len();
+                        Ok(())
+                    },
+                )
                 .unwrap();
             assert!(wav_duration_seconds(&output).unwrap() > 1.0);
+            let wav = hound::WavReader::open(&output).unwrap();
+            assert!(callbacks > 1);
+            assert_eq!(
+                delivered,
+                wav.len() as usize,
+                "stream must neither lose nor duplicate samples"
+            );
+            drop(engine);
+            if let Some(worker_path) = std::env::var_os("SAYIT_TEST_WORKER") {
+                let engine = crate::SherpaOnnxEngine::from_config(config.clone());
+                let worker_path = PathBuf::from(worker_path);
+                let output = temporary.path().join("isolated.wav");
+                let mut streamed = 0;
+                engine
+                    .synthesize_streaming_with_worker(
+                        &SynthesisRequest {
+                            text: "Speech also streams through the isolated worker.",
+                            output: &output,
+                            reference_audio: None,
+                            reference_text: None,
+                            speaking_pace: 1.0,
+                        },
+                        None,
+                        &mut |samples, _| {
+                            assert!(!output.exists());
+                            streamed += samples.len();
+                            Ok(())
+                        },
+                        &worker_path,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    streamed,
+                    hound::WavReader::open(&output).unwrap().len() as usize
+                );
+                let cancelled = std::sync::atomic::AtomicBool::new(false);
+                let aborted = temporary.path().join("cancelled.wav");
+                let result = engine.synthesize_streaming_with_worker(&SynthesisRequest {
+                    text: "This speech is interrupted. The following sentences must not finish generating. This is a cancellation acceptance check.",
+                    output: &aborted, reference_audio: None, reference_text: None, speaking_pace: 1.0,
+                }, Some(&cancelled), &mut |_, _| {
+                    cancelled.store(true, std::sync::atomic::Ordering::Relaxed); Ok(())
+                }, &worker_path);
+                assert!(result.unwrap_err().to_string().contains("cancelled"));
+                assert!(!aborted.exists());
+            }
         }
     }
 }

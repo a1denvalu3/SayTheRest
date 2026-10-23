@@ -89,11 +89,21 @@ pub struct PlaybackSnapshot {
     pub rate: f64,
     pub volume: f64,
     #[serde(default)]
+    pub buffering: bool,
+    #[serde(default = "finished_generation")]
+    pub generation_complete: bool,
+    #[serde(default)]
+    pub amplitudes: Vec<f32>,
+    #[serde(default)]
     pub current_title: String,
     #[serde(default)]
     pub spoken_text: String,
     #[serde(default)]
     pub spoken_chunks: Vec<PlaybackTextChunk>,
+}
+
+fn finished_generation() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -114,6 +124,9 @@ impl Default for PlaybackSnapshot {
             duration_seconds: 0.0,
             rate: 1.0,
             volume: 1.0,
+            buffering: false,
+            generation_complete: true,
+            amplitudes: Vec::new(),
             current_title: String::new(),
             spoken_text: String::new(),
             spoken_chunks: Vec::new(),
@@ -417,4 +430,21 @@ pub struct InferenceDeviceStatus {
 pub struct ModelBackendRequest {
     pub backend: String,
     pub precision: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_snapshots_remain_usable_by_streaming_clients() {
+        let playback: PlaybackSnapshot = serde_json::from_value(serde_json::json!({
+            "state": "playing", "job_id": null, "position_seconds": 1.0,
+            "duration_seconds": 10.0, "rate": 1.0, "volume": 1.0
+        }))
+        .unwrap();
+        assert!(playback.generation_complete);
+        assert!(!playback.buffering);
+        assert!(playback.amplitudes.is_empty());
+    }
 }

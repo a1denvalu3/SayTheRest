@@ -28,8 +28,9 @@ The copy fallback snapshots advertised raw formats (including text, HTML/RTF, im
 
 ## Player and history
 
-- [x] Tray/menu-bar status and compact player.
+- [ ] Tray/menu-bar status and compact player (tray command menu exists; compact popover remains).
 - [x] Play, pause, resume, stop, seek, skip forward/back, rate, and volume.
+- [x] Progressive PCM playback with buffering and pitch-preserving listening speed.
 - [x] Current title, progress, duration, current spoken text, and chunk separators.
 - [x] Persistent history with search, pinning, replay, regeneration, deletion, and audio export.
 - [x] Configurable history retention and disk quota.
@@ -45,30 +46,30 @@ The copy fallback snapshots advertised raw formats (including text, HTML/RTF, im
 
 ### SayIt model-family coverage
 
-Exact parity tracks SayIt's bundled catalog at upstream commit
-`e428efeeb2a98425a38c0282f5ea95d9090a250d`; a generic model importer is not evidence that a
+Exact parity tracks SayIt's v0.2.0 bundled catalog at upstream commit
+`37d49718bb58853945577a6845dce0cfde84c90d`; a generic model importer is not evidence that a
 family works. Each entry requires an installed-model synthesis smoke test on Linux and Windows,
 and capability tests for every feature advertised by that model.
 
-- [x] Kokoro
-- [ ] Kitten Mini and Kitten Nano (cross-platform synthesis passes; progressive playback remains)
-- [x] Pocket TTS
+- [ ] Phonon 31M English, custom voice files, and voice-pack updates
+- [ ] Kokoro (synthesis exists; multilingual/preset coverage remains)
+- [ ] Kitten Mini and Kitten Nano (progressive callback tests now run with both real models in the release matrix)
+- [ ] Pocket TTS (cloning exists; preset coverage remains)
 - [ ] Soprano
 - [ ] Qwen3 TTS Base, VoiceDesign, and CustomVoice
 - [ ] Chatterbox, Chatterbox Turbo, and Chatterbox Multilingual
 - [ ] OmniVoice
-- [ ] Fish Audio S2 Pro
 - [ ] Irodori
 - [ ] Vyvo
 - [ ] Orpheus BF16 and 4-bit
-- [ ] MOSS TTS and MOSS Nano
-- [ ] IndexTTS
-- [ ] Echo
-- [ ] Marvis
+- [ ] Breeze TTS 2 (experimental upstream)
+
+Fish Audio S2 Pro, MOSS TTS, MOSS Nano, IndexTTS, Echo, and Marvis are marked
+unavailable upstream. They are not requirements for parity with working upstream models.
 
 ## Voices
 
-- [x] Built-in voice and language selection where supported.
+- [ ] Built-in voice and language selection where supported (presets exist; general language controls remain).
 - [x] Per-model voice selection and speaking pace.
 - [ ] Voice descriptions where supported.
 - [x] Local recording/import, quality analysis, trimming, and voice cloning where supported.
@@ -79,13 +80,45 @@ and capability tests for every feature advertised by that model.
 ## Interfaces and operations
 
 - [x] Desktop onboarding, settings, diagnostics, updates, and launch-at-login.
-- [x] CLI parity for speech, status, jobs, models, voices, history, and playback control.
+- [ ] CLI parity (core commands exist; per-request model/language/voice overrides, waiting, and skill discovery remain).
 - [x] Versioned localhost REST API with scoped bearer tokens, rate limiting, event stream, and OpenAPI document.
 - [x] Crash-safe job journal and service recovery.
 - [x] Linux packages and Windows installer that need neither Cargo nor Python.
 - [x] No analytics, cloud inference, passive clipboard monitoring, or unexpected network access.
 
 ## Definition of done
+
+Implementation order, preserving the complete feature and UI scope:
+
+1. Progressive playback and pitch-preserving speed, verified with synthetic DSP signals and real local models.
+2. Compact tray player, amplitude waveform, and word-level reader with seeking and follow controls.
+3. Phonon and complete voice/language workflows, with real synthesis before advertising support.
+4. Guided onboarding, service recovery, diagnostics, API controls, and management settings.
+5. Remaining selectable model families, CLI compatibility, and history/export workflows.
+
+Correctness takes priority over checking off an item. A model catalog entry or
+passing mock does not establish real-model support; platform and hardware
+limitations must stay visible until the corresponding acceptance run succeeds.
+
+The playback implementation uses vendored Sonic for continuous tempo processing.
+Tests verify pitch, duration, progressive output, tail preservation, buffering,
+pause during generation, seeking, rate changes, and cancellation. Run
+`python3 scripts/test-streaming.py --config /path/to/installed/config.json`
+after building the service and worker for silent real-model/device acceptance in
+an isolated service. This never changes the live app's settings or history.
+
+On 2026-10-23, Linux acceptance with the installed Piper model observed playback
+before generation finished (first audio poll about 1.5 s, complete generation
+5.06 s, 68.58 s of archived source audio). Pause, seek, 1.5x listening speed, and
+stop during the next synthesis passed against an actual audio device at zero
+volume, including replay replacing an active synthesis. Real Kitten Mini and
+Nano tests covered direct callbacks and the isolated worker, exact archived
+sample counts, and cancellation without publishing incomplete audio. A native
+INT4 Qwen run with a synthetic Piper reference delivered, after model loading,
+first PCM at 52.13 s and completed at 65.36 s; its 245,760 streamed samples matched
+the final WAV. This establishes progressive delivery, while making clear that
+Qwen CPU first-audio latency still needs improvement. CUDA and Windows hardware
+acceptance are not established by these Linux CPU results.
 
 Linux and Windows release candidates must pass the same behavior suite. Platform-specific selection tests run against representative native, Chromium, Electron, terminal, and office applications. Model/provider changes must compare audio quality and report cold start, warm p50/p95/p99, peak memory, time to first audio, and real-time factor on the supported hardware matrix.
 

@@ -43,6 +43,7 @@ use uuid::Uuid;
 mod model_manager;
 mod player;
 pub mod qwen_runtime;
+mod stretch;
 use model_manager::ModelManager;
 use player::{PlaybackController, PlayerStatus};
 
@@ -254,6 +255,22 @@ impl ServiceState {
         tokio::spawn(async move { state.worker_loop().await });
         let state = self.clone();
         tokio::spawn(async move { state.model_unload_loop().await });
+        let state = self.clone();
+        tokio::spawn(async move {
+            // Two snapshots/second leave room for tray polling and management
+            // requests under the shared read-token limit of 240/minute. The UI
+            // interpolates position between these authoritative updates.
+            let mut interval = tokio::time::interval(Duration::from_millis(500));
+            let mut was_active = false;
+            loop {
+                interval.tick().await;
+                let active = state.player.snapshot().job_id.is_some();
+                if active || was_active {
+                    state.emit("playback");
+                }
+                was_active = active;
+            }
+        });
         self.notify.notify_one();
     }
 
@@ -325,7 +342,15 @@ impl ServiceState {
             return;
         };
         let output = self.audio_dir.join(format!("{}.wav", job.id));
-        let (reference_audio, reference_text, speaking_pace, refinement_steps, prefer_gpu) = {
+        let (
+            reference_audio,
+            reference_text,
+            speaking_pace,
+            refinement_steps,
+            prefer_gpu,
+            rate,
+            volume,
+        ) = {
             let inner = self.inner.read().await;
             let voice = job
                 .voice_profile_id
@@ -336,6 +361,8 @@ impl ServiceState {
                 job.speaking_pace.unwrap_or(inner.settings.speaking_pace),
                 voice.map(|voice| voice.refinement_steps),
                 inner.settings.compute_device != "cpu",
+                inner.settings.playback_rate,
+                inner.settings.volume,
             )
         };
         let text = job.text.clone();
@@ -343,6 +370,14 @@ impl ServiceState {
         let runtime = self.inference_runtime.clone();
         let last_device = self.last_inference_device.clone();
         let cancelled = self.synthesis_cancelled.clone();
+        if cancelled.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Err(error) = self.player.begin_stream(job.id, rate, volume) {
+            self.finish_job(job.id, Err(error)).await;
+            return;
+        }
+        let player = self.player.clone();
         let synthesis = tokio::task::spawn_blocking(move || -> Result<(PathBuf, f64)> {
             let mut config = EngineConfig::from_path(&config_path)?;
             if let (EngineConfig::SherpaOnnxPocket(pocket), Some(steps)) =
@@ -371,7 +406,7 @@ impl ServiceState {
             let slot = resident
                 .as_mut()
                 .context("resident engine was not loaded")?;
-            let result = slot.engine.synthesize_cancellable(
+            let result = slot.engine.synthesize_streaming(
                 &SynthesisRequest {
                     text: &text,
                     output: &output,
@@ -380,6 +415,14 @@ impl ServiceState {
                     speaking_pace,
                 },
                 Some(&cancelled),
+                &mut |samples, sample_rate| {
+                    anyhow::ensure!(
+                        !cancelled.load(Ordering::Relaxed),
+                        "speech generation cancelled"
+                    );
+                    player.append(job.id, sample_rate, samples)?;
+                    Ok(())
+                },
             );
             *last_device.lock().unwrap() = Some(inference_device(&slot.engine));
             if cancelled.load(Ordering::Relaxed) {
@@ -394,36 +437,40 @@ impl ServiceState {
         .await
         .unwrap_or_else(|error| Err(anyhow::anyhow!("synthesis worker crashed: {error}")));
         match synthesis {
-            Ok((path, duration)) => self.play_job(job.id, path, duration).await,
-            Err(error) => self.finish_job(job.id, Err(error)).await,
+            Ok((path, duration)) => {
+                if let Err(error) = self.player.finish_stream(job.id) {
+                    let _ = self.player.abort_stream(job.id);
+                    let _ = fs::remove_file(path);
+                    self.finish_job(job.id, Err(error)).await;
+                    return;
+                }
+                self.emit("playback");
+                self.wait_for_playback(job.id, path, duration).await;
+            }
+            Err(error) => {
+                let _ = self.player.abort_stream(job.id);
+                self.finish_job(job.id, Err(error)).await;
+            }
         }
     }
 
-    async fn play_job(&self, id: Uuid, path: PathBuf, duration: f64) {
-        let (rate, volume) = {
-            let mut inner = self.inner.write().await;
-            let Some(job) = inner.jobs.iter_mut().find(|job| job.id == id) else {
-                return;
-            };
-            if job.state == JobState::Cancelled {
-                let _ = fs::remove_file(&path);
-                return;
-            }
-            job.state = JobState::Playing;
-            (inner.settings.playback_rate, inner.settings.volume)
-        };
-        if let Err(error) = self.player.play(id, path.clone(), rate, volume) {
-            self.finish_job(id, Err(error)).await;
-            return;
-        }
+    async fn wait_for_playback(&self, id: Uuid, path: PathBuf, duration: f64) {
         loop {
             let snapshot = self.player.snapshot();
-            if matches!(snapshot.status, PlayerStatus::Finished | PlayerStatus::Idle) {
+            if let Some(error) = snapshot.error {
+                let _ = self.player.abort_stream(id);
+                let _ = fs::remove_file(&path);
+                self.finish_job(id, Err(anyhow::anyhow!(error))).await;
+                return;
+            }
+            if snapshot.job_id != Some(id)
+                || matches!(snapshot.status, PlayerStatus::Finished | PlayerStatus::Idle)
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        let _ = self.player.stop();
+        let _ = self.player.abort_stream(id);
         if self
             .inner
             .read()
@@ -897,8 +944,16 @@ async fn snapshot(State(state): State<ServiceState>) -> Json<ServiceSnapshot> {
         .find(|job| job.state == JobState::Synthesizing);
     let (playback_state, active_job_id) = match player.status {
         PlayerStatus::Playing => (Some(JobState::Playing), player.job_id),
+        PlayerStatus::Buffering => (
+            Some(if player.duration_seconds > 0.0 {
+                JobState::Playing
+            } else {
+                JobState::Synthesizing
+            }),
+            player.job_id,
+        ),
         PlayerStatus::Paused => (Some(JobState::Paused), player.job_id),
-        PlayerStatus::Idle | PlayerStatus::Finished => (
+        PlayerStatus::Idle | PlayerStatus::Finished | PlayerStatus::Failed => (
             processing.map(|_| JobState::Synthesizing),
             processing.map(|job| job.id),
         ),
@@ -925,6 +980,9 @@ async fn snapshot(State(state): State<ServiceState>) -> Json<ServiceSnapshot> {
             duration_seconds: player.duration_seconds,
             rate: player.rate,
             volume: player.volume,
+            buffering: player.status == PlayerStatus::Buffering,
+            generation_complete: player.generation_complete,
+            amplitudes: player.amplitudes,
             current_title,
             spoken_text,
             spoken_chunks,
@@ -1093,6 +1151,9 @@ async fn replay_history(
         (path, inner.settings.playback_rate, inner.settings.volume)
     };
     let previously_active = state.player.snapshot().job_id;
+    if previously_active.is_some_and(|active| active != id) {
+        state.synthesis_cancelled.store(true, Ordering::Relaxed);
+    }
     state.player.stop().map_err(internal_error)?;
     state
         .player
@@ -1106,15 +1167,18 @@ async fn replay_history(
     let replay_state = state.clone();
     tokio::spawn(async move {
         loop {
-            if matches!(
-                replay_state.player.snapshot().status,
-                PlayerStatus::Finished | PlayerStatus::Idle
-            ) {
+            let player = replay_state.player.snapshot();
+            if player.job_id != Some(id)
+                || matches!(
+                    player.status,
+                    PlayerStatus::Finished | PlayerStatus::Idle | PlayerStatus::Failed
+                )
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        let _ = replay_state.player.stop();
+        let _ = replay_state.player.abort_stream(id);
         {
             let mut inner = replay_state.inner.write().await;
             mark_replay_finished(&mut inner, id);
@@ -1131,7 +1195,10 @@ async fn replay_history(
 fn mark_replay_started(inner: &mut InnerState, replay_id: Uuid, active_id: Option<Uuid>) {
     if let Some(active) = active_id.filter(|active| *active != replay_id)
         && let Some(job) = inner.jobs.iter_mut().find(|job| job.id == active)
-        && matches!(job.state, JobState::Playing | JobState::Paused)
+        && matches!(
+            job.state,
+            JobState::Synthesizing | JobState::Playing | JobState::Paused
+        )
     {
         job.state = JobState::Cancelled;
     }
@@ -2486,6 +2553,10 @@ mod tests {
         inner.jobs[1].state = JobState::Playing;
         mark_replay_finished(&mut inner, replay_id);
         assert_eq!(inner.jobs[1].state, JobState::Completed);
+
+        inner.jobs[0].state = JobState::Synthesizing;
+        mark_replay_started(&mut inner, replay_id, Some(active_id));
+        assert_eq!(inner.jobs[0].state, JobState::Cancelled);
     }
 
     #[tokio::test]

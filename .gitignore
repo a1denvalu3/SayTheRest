@@ -2,6 +2,7 @@
 /dist/
 /models/
 /output/
+__pycache__/
 *.wav
 !.github/fixtures/*.wav
 .env

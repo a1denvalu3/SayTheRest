@@ -12,6 +12,15 @@
       "controlToken": { "type": "http", "scheme": "bearer", "description": "Read/write per-user token." }
     },
     "schemas": {
+      "PlaybackProgress": {
+        "type": "object",
+        "description": "Additive fields on /state.playback. duration_seconds is generated source audio, independent of listening speed. Seeking is limited to generated audio. PCM can play before generation_complete becomes true; buffering does not mean the job finished.",
+        "properties": {
+          "buffering": { "type": "boolean", "description": "Waiting for more playable audio. Position does not advance while buffering." },
+          "generation_complete": { "type": "boolean", "description": "All synthesis has completed; remaining buffered audio can still be playing or paused." },
+          "amplitudes": { "type": "array", "maxItems": 1024, "items": { "type": "number", "minimum": 0 }, "description": "Source-audio RMS waveform bins in chronological order, downsampled for long documents." }
+        }
+      },
       "ModelBackendRequest": {
         "type": "object",
         "required": ["backend"],

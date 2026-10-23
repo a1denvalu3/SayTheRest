@@ -17,7 +17,7 @@ pub use config::{
     QwenOnnxConfig, VitsConfig, native_worker_path,
 };
 pub use device::{CudaDevice, TorchFlavor};
-pub use engine::{SherpaOnnxEngine, SynthesisRequest, TtsEngine};
+pub use engine::{AudioSink, SherpaOnnxEngine, SynthesisRequest, TtsEngine};
 pub use inference::{InferenceDevice, InferenceRuntime, ManagedEngine};
 pub use qwen::ResidentQwenEngine;
 pub use resident::ResidentSherpaEngine;

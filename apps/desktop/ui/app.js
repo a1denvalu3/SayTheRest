@@ -1,6 +1,10 @@
 const invoke = window.__TAURI__.core.invoke;
 const saveFile = window.__TAURI__.dialog.save;
 const $ = (selector) => document.querySelector(selector);
+$('#rate').replaceChildren(...Array.from({length:51},(_,index)=>{
+  const rate=Number((0.5+index*0.05).toFixed(2));
+  const option=document.createElement('option');option.value=String(rate);option.textContent=`${rate}×`;return option;
+}));
 const views = {player:'Listen without leaving.',models:'Choose the engine.',voices:'A voice, held locally.',history:'What you heard.',settings:'Make it yours.'};
 let snapshot = null;
 let historyItems = [];
@@ -50,7 +54,7 @@ function renderSpokenText(playback){const container=$('#spoken-text');if(!playba
 async function renderPlayer(state){
   const p=state.playback;
   const active=Boolean(p.job_id)&&['playing','paused'].includes(p.state);
-  const generating=p.state==='synthesizing';
+  const generating=Boolean(p.job_id)&&(p.state==='synthesizing'||p.generation_complete===false);
   const progress=p.duration_seconds?Math.min(100,p.position_seconds/p.duration_seconds*100):0;
   $('#position').textContent=time(p.position_seconds);
   $('#duration').textContent=time(p.duration_seconds);
@@ -63,10 +67,12 @@ async function renderPlayer(state){
   toggle.textContent=p.state==='paused'?'▶':'Ⅱ';
   toggle.setAttribute('aria-label',p.state==='paused'?'Resume playback':'Pause playback');
   toggle.disabled=!active;
-  document.querySelectorAll('[data-control=seek-back],[data-control=seek-forward],[data-control=stop]').forEach(button=>button.disabled=!active);
+  document.querySelectorAll('[data-control=seek-back],[data-control=seek-forward]').forEach(button=>button.disabled=!active);
+  document.querySelector('[data-control=stop]').disabled=!(active||generating);
   $('#rate').value=String(p.rate);
   $('#volume').value=p.volume;
   $('#playback-status').textContent=p.state==='paused'?'Paused':p.state==='playing'?(state.queue_depth?`Speaking · ${state.queue_depth} queued`:'Speaking'):generating?(state.queue_depth?`Generating locally · ${state.queue_depth} queued`:'Generating speech locally'):state.queue_depth?`${state.queue_depth} item${state.queue_depth===1?'':'s'} queued`:'Ready for selected text';
+  if(p.buffering&&p.state!=='paused')$('#playback-status').textContent=p.duration_seconds>0?'Buffering speech…':'Preparing speech locally…';
   const indicator=$('#generation-indicator');
   indicator.hidden=!generating;
   $('#generation-detail').textContent=state.queue_depth?`Generating locally · ${state.queue_depth} queued`:'Generating speech locally';
@@ -266,9 +272,9 @@ invoke('desktop_settings').then(showShortcuts).catch(console.error);
 checkForUpdates();
 setInterval(()=>refresh(document.querySelector('.nav-item.active').dataset.view,false),15000);
 setInterval(pollModelProgress,1000);
-setInterval(()=>{if(snapshot?.playback.state==='playing'&&!scrubbing){snapshot.playback.position_seconds=Math.min(snapshot.playback.duration_seconds||Infinity,(snapshot.playback.position_seconds||0)+1);renderPlayer(snapshot)}},1000);
+setInterval(()=>{if(snapshot?.playback.state==='playing'&&!snapshot.playback.buffering&&!scrubbing){snapshot.playback.position_seconds=Math.min(snapshot.playback.duration_seconds||Infinity,(snapshot.playback.position_seconds||0)+(snapshot.playback.rate||1)*0.1);renderPlayer(snapshot)}},100);
 refresh();
-window.__TAURI__.event.listen('service-event',event=>{const resource=event.payload?.resource;if(resource)pendingServiceResources.add(resource);clearTimeout(serviceEventTimer);serviceEventTimer=setTimeout(()=>{const section=document.querySelector('.nav-item.active').dataset.view;const details=pendingServiceResources.has(section)||(section==='models'&&pendingServiceResources.has('models'))||(section==='voices'&&(pendingServiceResources.has('voices')||pendingServiceResources.has('models')||pendingServiceResources.has('settings')))||(section==='history'&&(pendingServiceResources.has('history')||pendingServiceResources.has('jobs')))||(section==='settings'&&(pendingServiceResources.has('settings')||pendingServiceResources.has('models')));pendingServiceResources.clear();refresh(section,details)},150)});
+window.__TAURI__.event.listen('service-event',event=>{const resource=event.payload?.resource;if(resource)pendingServiceResources.add(resource);if(serviceEventTimer)return;serviceEventTimer=setTimeout(()=>{serviceEventTimer=null;const section=document.querySelector('.nav-item.active').dataset.view;const details=pendingServiceResources.has(section)||(section==='models'&&pendingServiceResources.has('models'))||(section==='voices'&&(pendingServiceResources.has('voices')||pendingServiceResources.has('models')||pendingServiceResources.has('settings')))||(section==='history'&&(pendingServiceResources.has('history')||pendingServiceResources.has('jobs')))||(section==='settings'&&(pendingServiceResources.has('settings')||pendingServiceResources.has('models')));pendingServiceResources.clear();refresh(section,details)},150)});
 window.__TAURI__.event.listen('capture-status',event=>{const status=event.payload;if(status.ok){toast(`${status.kind==='selection'?'Selection':'Clipboard'} sent to speech`);refresh()}else{toast(status.error||'Text could not be captured')}});
 window.__TAURI__.event.listen('desktop-action-status',event=>{toast(event.payload.message||'Desktop action completed');refresh()});
 window.__TAURI__.event.listen('update-progress',event=>{const progress=event.payload;const percent=progress.total_bytes?Math.min(100,Math.round(progress.downloaded_bytes/progress.total_bytes*100)):0;$('#update-progress').hidden=false;$('#update-progress').classList.toggle('indeterminate',!progress.total_bytes);$('#update-progress').querySelector('span').style.width=`${percent}%`;$('#update-progress-label').textContent=progress.state==='installing'?'Installing and restarting…':progress.total_bytes?`Downloading · ${percent}%`:`Downloading · ${Math.round(progress.downloaded_bytes/1048576)} MB`});

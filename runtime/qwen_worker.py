@@ -143,7 +143,7 @@ def text_chunks(text: str) -> Iterator[str]:
         remaining = remaining[end:].lstrip()
 
 
-def synthesize(model: Any, mode: str, request: dict[str, Any], torch: Any, soundfile: Any) -> None:
+def synthesize(model: Any, mode: str, request: dict[str, Any], torch: Any, soundfile: Any, emit=None) -> None:
     text = require_text(request, "text")
     output = output_file(request)
     language = optional_text(request, "language") or "Auto"
@@ -195,6 +195,10 @@ def synthesize(model: Any, mode: str, request: dict[str, Any], torch: Any, sound
             elif sample_rate != writer.samplerate:
                 raise RuntimeError("inference changed the sample rate between chunks")
             writer.write(wavs[0])
+            if request.get("stream") and emit is not None:
+                for start in range(0, len(wavs[0]), 4096):
+                    emit({"audio": {"sample_rate": sample_rate,
+                                    "samples": [float(value) for value in wavs[0][start:start + 4096]]}})
             del wavs
         stack.close()
         if not pending.is_file() or pending.stat().st_size <= 44:
@@ -256,13 +260,17 @@ def main() -> int:
         )
     print(json.dumps({"ready": True, "device": device, "dtype": dtype_name}), flush=True)
 
+    protocol = sys.stdout
+    def emit(event):
+        print(json.dumps(event, allow_nan=False), file=protocol, flush=True)
+
     for line in sys.stdin:
         try:
             request = json.loads(line)
             if not isinstance(request, dict):
                 raise ValueError("request must be a JSON object")
             with contextlib.redirect_stdout(sys.stderr):
-                synthesize(model, args.mode, request, torch, soundfile)
+                synthesize(model, args.mode, request, torch, soundfile, emit)
             print(json.dumps({"ok": True}), flush=True)
         except Exception as error:  # Keep the loaded model alive after a bad request.
             print(

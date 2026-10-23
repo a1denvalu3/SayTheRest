@@ -25,6 +25,9 @@ uuid.workspace = true
 url.workspace = true
 zip.workspace = true
 
+[build-dependencies]
+cc = "1.2"
+
 [dev-dependencies]
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }

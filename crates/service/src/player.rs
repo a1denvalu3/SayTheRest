@@ -1,24 +1,29 @@
-use anyhow::{Context as _, Result, bail};
+use crate::stretch::TimeStretch;
+use anyhow::{Context as _, Result, ensure};
 use rminiaudio::{Context, Device, DeviceConfig, DeviceType, Format};
 use std::{
+    collections::VecDeque,
     path::PathBuf,
     sync::{Arc, Mutex, mpsc},
     thread,
+    time::Duration,
 };
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct PlaybackController {
     tx: mpsc::Sender<Command>,
-    shared: Arc<Mutex<Shared>>,
+    shared: Arc<Mutex<AudioBuffer>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayerStatus {
     Idle,
+    Buffering,
     Playing,
     Paused,
     Finished,
+    Failed,
 }
 
 #[derive(Clone, Debug)]
@@ -29,54 +34,142 @@ pub struct PlayerSnapshot {
     pub duration_seconds: f64,
     pub rate: f64,
     pub volume: f64,
+    pub generation_complete: bool,
+    pub amplitudes: Vec<f32>,
+    pub error: Option<String>,
 }
 
-struct Shared {
-    samples: Vec<f32>,
+/// Retains original mono PCM for seeking. The device callback consumes ready
+/// PCM without DSP or file I/O. Underruns buffer instead of completing playback.
+struct AudioBuffer {
+    source: Vec<f32>,
+    rendered: VecDeque<f32>,
     cursor: f64,
     sample_rate: u32,
-    channels: usize,
     status: PlayerStatus,
     job_id: Option<Uuid>,
     rate: f64,
     volume: f64,
+    complete: bool,
+    drained: bool,
+    error: Option<String>,
+    amplitudes: Vec<f32>,
+    amplitude_energy: f64,
+    amplitude_frames: usize,
 }
-
-impl Default for Shared {
+impl Default for AudioBuffer {
     fn default() -> Self {
         Self {
-            samples: Vec::new(),
+            source: Vec::new(),
+            rendered: VecDeque::new(),
             cursor: 0.0,
-            sample_rate: 1,
-            channels: 1,
+            sample_rate: 0,
             status: PlayerStatus::Idle,
             job_id: None,
             rate: 1.0,
             volume: 1.0,
+            complete: false,
+            drained: false,
+            error: None,
+            amplitudes: Vec::new(),
+            amplitude_energy: 0.0,
+            amplitude_frames: 0,
+        }
+    }
+}
+impl AudioBuffer {
+    fn begin(&mut self, id: Uuid, rate: f64, volume: f64) {
+        *self = Self {
+            job_id: Some(id),
+            rate,
+            volume,
+            status: PlayerStatus::Buffering,
+            ..Self::default()
+        };
+    }
+    fn append(&mut self, id: Uuid, sample_rate: u32, samples: &[f32]) -> Result<()> {
+        ensure!(self.job_id == Some(id), "speech was stopped or replaced");
+        ensure!(!self.complete, "speech stream already completed");
+        ensure!(self.error.is_none(), "audio playback failed");
+        ensure!(
+            (8_000..=192_000).contains(&sample_rate),
+            "unsupported audio sample rate"
+        );
+        ensure!(
+            self.sample_rate == 0 || self.sample_rate == sample_rate,
+            "audio sample rate changed during speech"
+        );
+        ensure!(
+            samples.iter().all(|x| x.is_finite()),
+            "non-finite audio samples"
+        );
+        self.sample_rate = sample_rate;
+        self.source.extend_from_slice(samples);
+        for sample in samples {
+            self.amplitude_energy += f64::from(*sample).powi(2);
+            self.amplitude_frames += 1;
+            if self.amplitude_frames == (sample_rate / 20) as usize {
+                self.amplitudes
+                    .push((self.amplitude_energy / self.amplitude_frames as f64).sqrt() as f32);
+                self.amplitude_energy = 0.0;
+                self.amplitude_frames = 0;
+            }
+        }
+        Ok(())
+    }
+    fn render_into(&mut self, output: &mut [f32]) {
+        output.fill(0.0);
+        if self.status != PlayerStatus::Playing {
+            return;
+        }
+        for sample in output {
+            let Some(value) = self.rendered.pop_front() else {
+                self.status = if self.complete && self.drained {
+                    PlayerStatus::Finished
+                } else {
+                    PlayerStatus::Buffering
+                };
+                if self.status == PlayerStatus::Finished {
+                    self.cursor = self.source.len() as f64;
+                }
+                break;
+            };
+            *sample = value * self.volume as f32;
+            self.cursor = (self.cursor + self.rate).min(self.source.len() as f64);
         }
     }
 }
 
+type Reply = mpsc::Sender<Result<()>>;
 enum Command {
-    Play {
-        job_id: Uuid,
-        path: PathBuf,
+    Begin {
+        id: Uuid,
         rate: f64,
         volume: f64,
-        reply: mpsc::Sender<Result<()>>,
+        reply: Reply,
+    },
+    Append {
+        id: Uuid,
+        sample_rate: u32,
+        samples: Vec<f32>,
+        reply: Reply,
+    },
+    Finish {
+        id: Uuid,
+        reply: Reply,
     },
     Pause,
     Resume,
     Stop,
+    Abort(Uuid),
     Seek(f64),
     SetRate(f64),
     SetVolume(f64),
 }
-
 impl PlaybackController {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel();
-        let shared = Arc::new(Mutex::new(Shared::default()));
+        let shared = Arc::new(Mutex::new(AudioBuffer::default()));
         let thread_shared = shared.clone();
         thread::Builder::new()
             .name("sayit-audio".into())
@@ -84,17 +177,74 @@ impl PlaybackController {
             .expect("audio thread");
         Self { tx, shared }
     }
-
-    pub fn play(&self, job_id: Uuid, path: PathBuf, rate: f64, volume: f64) -> Result<()> {
+    fn request(&self, make: impl FnOnce(Reply) -> Command) -> Result<()> {
         let (tx, rx) = mpsc::channel();
-        self.tx.send(Command::Play {
-            job_id,
-            path,
+        self.tx.send(make(tx))?;
+        rx.recv().context("audio thread stopped")?
+    }
+    pub fn begin_stream(&self, id: Uuid, rate: f64, volume: f64) -> Result<()> {
+        valid_rate(rate)?;
+        valid_volume(volume)?;
+        self.request(|reply| Command::Begin {
+            id,
             rate,
             volume,
-            reply: tx,
-        })?;
-        rx.recv().context("audio thread stopped")?
+            reply,
+        })
+    }
+    pub fn append(&self, id: Uuid, sample_rate: u32, samples: &[f32]) -> Result<()> {
+        self.request(|reply| Command::Append {
+            id,
+            sample_rate,
+            samples: samples.to_vec(),
+            reply,
+        })
+    }
+    pub fn finish_stream(&self, id: Uuid) -> Result<()> {
+        self.request(|reply| Command::Finish { id, reply })
+    }
+    pub fn abort_stream(&self, id: Uuid) -> Result<()> {
+        self.tx.send(Command::Abort(id))?;
+        Ok(())
+    }
+    pub fn play(&self, id: Uuid, path: PathBuf, rate: f64, volume: f64) -> Result<()> {
+        let mut reader = hound::WavReader::open(&path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        let spec = reader.spec();
+        ensure!(
+            spec.bits_per_sample == 16
+                && spec.sample_format == hound::SampleFormat::Int
+                && spec.channels > 0,
+            "only 16-bit PCM WAV playback is currently supported"
+        );
+        self.begin_stream(id, rate, volume)?;
+        let result = (|| -> Result<()> {
+            let mut block = Vec::with_capacity(4096);
+            let mut sum = 0.0;
+            let mut channel = 0;
+            for sample in reader.samples::<i16>() {
+                sum += f32::from(sample?) / 32768.0;
+                channel += 1;
+                if channel == spec.channels {
+                    block.push(sum / f32::from(spec.channels));
+                    sum = 0.0;
+                    channel = 0;
+                    if block.len() == 4096 {
+                        self.append(id, spec.sample_rate, &block)?;
+                        block.clear();
+                    }
+                }
+            }
+            ensure!(channel == 0, "incomplete audio frame");
+            if !block.is_empty() {
+                self.append(id, spec.sample_rate, &block)?;
+            }
+            self.finish_stream(id)
+        })();
+        if result.is_err() {
+            let _ = self.abort_stream(id);
+        }
+        result
     }
     pub fn pause(&self) -> Result<()> {
         self.tx.send(Command::Pause)?;
@@ -109,146 +259,236 @@ impl PlaybackController {
         Ok(())
     }
     pub fn seek(&self, seconds: f64) -> Result<()> {
+        ensure!(seconds.is_finite(), "seconds must be finite");
         self.tx.send(Command::Seek(seconds))?;
         Ok(())
     }
     pub fn set_rate(&self, rate: f64) -> Result<()> {
-        if !(0.5..=3.0).contains(&rate) {
-            bail!("playback rate must be between 0.5 and 3.0");
-        }
+        valid_rate(rate)?;
         self.tx.send(Command::SetRate(rate))?;
         Ok(())
     }
     pub fn set_volume(&self, volume: f64) -> Result<()> {
-        if !(0.0..=1.0).contains(&volume) {
-            bail!("volume must be between 0 and 1");
-        }
+        valid_volume(volume)?;
         self.tx.send(Command::SetVolume(volume))?;
         Ok(())
     }
     pub fn snapshot(&self) -> PlayerSnapshot {
         let state = self.shared.lock().unwrap();
-        let total_frames = state.samples.len() / state.channels;
+        let sample_rate = f64::from(state.sample_rate.max(1));
+        let stride = state.amplitudes.len().div_ceil(1024).max(1);
+        let amplitudes = state
+            .amplitudes
+            .chunks(stride)
+            .map(|chunk| chunk.iter().copied().fold(0.0, f32::max))
+            .collect();
         PlayerSnapshot {
             status: state.status,
             job_id: state.job_id,
-            position_seconds: state.cursor / f64::from(state.sample_rate),
-            duration_seconds: total_frames as f64 / f64::from(state.sample_rate),
+            position_seconds: state.cursor / sample_rate,
+            duration_seconds: state.source.len() as f64 / sample_rate,
             rate: state.rate,
             volume: state.volume,
+            generation_complete: state.complete,
+            amplitudes,
+            error: state.error.clone(),
         }
     }
 }
-
-fn player_thread(rx: mpsc::Receiver<Command>, shared: Arc<Mutex<Shared>>) {
-    let mut device: Option<Device> = None;
-    while let Ok(command) = rx.recv() {
-        match command {
-            Command::Play {
-                job_id,
-                path,
-                rate,
-                volume,
-                reply,
-            } => {
-                device.take();
-                let result = load_and_start(job_id, path, rate, volume, &shared);
-                match result {
-                    Ok(new_device) => {
-                        device = Some(new_device);
-                        let _ = reply.send(Ok(()));
-                    }
-                    Err(error) => {
-                        let _ = reply.send(Err(error));
-                    }
-                }
-            }
-            Command::Pause => {
-                if let Some(device) = &device {
-                    let _ = device.stop();
-                }
-                shared.lock().unwrap().status = PlayerStatus::Paused;
-            }
-            Command::Resume => {
-                if let Some(device) = &device {
-                    let _ = device.start();
-                }
-                shared.lock().unwrap().status = PlayerStatus::Playing;
-            }
-            Command::Stop => {
-                device.take();
-                let mut state = shared.lock().unwrap();
-                state.status = PlayerStatus::Idle;
-                state.cursor = 0.0;
-                state.job_id = None;
-            }
-            Command::Seek(seconds) => {
-                let mut state = shared.lock().unwrap();
-                let frames = (seconds.max(0.0) * f64::from(state.sample_rate))
-                    .min((state.samples.len() / state.channels) as f64);
-                state.cursor = frames;
-            }
-            Command::SetRate(rate) => shared.lock().unwrap().rate = rate,
-            Command::SetVolume(volume) => shared.lock().unwrap().volume = volume,
-        }
-    }
+fn valid_rate(rate: f64) -> Result<()> {
+    ensure!(
+        rate.is_finite() && (0.5..=3.0).contains(&rate),
+        "playback rate must be between 0.5 and 3.0"
+    );
+    Ok(())
+}
+fn valid_volume(volume: f64) -> Result<()> {
+    ensure!(
+        volume.is_finite() && (0.0..=1.0).contains(&volume),
+        "volume must be between 0 and 1"
+    );
+    Ok(())
 }
 
-fn load_and_start(
-    job_id: Uuid,
-    path: PathBuf,
-    rate: f64,
-    volume: f64,
-    shared: &Arc<Mutex<Shared>>,
-) -> Result<Device> {
-    let mut reader = hound::WavReader::open(&path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
-    let spec = reader.spec();
-    if spec.bits_per_sample != 16 || spec.sample_format != hound::SampleFormat::Int {
-        bail!("only 16-bit PCM WAV playback is currently supported");
-    }
-    let samples = reader
-        .samples::<i16>()
-        .map(|sample| sample.map(|value| f32::from(value) / 32768.0))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    {
-        let mut state = shared.lock().unwrap();
-        *state = Shared {
-            samples,
-            cursor: 0.0,
-            sample_rate: spec.sample_rate,
-            channels: usize::from(spec.channels),
-            status: PlayerStatus::Playing,
-            job_id: Some(job_id),
-            rate,
-            volume,
+#[derive(Default)]
+struct Renderer {
+    stretch: Option<TimeStretch>,
+    next_input: usize,
+    flushed: bool,
+}
+impl Renderer {
+    fn reset(&mut self, state: &mut AudioBuffer) {
+        *self = Self {
+            next_input: state.cursor.floor() as usize,
+            ..Self::default()
         };
+        state.rendered.clear();
+        state.drained = false;
+        if !matches!(
+            state.status,
+            PlayerStatus::Idle | PlayerStatus::Paused | PlayerStatus::Failed
+        ) {
+            state.status = PlayerStatus::Buffering;
+        }
     }
+    fn pump(&mut self, shared: &Arc<Mutex<AudioBuffer>>) -> Result<()> {
+        loop {
+            let (input, final_block, sample_rate, rate) = {
+                let state = shared.lock().unwrap();
+                if state.sample_rate == 0
+                    || self.flushed
+                    || matches!(state.status, PlayerStatus::Idle | PlayerStatus::Failed)
+                {
+                    return Ok(());
+                }
+                if state.rendered.len() >= (state.sample_rate / 4) as usize {
+                    return Ok(());
+                }
+                let end = (self.next_input + 4096).min(state.source.len());
+                if end == self.next_input && !state.complete {
+                    return Ok(());
+                }
+                (
+                    state.source[self.next_input..end].to_vec(),
+                    state.complete && end == state.source.len(),
+                    state.sample_rate,
+                    state.rate,
+                )
+            };
+            if self.stretch.is_none() {
+                self.stretch = Some(TimeStretch::new(sample_rate, rate)?);
+            }
+            // Do DSP outside the device callback's lock.
+            let rendered = self
+                .stretch
+                .as_mut()
+                .unwrap()
+                .process(&input, final_block)?;
+            self.next_input += input.len();
+            self.flushed = final_block;
+            let mut state = shared.lock().unwrap();
+            state.rendered.extend(rendered);
+            state.drained = final_block;
+            if state.status == PlayerStatus::Buffering
+                && (state.rendered.len() >= (sample_rate * 12 / 100) as usize
+                    || (final_block && !state.rendered.is_empty()))
+            {
+                state.status = PlayerStatus::Playing;
+            }
+            if final_block && state.rendered.is_empty() && state.status != PlayerStatus::Paused {
+                state.status = PlayerStatus::Finished;
+                state.cursor = state.source.len() as f64;
+            }
+        }
+    }
+}
+fn player_thread(rx: mpsc::Receiver<Command>, shared: Arc<Mutex<AudioBuffer>>) {
+    let mut device: Option<Device> = None;
+    let mut renderer = Renderer::default();
+    loop {
+        match rx.recv_timeout(Duration::from_millis(5)) {
+            Ok(command) => match command {
+                Command::Begin {
+                    id,
+                    rate,
+                    volume,
+                    reply,
+                } => {
+                    device.take();
+                    shared.lock().unwrap().begin(id, rate, volume);
+                    renderer = Renderer::default();
+                    let _ = reply.send(Ok(()));
+                }
+                Command::Append {
+                    id,
+                    sample_rate,
+                    samples,
+                    reply,
+                } => {
+                    let result = shared.lock().unwrap().append(id, sample_rate, &samples);
+                    let result = result.and_then(|()| {
+                        if device.is_none() {
+                            device = Some(start_device(sample_rate, &shared)?);
+                        }
+                        Ok(())
+                    });
+                    if let Err(error) = &result {
+                        let mut state = shared.lock().unwrap();
+                        if state.job_id == Some(id) {
+                            state.error = Some(error.to_string());
+                            state.status = PlayerStatus::Failed;
+                        }
+                    }
+                    let _ = reply.send(result);
+                }
+                Command::Finish { id, reply } => {
+                    let mut state = shared.lock().unwrap();
+                    let result = if state.job_id != Some(id) {
+                        Err(anyhow::anyhow!("speech was stopped or replaced"))
+                    } else if state.source.is_empty() {
+                        Err(anyhow::anyhow!("inference generated empty audio"))
+                    } else {
+                        state.complete = true;
+                        Ok(())
+                    };
+                    let _ = reply.send(result);
+                }
+                Command::Stop => {
+                    device.take();
+                    *shared.lock().unwrap() = AudioBuffer::default();
+                    renderer = Renderer::default();
+                }
+                Command::Abort(id) => {
+                    if shared.lock().unwrap().job_id == Some(id) {
+                        device.take();
+                        *shared.lock().unwrap() = AudioBuffer::default();
+                        renderer = Renderer::default();
+                    }
+                }
+                Command::Pause => {
+                    let mut state = shared.lock().unwrap();
+                    if state.job_id.is_some() {
+                        state.status = PlayerStatus::Paused;
+                    }
+                }
+                Command::Resume => {
+                    let mut state = shared.lock().unwrap();
+                    if state.status == PlayerStatus::Paused {
+                        state.status = PlayerStatus::Playing;
+                    }
+                }
+                Command::Seek(seconds) => {
+                    let mut state = shared.lock().unwrap();
+                    state.cursor = (seconds.max(0.0) * f64::from(state.sample_rate))
+                        .min(state.source.len() as f64);
+                    renderer.reset(&mut state);
+                }
+                Command::SetRate(rate) => {
+                    let mut state = shared.lock().unwrap();
+                    if state.rate != rate {
+                        state.rate = rate;
+                        renderer.reset(&mut state);
+                    }
+                }
+                Command::SetVolume(volume) => shared.lock().unwrap().volume = volume,
+            },
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        if let Err(error) = renderer.pump(&shared) {
+            let mut state = shared.lock().unwrap();
+            state.error = Some(format!("speech tempo processing failed: {error:#}"));
+            state.status = PlayerStatus::Failed;
+        }
+    }
+}
+fn start_device(sample_rate: u32, shared: &Arc<Mutex<AudioBuffer>>) -> Result<Device> {
     let callback_state = shared.clone();
-    let channels = usize::from(spec.channels);
     let config = DeviceConfig::new(DeviceType::Playback)
-        .sample_rate(spec.sample_rate)
-        .channels(u32::from(spec.channels))
+        .sample_rate(sample_rate)
+        .channels(1)
         .format(Format::F32)
-        .data_callback(move |output, _| {
-            let mut state = callback_state.lock().unwrap();
-            output.fill(0.0);
-            if state.status != PlayerStatus::Playing {
-                return;
-            }
-            for frame in output.chunks_exact_mut(channels) {
-                let source_frame = state.cursor.floor() as usize;
-                let offset = source_frame * channels;
-                if offset + channels > state.samples.len() {
-                    state.status = PlayerStatus::Finished;
-                    break;
-                }
-                for channel in 0..channels {
-                    frame[channel] = state.samples[offset + channel] * state.volume as f32;
-                }
-                state.cursor += state.rate;
-            }
-        });
+        .data_callback(move |output, _| callback_state.lock().unwrap().render_into(output));
     let context = Context::new().context("failed to initialize an audio backend")?;
     let device = context
         .create_device(config)
@@ -260,11 +500,110 @@ fn load_and_start(
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn rejects_invalid_rate_and_volume_without_audio_device() {
+    fn rejects_invalid_controls_without_audio_device() {
         let player = PlaybackController::new();
-        assert!(player.set_rate(0.1).is_err());
-        assert!(player.set_volume(2.0).is_err());
+        for rate in [0.1, f64::NAN, f64::INFINITY] {
+            assert!(player.set_rate(rate).is_err());
+        }
+        for volume in [-1.0, 2.0, f64::NAN] {
+            assert!(player.set_volume(volume).is_err());
+        }
+        assert!(player.seek(f64::NAN).is_err());
+    }
+    #[test]
+    fn progressive_underrun_buffers_then_resumes_without_advancing_time() {
+        let shared = Arc::new(Mutex::new(AudioBuffer::default()));
+        let id = Uuid::new_v4();
+        let mut renderer = Renderer::default();
+        shared.lock().unwrap().begin(id, 1.0, 1.0);
+        shared
+            .lock()
+            .unwrap()
+            .append(id, 24_000, &vec![0.25; 4800])
+            .unwrap();
+        renderer.pump(&shared).unwrap();
+        shared.lock().unwrap().render_into(&mut vec![0.0; 6000]);
+        assert_eq!(shared.lock().unwrap().status, PlayerStatus::Buffering);
+        assert_eq!(shared.lock().unwrap().cursor, 4800.0);
+        shared.lock().unwrap().render_into(&mut [0.0; 256]);
+        assert_eq!(shared.lock().unwrap().cursor, 4800.0);
+        shared
+            .lock()
+            .unwrap()
+            .append(id, 24_000, &vec![0.5; 4800])
+            .unwrap();
+        renderer.pump(&shared).unwrap();
+        let mut output = [0.0; 256];
+        shared.lock().unwrap().render_into(&mut output);
+        assert!(output.iter().all(|x| *x == 0.5));
+        shared.lock().unwrap().complete = true;
+        renderer.pump(&shared).unwrap();
+        shared.lock().unwrap().render_into(&mut vec![0.0; 6000]);
+        assert_eq!(shared.lock().unwrap().status, PlayerStatus::Finished);
+        assert_eq!(shared.lock().unwrap().cursor, 9600.0);
+    }
+    #[test]
+    fn paused_stream_finishes_generation_without_resuming() {
+        let shared = Arc::new(Mutex::new(AudioBuffer::default()));
+        let id = Uuid::new_v4();
+        shared.lock().unwrap().begin(id, 1.25, 0.5);
+        shared.lock().unwrap().status = PlayerStatus::Paused;
+        shared
+            .lock()
+            .unwrap()
+            .append(id, 24_000, &vec![0.25; 2400])
+            .unwrap();
+        shared.lock().unwrap().complete = true;
+        Renderer::default().pump(&shared).unwrap();
+        let mut output = [1.0; 256];
+        shared.lock().unwrap().render_into(&mut output);
+        assert!(output.iter().all(|x| *x == 0.0));
+        assert_eq!(shared.lock().unwrap().cursor, 0.0);
+        assert_eq!(shared.lock().unwrap().status, PlayerStatus::Paused);
+        shared.lock().unwrap().status = PlayerStatus::Playing;
+        shared.lock().unwrap().render_into(&mut vec![0.0; 2400]);
+        assert_eq!(shared.lock().unwrap().status, PlayerStatus::Finished);
+    }
+    #[test]
+    fn seek_and_rate_change_discard_rendered_audio_and_preserve_source() {
+        let shared = Arc::new(Mutex::new(AudioBuffer::default()));
+        let id = Uuid::new_v4();
+        shared.lock().unwrap().begin(id, 1.0, 1.0);
+        let source = (0..24000)
+            .map(|i| if i < 12000 { 0.1 } else { -0.1 })
+            .collect::<Vec<_>>();
+        shared.lock().unwrap().append(id, 24_000, &source).unwrap();
+        shared.lock().unwrap().complete = true;
+        let mut renderer = Renderer::default();
+        renderer.pump(&shared).unwrap();
+        {
+            let mut state = shared.lock().unwrap();
+            state.cursor = 15000.0;
+            state.rate = 1.5;
+            renderer.reset(&mut state);
+            assert!(state.rendered.is_empty());
+        }
+        renderer.pump(&shared).unwrap();
+        let mut output = [0.0; 1000];
+        shared.lock().unwrap().render_into(&mut output);
+        assert!(output.iter().all(|x| *x <= 0.0));
+        assert_eq!(shared.lock().unwrap().cursor, 16500.0);
+        assert_eq!(shared.lock().unwrap().source, source);
+    }
+    #[test]
+    fn stopped_replaced_and_invalid_audio_cannot_reenter_player() {
+        let mut state = AudioBuffer::default();
+        let old = Uuid::new_v4();
+        let current = Uuid::new_v4();
+        state.begin(current, 1.0, 1.0);
+        assert!(state.append(old, 24_000, &[0.1]).is_err());
+        assert!(state.append(current, 24_000, &[f32::NAN]).is_err());
+        assert!(state.append(current, 0, &[0.1]).is_err());
+        state.append(current, 24_000, &[0.1]).unwrap();
+        assert!(state.append(current, 48_000, &[0.1]).is_err());
+        state.complete = true;
+        assert!(state.append(current, 24_000, &[0.1]).is_err());
+        assert_eq!(state.source, [0.1]);
     }
 }

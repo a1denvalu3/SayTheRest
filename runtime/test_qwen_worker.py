@@ -187,6 +187,19 @@ class WorkerSynthesisTests(unittest.TestCase):
             self.assertIs(call.kwargs["voice_clone_prompt"], prompt)
         self.assertEqual(self.torch.inference_mode.call_count, 3)
 
+    def test_pcm_is_emitted_before_publishing_the_complete_file(self):
+        self.model.generate_voice_clone.side_effect = self.generate
+        events = []
+        def emit(event):
+            self.assertFalse(self.output.exists())
+            self.assertEqual(event["audio"]["sample_rate"], 24000)
+            events.append(event)
+        WORKER.synthesize(self.model, "voice-clone", self.request(stream=True),
+                          self.torch, self.soundfile, emit)
+        self.assertGreater(len(events), 1)
+        with wave.open(str(self.output)) as wav:
+            self.assertEqual(sum(len(e["audio"]["samples"]) for e in events), wav.getnframes())
+
     def test_failed_chunk_does_not_publish_partial_audio_or_replace_existing_output(self):
         self.output.write_bytes(b"existing audio")
         self.model.generate_voice_clone.side_effect = [

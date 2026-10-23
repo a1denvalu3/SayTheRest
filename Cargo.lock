@@ -4097,6 +4097,7 @@ version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",
+ "serde_json",
  "uuid",
 ]
 
@@ -4107,6 +4108,7 @@ dependencies = [
  "anyhow",
  "axum",
  "bzip2",
+ "cc",
  "chrono",
  "flate2",
  "hound",

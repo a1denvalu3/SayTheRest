@@ -402,11 +402,35 @@ impl Backend {
         Ok((backend, info))
     }
 
-    fn synthesize(
+    fn synthesize_with_sink(
         &mut self,
         request: &SynthesisRequest<'_>,
         cancelled: Option<&AtomicBool>,
+        sink: &mut Option<&mut crate::AudioSink<'_>>,
+        delivered: &mut bool,
     ) -> Result<()> {
+        if let Some(sink) = sink.as_deref_mut() {
+            let mut forward = |samples: &[f32], rate| {
+                anyhow::ensure!(
+                    cancelled.is_none_or(|flag| !flag.load(Ordering::Relaxed)),
+                    "speech generation cancelled"
+                );
+                if !samples.is_empty() {
+                    *delivered = true;
+                    sink(samples, rate)?;
+                }
+                Ok(())
+            };
+            return match self {
+                Self::Sherpa(engine) => {
+                    engine.synthesize_streaming(request, cancelled, &mut forward)
+                }
+                Self::SherpaCuda(engine) => {
+                    engine.synthesize_streaming(request, cancelled, &mut forward)
+                }
+                Self::Qwen(engine) => engine.synthesize_streaming(request, cancelled, &mut forward),
+            };
+        }
         match self {
             Self::Sherpa(engine) => engine.synthesize(request),
             Self::SherpaCuda(engine) => engine.synthesize(request),
@@ -519,6 +543,24 @@ impl ManagedEngine {
         request: &SynthesisRequest<'_>,
         cancelled: Option<&AtomicBool>,
     ) -> Result<()> {
+        self.run_synthesis(request, cancelled, None)
+    }
+
+    pub fn synthesize_streaming(
+        &self,
+        request: &SynthesisRequest<'_>,
+        cancelled: Option<&AtomicBool>,
+        sink: &mut crate::AudioSink<'_>,
+    ) -> Result<()> {
+        self.run_synthesis(request, cancelled, Some(sink))
+    }
+
+    fn run_synthesis(
+        &self,
+        request: &SynthesisRequest<'_>,
+        cancelled: Option<&AtomicBool>,
+        mut sink: Option<&mut crate::AudioSink<'_>>,
+    ) -> Result<()> {
         anyhow::ensure!(
             cancelled.is_none_or(|cancelled| !cancelled.load(Ordering::Relaxed)),
             "speech generation cancelled"
@@ -539,14 +581,20 @@ impl ManagedEngine {
         };
         let mut state = self.state.lock().unwrap();
         if state.backend.is_none() {
-            let (backend, _) = Backend::load(&self.cpu_config, Vec::new())?;
+            let (backend, mut device) = Backend::load(&self.cpu_config, Vec::new())?;
+            device.fallback_reason = state.device.fallback_reason.clone().or_else(|| {
+                (state.device.provider != "cpu")
+                    .then(|| "Previous inference failed; reloaded on CPU.".into())
+            });
+            state.device = device;
             state.backend = Some(backend);
         }
+        let mut delivered = false;
         let result = state
             .backend
             .as_mut()
             .context("inference engine unavailable")?
-            .synthesize(&bounded, cancelled)
+            .synthesize_with_sink(&bounded, cancelled, &mut sink, &mut delivered)
             .and_then(|()| {
                 anyhow::ensure!(
                     crate::wav_duration_seconds(pending.as_ref())? > 0.0,
@@ -555,7 +603,8 @@ impl ManagedEngine {
                 Ok(())
             });
         if let Err(error) = result {
-            if state.device.provider == "cpu"
+            if delivered
+                || state.device.provider == "cpu"
                 || cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Relaxed))
             {
                 state.backend = None;
@@ -569,11 +618,12 @@ impl ManagedEngine {
             device.fallback_reason = Some(reason);
             state.backend = Some(backend);
             state.device = device;
-            state
-                .backend
-                .as_mut()
-                .unwrap()
-                .synthesize(&bounded, cancelled)?;
+            state.backend.as_mut().unwrap().synthesize_with_sink(
+                &bounded,
+                cancelled,
+                &mut sink,
+                &mut delivered,
+            )?;
         }
         anyhow::ensure!(
             crate::wav_duration_seconds(pending.as_ref())? > 0.0,
@@ -591,6 +641,58 @@ impl ManagedEngine {
 mod tests {
     use super::*;
     use crate::{Qwen3TtsConfig, Qwen3TtsMode};
+
+    #[test]
+    #[ignore = "requires installed native Qwen assets, runtime, worker, and a permitted reference via SAYIT_NATIVE_TEST_* variables"]
+    fn real_native_qwen_stream_precedes_atomic_wav_publication() {
+        let asset = |name| {
+            PathBuf::from(
+                std::env::var_os(format!("SAYIT_NATIVE_TEST_{name}")).expect("test asset path"),
+            )
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("speech.wav");
+        let config = EngineConfig::Qwen3TtsOnnx(crate::QwenOnnxConfig {
+            model: asset("MODEL"),
+            runtime: Some(asset("RUNTIME")),
+            worker: asset("WORKER"),
+            precision: "int4".into(),
+            num_threads: 4,
+            device: "cpu".into(),
+            language: "English".into(),
+        });
+        let runtime = InferenceRuntime::new(directory.path());
+        let engine = ManagedEngine::load(&config, &runtime, false).unwrap();
+        let reference = asset("REFERENCE");
+        let transcript = std::env::var("SAYIT_NATIVE_TEST_TRANSCRIPT").unwrap();
+        let start = Instant::now();
+        let mut first_audio = None;
+        let mut delivered = 0;
+        engine.synthesize_streaming(&SynthesisRequest {
+            text: "Streaming audio arrives while the next sentence is generated. The player keeps the natural pitch of the voice. We can pause and resume the speech. This final sentence completes our test.",
+            output: &output, reference_audio: Some(&reference), reference_text: Some(&transcript), speaking_pace: 1.0,
+        }, None, &mut |samples, rate| {
+            assert!(!output.exists(), "only the complete WAV may be published");
+            assert_eq!(rate, 24_000);
+            first_audio.get_or_insert(start.elapsed());
+            delivered += samples.len();
+            Ok(())
+        }).unwrap();
+        let complete = start.elapsed();
+        let first_audio = first_audio.expect("streaming PCM");
+        let wav = hound::WavReader::open(&output).unwrap();
+        assert_eq!(delivered, wav.len() as usize);
+        assert!(
+            complete.saturating_sub(first_audio) > Duration::from_millis(100),
+            "audio must precede the remaining generation"
+        );
+        eprintln!(
+            "Native Qwen real-model acceptance: first PCM {:.2}s, complete {:.2}s, {} samples",
+            first_audio.as_secs_f64(),
+            complete.as_secs_f64(),
+            delivered
+        );
+    }
 
     #[test]
     fn cpu_fallback_preserves_native_weight_quantization() {
@@ -801,5 +903,42 @@ for line in sys.stdin:
                 .is_err()
         );
         assert_eq!(fs::read(&output).unwrap(), b"previous audio");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_gpu_stream_never_replays_already_delivered_audio_on_cpu() {
+        let directory = tempfile::tempdir().unwrap();
+        let (config, runtime) = fake_qwen(directory.path());
+        let worker = directory.path().join("worker.py");
+        let source = fs::read_to_string(&worker).unwrap().replace(
+            "if gpu or request['text'] == 'fail on CPU too':",
+            "if request.get('stream'):\n        print(json.dumps({'audio': {'sample_rate': 16000, 'samples': [0.2] * 160}}), flush=True)\n    if gpu or request['text'] == 'fail on CPU too':");
+        fs::write(worker, source).unwrap();
+        let engine = ManagedEngine::load(&config, &runtime, true).unwrap();
+        let output = directory.path().join("speech.wav");
+        fs::write(&output, b"previous complete audio").unwrap();
+        let mut frames = 0;
+        let result = engine.synthesize_streaming(
+            &SynthesisRequest {
+                text: "A short sentence.",
+                output: &output,
+                reference_audio: None,
+                reference_text: None,
+                speaking_pace: 1.0,
+            },
+            None,
+            &mut |samples, _| {
+                frames += samples.len();
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(frames, 160);
+        assert_eq!(
+            fs::read_to_string(directory.path().join("starts")).unwrap(),
+            "auto\n"
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"previous complete audio");
     }
 }

@@ -1,10 +1,14 @@
-use crate::{Qwen3TtsConfig, Qwen3TtsMode, QwenOnnxConfig, SynthesisRequest};
+use crate::{AudioSink, Qwen3TtsConfig, Qwen3TtsMode, QwenOnnxConfig, SynthesisRequest};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
     io::{BufRead, BufReader, Write},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
 };
 
 pub struct ResidentQwenEngine {
@@ -18,6 +22,7 @@ pub struct ResidentQwenEngine {
     dtype: String,
     backend: String,
     quantization: Option<String>,
+    stderr_reader: Option<std::thread::JoinHandle<()>>,
 }
 
 #[derive(Deserialize)]
@@ -31,8 +36,15 @@ struct ReadyResponse {
 
 #[derive(Deserialize)]
 struct SynthesisResponse {
-    ok: bool,
+    ok: Option<bool>,
     error: Option<String>,
+    audio: Option<WorkerAudio>,
+}
+
+#[derive(Deserialize)]
+struct WorkerAudio {
+    samples: Vec<f32>,
+    sample_rate: u32,
 }
 
 #[derive(Serialize)]
@@ -48,9 +60,63 @@ struct WorkerRequest<'a> {
     reference_audio: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reference_text: Option<&'a str>,
+    stream: bool,
+    speaking_pace: f64,
 }
 
 impl ResidentQwenEngine {
+    pub(crate) fn load_sherpa_with_worker(
+        config: &crate::EngineConfig,
+        environment: &[(std::ffi::OsString, std::ffi::OsString)],
+        executable: &std::path::Path,
+    ) -> Result<(Self, Arc<AtomicBool>)> {
+        let configuration = tempfile::NamedTempFile::new()?.into_temp_path();
+        std::fs::write(&configuration, serde_json::to_vec(config)?)?;
+        let mut child = Command::new(executable)
+            .arg("--sherpa-config")
+            .arg(&configuration)
+            .envs(environment.iter().cloned())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("failed to start isolated speech worker")?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("speech worker has no error stream")?;
+        let fallback = Arc::new(AtomicBool::new(false));
+        let detected = fallback.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else {
+                    break;
+                };
+                if line == "SAYIT_SHERPA_READY" {
+                    let _ = ready_tx.send(());
+                    continue;
+                }
+                let lower = line.to_lowercase();
+                if lower.contains("fallback to cpu") || lower.contains("falling back to cpu") {
+                    detected.store(true, Ordering::Relaxed);
+                }
+                eprintln!("{line}");
+            }
+        });
+        let mut engine = Self::from_child(child, "auto", None, None)?;
+        engine.stderr_reader = Some(reader);
+        // The marker follows all initialization logs on the same pipe. Waiting
+        // for it prevents an unnoticed provider fallback before the first PCM.
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .context("speech worker initialization log did not complete")?;
+        anyhow::ensure!(
+            config.provider() != "cuda" || !fallback.load(Ordering::Relaxed),
+            "CUDA execution provider fell back to CPU during initialization"
+        );
+        Ok((engine, fallback))
+    }
     pub fn load(config: &Qwen3TtsConfig) -> Result<Self> {
         let mode = match config.mode {
             Qwen3TtsMode::CustomVoice => "custom-voice",
@@ -144,6 +210,7 @@ impl ResidentQwenEngine {
             dtype: "float32".into(),
             backend: "qwen3-tts-pytorch".into(),
             quantization: None,
+            stderr_reader: None,
         };
         let mut line = String::new();
         anyhow::ensure!(
@@ -188,6 +255,24 @@ impl ResidentQwenEngine {
         request: &SynthesisRequest<'_>,
         cancelled: Option<&AtomicBool>,
     ) -> Result<()> {
+        self.run_synthesis(request, cancelled, None)
+    }
+
+    pub fn synthesize_streaming(
+        &mut self,
+        request: &SynthesisRequest<'_>,
+        cancelled: Option<&AtomicBool>,
+        sink: &mut AudioSink<'_>,
+    ) -> Result<()> {
+        self.run_synthesis(request, cancelled, Some(sink))
+    }
+
+    fn run_synthesis(
+        &mut self,
+        request: &SynthesisRequest<'_>,
+        cancelled: Option<&AtomicBool>,
+        mut sink: Option<&mut AudioSink<'_>>,
+    ) -> Result<()> {
         if request.text.trim().is_empty() {
             bail!("text must not be empty");
         }
@@ -204,44 +289,79 @@ impl ResidentQwenEngine {
                 .reference_audio
                 .map(|path| path.to_string_lossy().into_owned()),
             reference_text: request.reference_text,
+            stream: sink.is_some(),
+            speaking_pace: request.speaking_pace,
         };
         serde_json::to_writer(&mut self.stdin, &payload)?;
         self.stdin.write_all(b"\n")?;
         self.stdin.flush()?;
-        let mut line = String::new();
-        let count = if let Some(cancelled) = cancelled {
-            std::thread::scope(|scope| -> Result<usize> {
-                let stdout = &mut self.stdout;
-                let line = &mut line;
-                let reader = scope.spawn(move || stdout.read_line(line));
-                while !reader.is_finished() {
-                    if cancelled.load(Ordering::Relaxed) {
-                        let _ = self.child.kill();
+        std::thread::scope(|scope| -> Result<()> {
+            let (tx, rx) = mpsc::sync_channel(1);
+            let stdout = &mut self.stdout;
+            let reader = scope.spawn(move || {
+                loop {
+                    let mut line = String::new();
+                    let result = stdout.read_line(&mut line).map(|count| (count, line));
+                    let terminal = match &result {
+                        Ok((count, line)) => {
+                            *count == 0
+                                || serde_json::from_str::<serde_json::Value>(line)
+                                    .map_or(true, |value| value.get("ok").is_some())
+                        }
+                        Err(_) => true,
+                    };
+                    if tx.send(result).is_err() || terminal {
                         break;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(25));
                 }
-                let count = reader
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("Qwen response reader failed"))??;
-                anyhow::ensure!(
-                    !cancelled.load(Ordering::Relaxed),
-                    "speech generation cancelled"
-                );
-                Ok(count)
-            })?
-        } else {
-            self.stdout.read_line(&mut line)?
-        };
-        anyhow::ensure!(count > 0, "Qwen worker exited during synthesis");
-        let response: SynthesisResponse =
-            serde_json::from_str(&line).context("Qwen worker returned an invalid response")?;
-        if !response.ok {
-            bail!(
-                "Qwen synthesis failed: {}",
-                response.error.as_deref().unwrap_or("unknown worker error")
-            );
-        }
+            });
+            let result = (|| -> Result<()> {
+                loop {
+                    anyhow::ensure!(
+                        cancelled.is_none_or(|flag| !flag.load(Ordering::Relaxed)),
+                        "speech generation cancelled"
+                    );
+                    let (count, line) = match rx.recv_timeout(std::time::Duration::from_millis(25))
+                    {
+                        Ok(result) => result?,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(_) => bail!("Qwen worker exited during synthesis"),
+                    };
+                    anyhow::ensure!(count > 0, "Qwen worker exited during synthesis");
+                    let response: SynthesisResponse = serde_json::from_str(&line)
+                        .context("Qwen worker returned an invalid response")?;
+                    if let Some(audio) = response.audio {
+                        anyhow::ensure!(
+                            (8_000..=192_000).contains(&audio.sample_rate)
+                                && audio.samples.len() <= 65_536
+                                && audio.samples.iter().all(|s| s.is_finite()),
+                            "invalid streaming audio"
+                        );
+                        if let Some(sink) = sink.as_deref_mut() {
+                            sink(&audio.samples, audio.sample_rate)?;
+                        }
+                    } else if response.ok == Some(true) {
+                        return Ok(());
+                    } else {
+                        bail!(
+                            "Qwen synthesis failed: {}",
+                            response
+                                .error
+                                .as_deref()
+                                .unwrap_or("invalid worker response")
+                        );
+                    }
+                }
+            })();
+            if result.is_err() {
+                let _ = self.child.kill();
+            }
+            drop(rx);
+            reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("Qwen response reader failed"))?;
+            result
+        })?;
         anyhow::ensure!(
             request.output.is_file(),
             "Qwen worker did not create output audio"
@@ -254,6 +374,9 @@ impl Drop for ResidentQwenEngine {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
+        }
     }
 }
 
@@ -310,6 +433,8 @@ mod tests {
     #[test]
     fn worker_request_never_serializes_absent_reference_audio() {
         let request = WorkerRequest {
+            stream: false,
+            speaking_pace: 1.0,
             text: "hello",
             output: "out.wav".into(),
             language: "English",
