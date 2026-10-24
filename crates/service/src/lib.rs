@@ -40,6 +40,7 @@ use tokio::{
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use uuid::Uuid;
 
+mod job_voice;
 mod model_manager;
 mod phonon_voices;
 mod player;
@@ -417,11 +418,10 @@ impl ServiceState {
             return;
         }
         let player = self.player.clone();
+        let models = self.models.clone();
+        let voice_job = job.clone();
         let synthesis = tokio::task::spawn_blocking(move || -> Result<(PathBuf, f64)> {
-            let mut config = EngineConfig::from_path(&config_path)?;
-            if let Some(language) = &job.language {
-                config.set_language(language)?;
-            }
+            let mut config = job_voice::configuration(&models, &config_path, &voice_job)?;
             let mut reading_voice = voice_modes::ReadingVoice::new(job.voice_mode, &config)?;
             if let (EngineConfig::SherpaOnnxPocket(pocket), Some(steps)) =
                 (&mut config, refinement_steps)
@@ -1299,6 +1299,7 @@ async fn regenerate_history(
     submit_job(
         State(state),
         Json(SpeechSubmission {
+            preset_voice_id: item.job.preset_voice_id,
             voice_mode: Some(item.job.voice_mode),
             model_id: item.job.model_id,
             language: item.job.language,
@@ -1665,6 +1666,7 @@ async fn preview_voice(
     submit_job(
         State(state),
         Json(SpeechSubmission {
+            preset_voice_id: None,
             voice_mode: None,
             model_id: None,
             language: None,
@@ -2432,7 +2434,13 @@ async fn submit_job(
             StatusCode::CONFLICT,
             "download and select a speech model before reading text aloud".into(),
         ))?;
-    let config = EngineConfig::from_path(&config_path).map_err(unprocessable)?;
+    let config = job_voice::submission_configuration(
+        &state.models,
+        &config_path,
+        model_id.as_deref(),
+        &submission,
+    )
+    .map_err(unprocessable)?;
     let requires_voice_profile = config.requires_reference();
     let language = match submission.language.as_deref().or(config.language()) {
         Some(language) => {
@@ -2523,6 +2531,9 @@ async fn submit_job(
             })
         }
     });
+    if submission.preset_voice_id.is_some() {
+        voice_profile_id = None;
+    }
     let voice_mode = submission.voice_mode.unwrap_or_else(|| {
         if voice_profile_id.is_some() || !voice_modes::supported(&config) {
             VoiceSynthesisMode::Standard
@@ -2539,6 +2550,16 @@ async fn submit_job(
         }
         voice_profile_id = None;
     }
+    let preset_voice_id =
+        if voice_profile_id.is_none() && voice_mode == VoiceSynthesisMode::Standard {
+            submission.preset_voice_id.clone().or_else(|| {
+                model_id
+                    .as_deref()
+                    .and_then(|id| state.models.configured_preset_voice(id, &config))
+            })
+        } else {
+            None
+        };
     if requires_voice_profile
         && voice_profile_id.is_none()
         && voice_mode == VoiceSynthesisMode::Standard
@@ -2594,6 +2615,7 @@ async fn submit_job(
     }
     voice_discovery::cancel_active(&state);
     let job = SpeechJob {
+        preset_voice_id,
         voice_mode,
         model_id,
         language,
@@ -2901,6 +2923,7 @@ mod tests {
         let state = ServiceState::default();
         let job_id = Uuid::new_v4();
         state.inner.write().await.jobs.push_back(SpeechJob {
+            preset_voice_id: None,
             voice_mode: Default::default(),
             model_id: None,
             language: None,
@@ -2927,6 +2950,7 @@ mod tests {
         let active_id = Uuid::new_v4();
         let replay_id = Uuid::new_v4();
         let make_job = |id, state| SpeechJob {
+            preset_voice_id: None,
             voice_mode: Default::default(),
             model_id: None,
             language: None,
@@ -2967,6 +2991,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state = ServiceState::open(directory.path().to_owned(), None).unwrap();
         let submission = SpeechSubmission {
+            preset_voice_id: None,
             voice_mode: None,
             model_id: None,
             language: None,
@@ -2978,6 +3003,7 @@ mod tests {
             speaking_pace: None,
         };
         let job = SpeechJob {
+            preset_voice_id: None,
             voice_mode: Default::default(),
             model_id: None,
             language: None,
@@ -3002,6 +3028,7 @@ mod tests {
         let state = ServiceState::open(directory.path().to_owned(), None).unwrap();
         let job_id = Uuid::new_v4();
         state.inner.write().await.jobs.push_back(SpeechJob {
+            preset_voice_id: None,
             voice_mode: Default::default(),
             model_id: None,
             language: None,
@@ -3051,6 +3078,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state = ServiceState::open(directory.path().to_owned(), None).unwrap();
         state.inner.write().await.jobs.push_back(SpeechJob {
+            preset_voice_id: None,
             voice_mode: Default::default(),
             model_id: None,
             language: None,
@@ -3532,6 +3560,7 @@ for line in sys.stdin:
         let state = qwen_voice_test_state(directory.path());
         let id = Uuid::new_v4();
         state.inner.write().await.jobs.push_back(SpeechJob {
+            preset_voice_id: None,
             voice_mode: Default::default(),
             model_id: None,
             language: None,
@@ -3606,6 +3635,7 @@ for line in sys.stdin:
         state.models.select_language("qwen3-tts", "es").unwrap();
         state.inner.write().await.settings.speaking_pace = 1.25;
         let submission = SpeechSubmission {
+            preset_voice_id: None,
             voice_mode: None,
             model_id: None,
             text: "Buenos días.".into(),
@@ -3645,6 +3675,7 @@ for line in sys.stdin:
         let error = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                preset_voice_id: None,
                 voice_mode: None,
                 model_id: None,
                 language: None,
@@ -3815,6 +3846,7 @@ for line in sys.stdin:
         for transcript in [Some("Mi voz, con su transcripción exacta."), None] {
             state.inner.write().await.voices[0].reference_text = transcript.map(str::to_owned);
             let job = SpeechJob {
+                preset_voice_id: None,
                 voice_mode: Default::default(),
                 model_id: None,
                 language: Some("es".into()),
@@ -3927,6 +3959,7 @@ for line in sys.stdin:
         let error = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                preset_voice_id: None,
                 voice_mode: None,
                 model_id: None,
                 language: None,
@@ -3958,6 +3991,7 @@ for line in sys.stdin:
         state.inner.write().await.settings.speaking_pace = 1.25;
         let submission = |pace| {
             Json(SpeechSubmission {
+                preset_voice_id: None,
                 voice_mode: None,
                 model_id: None,
                 language: None,
@@ -4061,6 +4095,7 @@ for line in sys.stdin:
             .settings
             .long_text_confirmation_characters = 500;
         let submission = SpeechSubmission {
+            preset_voice_id: None,
             voice_mode: None,
             model_id: None,
             language: None,
@@ -4090,6 +4125,7 @@ for line in sys.stdin:
         let error = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                preset_voice_id: None,
                 voice_mode: None,
                 model_id: None,
                 language: None,
@@ -4115,6 +4151,7 @@ for line in sys.stdin:
             let _ = submit_job(
                 State(state.clone()),
                 Json(SpeechSubmission {
+                    preset_voice_id: None,
                     voice_mode: None,
                     model_id: None,
                     language: None,
@@ -4132,6 +4169,7 @@ for line in sys.stdin:
         let _ = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                preset_voice_id: None,
                 voice_mode: None,
                 model_id: None,
                 language: None,
@@ -4259,6 +4297,7 @@ for line in sys.stdin:
         let (_, Json(job)) = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                preset_voice_id: None,
                 voice_mode: None,
                 model_id: None,
                 language: None,
@@ -4288,6 +4327,7 @@ for line in sys.stdin:
         let (_, Json(job)) = submit_job(
             State(state),
             Json(SpeechSubmission {
+                preset_voice_id: None,
                 voice_mode: None,
                 model_id: None,
                 language: None,
@@ -4318,6 +4358,7 @@ for line in sys.stdin:
         let make_item = |text: &str, created_at, path: &std::path::Path, pinned| HistoryItem {
             spoken_chunks: Vec::new(),
             job: SpeechJob {
+                preset_voice_id: None,
                 voice_mode: Default::default(),
                 model_id: None,
                 language: None,
@@ -4383,6 +4424,7 @@ for line in sys.stdin:
         state.inner.write().await.history.push(HistoryItem {
             spoken_chunks: Vec::new(),
             job: SpeechJob {
+                preset_voice_id: None,
                 voice_mode: Default::default(),
                 model_id: None,
                 language: None,

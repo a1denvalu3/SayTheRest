@@ -44,7 +44,10 @@
       },
       "SpeechJobVoiceFields": {
         "type": "object", "description": "Additive fields on queued jobs and history jobs. Regeneration preserves the captured mode. Legacy jobs without voice_mode default to standard.",
-        "properties": { "voice_mode": { "$ref": "#/components/schemas/VoiceSynthesisMode" } }
+        "properties": {
+          "voice_mode": { "$ref": "#/components/schemas/VoiceSynthesisMode" },
+          "preset_voice_id": { "type": ["string", "null"], "description": "Captured public preset ID, used when synthesis starts and retained for history regeneration. Null with a saved profile/random mode or when the model has no public preset. Legacy jobs without this field retain their previous configured-voice behavior." }
+        }
       },
       "VoiceModeSettings": {
         "type": "object", "description": "Additive response fields on GET /settings. Update through the model voice-mode endpoint or saved-profile selection, rather than POST /settings.",
@@ -56,7 +59,8 @@
           "text": { "type": "string" },
           "model_id": { "type": ["string", "null"], "maxLength": 120, "pattern": "^[A-Za-z0-9_-]+$", "description": "Optional installed model ID. Defaults to the active model and is captured on the queued job/history. An override uses that model's saved profile and language without changing the global selection. Older history without model_id keeps its legacy active-model behavior." },
           "language": { "type": ["string", "null"], "description": "Optional per-request language code for models with language selection. The effective language is captured when queued and returned on the job and its history entry; changing the saved default does not change queued jobs." },
-          "voice_profile_id": { "type": ["string", "null"], "format": "uuid" },
+          "voice_profile_id": { "type": ["string", "null"], "format": "uuid", "description": "Optional saved profile override. Cannot be combined with an explicit preset or random reading mode." },
+          "preset_voice_id": { "type": ["string", "null"], "description": "Optional public preset from the requested model's preset_voices. Overrides a globally selected profile without changing model/voice defaults. Cannot be combined with an explicit profile or random mode. Without an override, the configured preset is captured automatically when no profile/random mode is used." },
           "voice_mode": { "anyOf": [{ "$ref": "#/components/schemas/VoiceSynthesisMode" }, { "type": "null" }], "description": "Optional captured override. Defaults to standard with a profile or unsupported backend, otherwise the model's saved random mode or automatic_stable. Random overrides ignore the global profile selection; explicitly supplying a profile together with a random mode is rejected. Standard native Qwen still requires a profile." },
           "source": { "type": "string", "enum": ["selection", "clipboard", "cli", "api", "history", "desktop"] },
           "queue_policy": { "type": "string", "enum": ["append", "replace", "interrupt"] },
@@ -189,7 +193,7 @@
     "/state": { "get": { "summary": "Service and playback snapshot", "responses": { "200": { "description": "Current state" } } } },
     "/jobs": {
       "get": { "summary": "List speech jobs", "responses": { "200": { "description": "Jobs" } } },
-      "post": { "security": [{ "controlToken": [] }], "summary": "Queue speech with optional model, language, profile, and native speaking pace", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SpeechSubmission" } } } }, "responses": { "202": { "description": "Queued; job includes its captured model and effective language" }, "409": { "description": "Model unavailable or incompatible/missing voice profile. Rejected requests do not replace queued work or interrupt playback." }, "413": { "description": "Long text requires confirmation" }, "422": { "description": "Invalid model ID, text, language, or pace" } } }
+      "post": { "security": [{ "controlToken": [] }], "summary": "Queue speech with captured model, language, profile/preset, reading mode, and native speaking pace", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SpeechSubmission" } } } }, "responses": { "202": { "description": "Queued; job includes captured model, preset/profile, mode, and effective language" }, "409": { "description": "Model unavailable or incompatible/missing voice profile. Rejected requests do not replace queued work or interrupt playback." }, "413": { "description": "Long text requires confirmation" }, "422": { "description": "Invalid model ID, text, language, preset, voice combination, or pace" } } }
     },
     "/playback/{action}": { "post": { "security": [{ "controlToken": [] }], "summary": "Pause, resume, stop, seek, set rate, or set volume", "parameters": [{ "in": "path", "name": "action", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Applied" } } } },
     "/models/{id}/backend": {"post": {"summary": "Prepare and select the Qwen native ONNX or PyTorch backend without changing saved voice IDs", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ModelBackendRequest"}}}}, "responses": {"202": {"description": "Asynchronous backend setup started; inspect model download progress"}, "422": {"description": "Unsupported model, backend, or precision"}}, "security": [{"controlToken": []}]}},

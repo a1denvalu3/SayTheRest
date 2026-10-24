@@ -187,8 +187,11 @@ The Windows mouse driver uses Win32 input, a private outside-click target, and
 the same actual-webview geometry/result driver. Its UI-only fixture requires no
 model runtime or audio device. The runner isolates Windows app state and sets a
 private [WebView2 user-data folder](https://learn.microsoft.com/microsoft-edge/webview2/reference/win32/webview2-idl),
-with bounded retries for WebView2's asynchronous file cleanup. CI now includes
-the Windows debug UI build and mouse driver; that new check is pending.
+with bounded retries for WebView2's asynchronous file cleanup. Commit `6fcf4b5`
+passed both the Linux and Windows real-mouse checks in CI run
+[40123332015](https://github.com/a1denvalu3/SayTheRest/actions/runs/40123332015).
+This establishes menu/focus behavior on the runner; its complete release matrix
+and Windows model/device UI acceptance remain separate checks.
 
 ```powershell
 python scripts/test-player-native-menu-windows.py --bin-dir target/x86_64-pc-windows-msvc/debug
@@ -490,6 +493,32 @@ python3 scripts/test-random-reading-modes.py --config /path/to/native-config.jso
 python3 scripts/test-random-reading-modes.py --config /path/to/native-config.json --benchmark-only
 python3 scripts/test-desktop-ui.py --virtual-display --config /path/to/native-config.json --script scripts/desktop-random-modes-ui-smoke.js --voice-file /path/to/synthetic-reference.wav --reference-text 'Exact reference words' --timeout 300
 python3 scripts/test-desktop-ui.py --virtual-display --window main --config /path/to/native-config.json --script scripts/desktop-random-modes-management-ui-smoke.js --voice-file /path/to/synthetic-reference.wav --reference-text 'Exact reference words' --timeout 300
+```
+
+## Captured preset identity
+
+Jobs now capture their public built-in preset alongside model, language,
+profile ID, and reading mode. Changing the default preset after queuing cannot
+replace that job's voice or lexicon. History regeneration and restart retain the
+captured preset. Per-request `preset_voice_id` overrides leave the global model,
+preset, and saved-profile selections intact. Unknown presets and conflicting
+explicit profile/random-mode combinations are rejected before replacing the
+queue or interrupting playback. Legacy jobs without a preset ID keep their
+previous configured-voice behavior.
+
+The real Linux Kokoro service test held a reading paused, queued Maple, changed
+the default to British Vale, and queued an explicit Sol override. Actual speech,
+history regeneration back to Maple, restart persistence, and rejected overrides
+preserving paused playback all passed. Configuration tests verify that Maple's
+captured speaker and US lexicon reach synthesis while Vale remains the default.
+Native UI acceptance also passed 21 Pocket checks and 16 Phonon checks, including
+actual preset speech overriding a saved/imported voice without changing that
+profile selection, then returning to the profile. The workspace passes 135
+regular tests. Windows preset/device acceptance remains separate from these
+Linux device runs.
+
+```sh
+python3 scripts/test-queued-presets.py --config /path/to/kokoro-config.json
 ```
 
 ## Release evidence

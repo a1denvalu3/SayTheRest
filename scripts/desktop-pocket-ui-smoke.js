@@ -30,6 +30,7 @@
     check((await get('settings')).active_voice_profile_id===null,'selecting Pocket does not force a cloned profile');
     const job=await post('jobs',{text:'The morning is quiet and the words are clear.',queue_policy:'append'});
     check(job.voice_profile_id===null&&job.speaking_pace===1,'default preset reads with natural pace and no profile');
+    check(job.preset_voice_id===selected.preset_voices.find(voice=>voice.selected)?.id,'default Pocket reading captures its public preset');
     await finish(job.id);
     const historyCount=(await get('history')).length;
     await invoke('open_management',{section:'voices'});
@@ -51,8 +52,11 @@
     await until(()=>$(`[data-voice="${profile.id}"][data-voice-action=select]`));
     $(`[data-voice="${profile.id}"][data-voice-action=select]`).click();
     await until(async()=>(await get('settings')).active_voice_profile_id===profile.id);
+    const override=await post('jobs',{text:'A built-in voice can read without changing my saved voice.',preset_voice_id:'cosette',queue_policy:'append'});
+    check(override.preset_voice_id==='cosette'&&override.voice_profile_id===null&&(await get('settings')).active_voice_profile_id===profile.id,'a per-request Pocket preset overrides the clone without changing the selection');
+    await finish(override.id);
     const cloned=await post('jobs',{text:'This recording uses the saved voice profile.',queue_policy:'append'});
-    check(cloned.voice_profile_id===profile.id,'saved profile overrides the selected built-in reference');
+    check(cloned.voice_profile_id===profile.id&&cloned.preset_voice_id===null,'saved profile overrides the selected built-in reference');
     const clonedPlayback=await finish(cloned.id);
     check(clonedPlayback.spoken_text===cloned.text,'new reading replaces the preview text in the reader');
     await until(()=>$('[data-preset-voice=javert][data-preset-action=select]'));

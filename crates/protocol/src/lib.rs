@@ -39,6 +39,8 @@ pub struct SpeechSubmission {
     #[serde(default)]
     pub voice_profile_id: Option<Uuid>,
     #[serde(default)]
+    pub preset_voice_id: Option<String>,
+    #[serde(default)]
     pub source: SpeechSource,
     #[serde(default)]
     pub queue_policy: QueuePolicy,
@@ -95,6 +97,8 @@ pub struct SpeechJob {
     pub model_id: Option<String>,
     #[serde(default)]
     pub voice_mode: VoiceSynthesisMode,
+    #[serde(default)]
+    pub preset_voice_id: Option<String>,
     #[serde(default)]
     pub language: Option<String>,
     pub source: SpeechSource,

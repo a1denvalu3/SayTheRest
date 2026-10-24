@@ -611,6 +611,33 @@ impl ModelManager {
         Ok(())
     }
 
+    /// Resolve the configured public preset without consulting later defaults.
+    pub fn configured_preset_voice(&self, id: &str, config: &EngineConfig) -> Option<String> {
+        let dynamic = match id {
+            "phonon-31m-en" => Some(phonon::presets(Some(config))),
+            "pocket-tts-int8" => Some(pocket::presets(Some(config))),
+            _ => None,
+        };
+        if let Some(voices) = dynamic {
+            return voices
+                .into_iter()
+                .find(|voice| voice.selected)
+                .map(|voice| voice.id);
+        }
+        let speaker = match config {
+            EngineConfig::SherpaOnnxVits(config) => config.speaker_id,
+            EngineConfig::SherpaOnnxKokoro(config) => config.speaker_id,
+            EngineConfig::SherpaOnnxKitten(config) => config.speaker_id,
+            _ => return None,
+        };
+        let entry = CATALOG.iter().find(|entry| entry.id == id)?;
+        entry
+            .preset_voices
+            .iter()
+            .find(|voice| preset_voice_speaker_id(entry, voice) == Some(speaker))
+            .map(|voice| (*voice).to_owned())
+    }
+
     pub fn select_language(&self, id: &str, language: &str) -> Result<()> {
         let path = self.config_path(id);
         let mut config = EngineConfig::from_path(&path)?;

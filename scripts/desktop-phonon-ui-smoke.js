@@ -34,6 +34,11 @@
     check(card.textContent.includes('Phonon voice file')&&!card.querySelector('[data-voice-action=tune]'),'imported voice has file controls and metadata');
     $(`[data-voice="${profile.id}"][data-voice-action=select]`).click();
     await until(async()=>(await get('settings')).active_voice_profile_id===profile.id);
+    const override=await post('jobs',{text:'A built-in voice can read without changing my imported voice.',preset_voice_id:'default',queue_policy:'append'});
+    check(override.preset_voice_id==='default'&&override.voice_profile_id===null&&(await get('settings')).active_voice_profile_id===profile.id,'a per-request Phonon preset overrides the imported voice without changing its selection');
+    const presetPlayback=await until(async()=>{const p=(await get('state')).playback;return p.job_id===override.id&&p.generation_complete?p:null});
+    check(presetPlayback.duration_seconds>1&&presetPlayback.amplitudes.some(value=>value>0),'overridden Phonon preset produces real speech');
+    await post('playback/seek',{seconds:presetPlayback.duration_seconds-.1});await until(async()=>(await get('state')).playback.state==='completed');
     await until(()=>$(`[data-voice="${profile.id}"][data-voice-action=preview]`));
     $(`[data-voice="${profile.id}"][data-voice-action=preview]`).click();
     const job=await until(async()=>(await get('jobs')).find(job=>job.voice_profile_id===profile.id));

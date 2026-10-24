@@ -143,6 +143,7 @@ mod tests {
         let (_, Json(job)) = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                preset_voice_id: None,
                 voice_mode: None,
                 model_id: None,
                 language: None,
@@ -221,6 +222,7 @@ mod tests {
         let result = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                preset_voice_id: None,
                 voice_mode: None,
                 model_id: None,
                 language: None,
