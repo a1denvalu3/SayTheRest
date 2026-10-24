@@ -92,8 +92,10 @@ cp "$ROOT_DIR/crates/core/data/PHONON-NOTICE.txt" "$ROOT_DIR/crates/core/data/PH
 
 if [[ "$TARGET" == *windows* ]]; then
   cp "$ROOT_DIR/packaging/setup.ps1" "$STAGE/"
-  (cd "$ROOT_DIR/dist" && 7z a -tzip "$PACKAGE_NAME.zip" "$PACKAGE_NAME" >/dev/null)
   WINDOWS_STAGE=$(cygpath -w "$STAGE")
+  WINDOWS_CRT_SCRIPT=$(cygpath -w "$ROOT_DIR/scripts/bundle-windows-crt.ps1")
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$WINDOWS_CRT_SCRIPT" -Stage "$WINDOWS_STAGE"
+  (cd "$ROOT_DIR/dist" && 7z a -tzip "$PACKAGE_NAME.zip" "$PACKAGE_NAME" >/dev/null)
   WINDOWS_OUTPUT=$(cygpath -w "$ROOT_DIR/dist")
   WINDOWS_ISS=$(cygpath -w "$ROOT_DIR/packaging/windows-installer.iss")
   STR_STAGE="$WINDOWS_STAGE" STR_OUTPUT="$WINDOWS_OUTPUT" STR_ISS="$WINDOWS_ISS" powershell -NoProfile -Command \

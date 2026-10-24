@@ -213,6 +213,21 @@ the complete release matrix remains in progress.
 python scripts/test-player-native-menu-windows.py --bin-dir target/x86_64-pc-windows-msvc/debug
 ```
 
+The Windows dependency audit found that the pinned ONNX Runtime 1.24.2 DLL
+imports `msvcp140.dll`, `msvcp140_1.dll`, `vcruntime140.dll`, and
+`vcruntime140_1.dll`, while the package previously omitted those files. A
+development runner's global installation can hide that dependency. Packaging
+now copies the x64 release CRT from Visual Studio's redistributable directory
+beside the application executables, with version/hash metadata and a notice.
+This keeps portable and per-user installation independent of a machine-wide
+runtime installer. A fresh-process audit loads the actual pinned ONNX DLL and
+requires all four dependencies to resolve inside the staged package. A separate
+Windows acceptance workflow rejects the old layout, tests a path with spaces
+and non-ASCII characters, and checks the copied file hashes and audit-helper
+cleanup. New Windows acceptance is pending. References:
+[ONNX Runtime requirements](https://onnxruntime.ai/docs/install/) and
+[Microsoft's local deployment documentation](https://learn.microsoft.com/en-us/cpp/windows/deployment-in-visual-cpp?view=msvc-170).
+
 Kokoro's current 103-voice INT8 bundle passed real Linux synthesis for every
 speaker: two US English presets, one British English preset, and 100 Mandarin
 presets. Every output contained audible finite PCM, and every archived sample

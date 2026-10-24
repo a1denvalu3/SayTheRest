@@ -1,0 +1,60 @@
+name: Windows runtime dependencies
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/windows-runtime.yml
+      - scripts/bundle-windows-crt.ps1
+      - scripts/windows-crt-probe.cs
+      - scripts/package-release.sh
+  pull_request:
+    paths:
+      - .github/workflows/windows-runtime.yml
+      - scripts/bundle-windows-crt.ps1
+      - scripts/windows-crt-probe.cs
+      - scripts/package-release.sh
+
+permissions:
+  contents: read
+
+jobs:
+  native-dependencies:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject global-runtime dependence and verify app-local loading
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $archive = Join-Path $env:RUNNER_TEMP 'onnxruntime.zip'
+          Invoke-WebRequest 'https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-1.24.2.zip' -OutFile $archive -TimeoutSec 180
+          $digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -ne '8e3e9c826375352e29cb2614fe44f3d7a4b0ff7b8028ad7a456af9d949a7e8b0') { throw 'Native runtime digest mismatch' }
+          $unpacked = Join-Path $env:RUNNER_TEMP 'native-runtime-source'
+          Expand-Archive -LiteralPath $archive -DestinationPath $unpacked
+          # A path with spaces and non-ASCII characters is intentional.
+          $stage = Join-Path $env:RUNNER_TEMP 'sayIt runtime prueba 语音'
+          $libraryDirectory = Join-Path $stage 'runtime/native/lib'
+          New-Item -Path $libraryDirectory -ItemType Directory -Force | Out-Null
+          Copy-Item (Join-Path $unpacked 'onnxruntime-win-x64-1.24.2/lib/*.dll') $libraryDirectory
+          $runtime = Join-Path $libraryDirectory 'onnxruntime.dll'
+          $probe = Join-Path $stage 'sayit-crt-probe.exe'
+          $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+          & $compiler /nologo /platform:x64 "/out:$probe" scripts/windows-crt-probe.cs
+          if ($LASTEXITCODE -ne 0) { throw 'Audit compilation failed' }
+          & $probe $runtime
+          if ($LASTEXITCODE -eq 0) { throw 'The old package without local CRT files incorrectly passed the audit' }
+          Remove-Item -LiteralPath $probe
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/bundle-windows-crt.ps1 -Stage $stage
+          if ($LASTEXITCODE -ne 0) { throw 'App-local runtime acceptance failed' }
+          $manifest = Get-Content -LiteralPath (Join-Path $stage 'microsoft-crt-manifest.json') -Raw | ConvertFrom-Json
+          foreach ($file in $manifest) {
+            $actual = (Get-FileHash -LiteralPath (Join-Path $stage $file.file) -Algorithm SHA256).Hash
+            if ($actual -ne $file.sha256) { throw "Runtime digest mismatch: $($file.file)" }
+          }
+          if (Test-Path -LiteralPath $probe) { throw 'Audit helper was not removed' }
+          Write-Host 'Old package rejected; application-local dependencies verified in a fresh process.'
