@@ -16,7 +16,8 @@ sayit models
 ```
 
 Setup is asynchronous. Wait until the download reports `installed`, then select
-the model and one of its saved voices. Switching preserves the model ID, voice
+the model. Native Qwen can read with a random voice immediately or use a saved
+voice profile. Switching preserves the model ID, voice
 UUIDs, recordings, and transcripts. Files are verified before replacing the
 active configuration.
 
@@ -53,6 +54,43 @@ but cannot be saved. **Clear candidates** preserves saved voices.
 top K, and repetition penalty for future readings. Legacy profiles retain their
 previous defaults until edited. Explicitly selecting a profile also restores its
 preferred language. Listening speed remains a separate playback control.
+
+## Random reading modes
+
+The compact player's voice menu and the top of **Voice studio** offer two
+native Qwen modes without recording or saving a voice:
+
+- **Random voice** creates a fresh temporary reference for each reading and
+  reuses it throughout that reading.
+- **Random voice every paragraph** prepares a fresh reference at each newline
+  and reuses it across all synthesis blocks in that paragraph. Long paragraphs
+  still use bounded blocks, so cancellation and progressive playback remain
+  available.
+
+Preparing each reference adds latency before its speech starts, particularly on
+CPU. The preparation passage follows the requested language and is never played,
+shown as the requested text, or included in the recording. References must pass
+the same audio/duration validation as saved voices; preparation retries at most
+three times, then reports a failure suggesting a saved profile. Temporary files
+are removed on completion, failure, or cancellation. These modes do not create
+saved profiles.
+
+The chosen mode is saved per model and captured when a job is queued. Changing
+the default does not change an existing job; history regeneration retains its
+mode. Selecting a saved voice restores standard profile-based reading. Choosing
+a voice in the compact player re-reads its retained text with that voice;
+choosing a mode in the studio applies it to future readings. Studio previews use
+a short passage in the model's selected language without changing its default.
+
+API clients can POST `{"mode":"random_per_paragraph"}` to
+`/v1/models/qwen3-tts-06b-base/voice-mode`, or include `voice_mode` on an individual
+`POST /v1/jobs`. Random overrides can bypass a globally selected profile but
+cannot be combined with an explicit `voice_profile_id`. PyTorch continues to
+require a saved profile; switching backends preserves voices and settings.
+
+Native benchmarks work without a profile by preparing one temporary reference.
+Cold-start timing includes that preparation; steady-state RTF measures the
+subsequent reference-based synthesis iterations.
 
 ## References and precision
 
@@ -102,7 +140,7 @@ uses sampling with a bounded token budget.
 Benchmark cold loading separately from repeated synthesis, including reference
 preparation on first use. Check intelligibility, voice similarity, memory use,
 and real-time factor before changing the default. NVIDIA CUDA and Windows
-execution need validation on their respective hardware; CPU fallback tests
+GUI/device execution need validation on their respective hardware; CPU fallback tests
 do not establish GPU performance.
 
 On the development Intel Core Ultra 9 185H laptop, the native INT4 prompt,
@@ -116,5 +154,8 @@ cancelled generation, and subsequently benchmarked successfully.
 The three-iteration CPU service benchmark measured mean RTF 3.89 (above real
 time), with cold start 14.67 s. This establishes a working native implementation,
 not a CPU speed guarantee. The INT4 worker used approximately 2 GB RSS in the
-repeated-request check. CUDA acceleration and Windows inference have not been
-hardware-tested on this development machine.
+repeated-request check. Native CPU inference, cloning, discovery, cancellation,
+and all ten languages now pass the Linux/Windows release matrix. The random
+reading modes additionally pass real Linux service and native UI acceptance;
+their new Windows matrix coverage must pass before Windows support is claimed.
+CUDA acceleration and Windows GUI/device behavior remain unverified.

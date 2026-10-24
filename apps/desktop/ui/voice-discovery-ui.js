@@ -13,6 +13,7 @@
   function read(form){return Object.fromEntries(keys.map(key=>[key,Number(form.elements[key].value)]))}
   function bind(form){form.elements.preset.onchange=()=>{const preset=presets[form.elements.preset.value];if(preset)write(form,preset)};for(const key of keys)form.elements[key].oninput=()=>{form.elements.preset.value='custom';form.elements.character?.setAttribute('aria-valuetext','Custom settings')};if(form.elements.character)form.elements.character.oninput=()=>{const position=Number(form.elements.character.value);write(form,characterTuning(position),position)}}
   class VoiceDiscoveryView{
+    static previewText(language){return (samples[language]||samples.en).match(/^[^.。]+[.。]?/u)[0]}
     constructor({get,post,del,notify,changed,visible}){
       Object.assign(this,{get,post,del,notify,changed,visible});
       this.panel=document.querySelector('#voice-discovery');this.form=document.querySelector('#discovery-form');this.cards=document.querySelector('#discovery-candidates');

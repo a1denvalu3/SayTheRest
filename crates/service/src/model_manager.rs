@@ -502,8 +502,9 @@ impl ModelManager {
                     update_available: self.catalog_update_available(entry),
                     resident: false,
                     selected: installed && selected == Some(entry.id),
-                    requires_voice_profile: installed_config.as_ref().map_or(entry.capabilities.voice_cloning,EngineConfig::requires_reference),
+                    requires_voice_profile: native.is_none() && installed_config.as_ref().map_or(entry.capabilities.voice_cloning,EngineConfig::requires_reference),
                     capabilities: ModelCapabilities {
+                        random_voice_sampling: native.is_some(),
                         voice_generation_tuning: entry.id == "qwen3-tts-06b-base",
                         voice_discovery: native.is_some(),
                         language_selection: entry.id == "qwen3-tts-06b-base",
@@ -561,6 +562,7 @@ impl ModelManager {
                 requires_voice_profile: EngineConfig::from_path(&self.config_path(&entry.id))
                     .map_or(entry.voice_cloning, |config| config.requires_reference()),
                 capabilities: ModelCapabilities {
+                    random_voice_sampling: false,
                     voice_generation_tuning: EngineConfig::from_path(&self.config_path(&entry.id))
                         .is_ok_and(|config| config.is_qwen()),
                     voice_discovery: false,

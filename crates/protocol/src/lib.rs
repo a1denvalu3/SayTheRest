@@ -33,6 +33,8 @@ pub struct SpeechSubmission {
     #[serde(default)]
     pub model_id: Option<String>,
     #[serde(default)]
+    pub voice_mode: Option<VoiceSynthesisMode>,
+    #[serde(default)]
     pub language: Option<String>,
     #[serde(default)]
     pub voice_profile_id: Option<Uuid>,
@@ -44,6 +46,21 @@ pub struct SpeechSubmission {
     pub confirmed_long_text: bool,
     #[serde(default)]
     pub speaking_pace: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceSynthesisMode {
+    #[default]
+    Standard,
+    AutomaticStable,
+    RandomPerParagraph,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelVoiceModeRequest {
+    pub mode: VoiceSynthesisMode,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -76,6 +93,8 @@ pub struct SpeechJob {
     pub text: String,
     #[serde(default)]
     pub model_id: Option<String>,
+    #[serde(default)]
+    pub voice_mode: VoiceSynthesisMode,
     #[serde(default)]
     pub language: Option<String>,
     pub source: SpeechSource,
@@ -163,6 +182,8 @@ pub struct ServiceSettings {
     pub active_voice_profile_id: Option<Uuid>,
     #[serde(default)]
     pub voice_profile_by_model: HashMap<String, Option<Uuid>>,
+    #[serde(default)]
+    pub voice_mode_by_model: HashMap<String, VoiceSynthesisMode>,
     pub playback_rate: f64,
     #[serde(default = "natural_speaking_pace")]
     pub speaking_pace: f64,
@@ -184,6 +205,7 @@ impl Default for ServiceSettings {
             active_model_id: Some("piper-en-us-lessac-medium".into()),
             active_voice_profile_id: None,
             voice_profile_by_model: HashMap::new(),
+            voice_mode_by_model: HashMap::new(),
             playback_rate: 1.0,
             speaking_pace: 1.0,
             volume: 1.0,
@@ -319,6 +341,8 @@ pub struct HuggingFaceModelImportRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelCapabilities {
+    #[serde(default)]
+    pub random_voice_sampling: bool,
     #[serde(default)]
     pub voice_generation_tuning: bool,
     #[serde(default)]

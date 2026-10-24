@@ -143,6 +143,7 @@ mod tests {
         let (_, Json(job)) = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                voice_mode: None,
                 model_id: None,
                 language: None,
                 text: "Imported voice preview".into(),
@@ -220,6 +221,7 @@ mod tests {
         let result = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                voice_mode: None,
                 model_id: None,
                 language: None,
                 text: "Please read".into(),

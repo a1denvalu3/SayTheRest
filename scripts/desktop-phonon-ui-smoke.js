@@ -15,6 +15,7 @@
     await until(()=>!$('#voice-file-form').hidden&&document.querySelectorAll('[data-preset-action=preview]').length===38);
     check(getComputedStyle($('#voice-form')).display==='none'&&getComputedStyle($('#voice-file-form')).display!=='none','Phonon offers voice-file import with its 38 presets');
     check(getComputedStyle($('#voice-discovery')).display==='none','unsupported voice discovery stays hidden for Phonon');
+    check(getComputedStyle($('#random-voice-modes')).display==='none','Qwen random reading modes stay hidden for Phonon');
     check(document.documentElement.scrollWidth<=innerWidth,'management layout has no horizontal overflow');
     $('[data-preset-voice=Freya][data-preset-action=select]').click();
     await until(async()=>(await get('models')).find(model=>model.selected)?.preset_voices.find(voice=>voice.id==='Freya')?.selected);

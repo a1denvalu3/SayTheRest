@@ -60,3 +60,7 @@ python3 "$ROOT_DIR/scripts/test-voice-discovery.py" --config "$TEST_CONFIG" --bi
 python3 "$ROOT_DIR/scripts/test-qwen-languages.py" --config "$TEST_CONFIG" --reference "$TEST_REFERENCE" \
   --reference-text 'A quiet morning brings a clear new sentence. Every voice gives familiar words its own color, character, and rhythm.'
 python3 "$ROOT_DIR/scripts/test-voice-discovery.py" --config "$TEST_CONFIG" --bin-dir "$TEST_BIN" --headless --candidates 2 --randomize
+SAYIT_ONNX_TEST_MODEL="$TEST_MODEL" SAYIT_ONNX_TEST_RUNTIME="$TEST_RUNTIME" SAYIT_TEST_WORKER="$TEST_WORKER" \
+  cargo test -p sayit-service --locked --target "$TARGET" \
+    voice_modes::tests::real_random_references_stay_stable_within_readings_and_paragraphs_and_clean_up -- --ignored --exact --nocapture
+python3 "$ROOT_DIR/scripts/test-random-reading-modes.py" --config "$TEST_CONFIG" --bin-dir "$TEST_BIN" --benchmark-only

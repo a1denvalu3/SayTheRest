@@ -74,7 +74,7 @@ unavailable upstream. They are not requirements for parity with working upstream
 - [x] Per-model voice selection and speaking pace.
 - [ ] Voice descriptions where supported.
 - [x] Local recording/import, quality analysis, trimming, and voice cloning where supported.
-- [ ] Voice discovery/random generation where supported (native Qwen candidate generation, preview, save, reuse, and tuning pass Linux native acceptance; automatic stable/per-paragraph reading modes remain).
+- [ ] Voice discovery/random generation where supported (native Qwen candidate generation, preview, save, reuse, and tuning pass Linux native acceptance; automatic stable/per-paragraph modes pass Linux real-model/device acceptance, with Windows mode acceptance pending).
 - [x] Rename, preview, tune, select, and delete local voice profiles.
 - [x] Require an affirmative speaker-permission acknowledgement for cloning.
 
@@ -397,6 +397,53 @@ startup, queued work remains queued; interrupted synthesis or playback is requeu
 partial audio is removed. A second interruption becomes a visible failed history item instead of
 causing an endless service crash loop. Automated tests cover malformed and missing primary state,
 backup restoration, retry, cleanup, and the repeated-interruption guard.
+
+## Native Qwen reading modes
+
+Native Base now offers **Random voice** and **Random voice every paragraph** in
+the compact voice menu and at the top of Voice studio. The former prepares one
+validated synthetic reference per reading; the latter changes it at newline
+boundaries and keeps it throughout every block of a long paragraph. Preparing
+each reference adds first-audio/between-paragraph latency. Its passage follows
+the selected language and is excluded from the player text and final WAV.
+Temporary audio is released when replaced or when a reading ends/cancels.
+
+The service captures the mode on each job, preserves it during history
+regeneration and restart, and rejects unsupported/conflicting overrides before
+queue or playback changes. Profile selection returns to standard reading;
+switching back to random reading retains saved profiles. The compact picker also
+offers the selected model's presets/profiles and can re-read its retained text.
+Interrupting that text preserves completed job records and cancels unfinished
+work.
+
+Real native Linux tests generated three independent references and actual cloned
+speech. They verified reference reuse across a reading/long paragraph, changed
+reference/audio at a new paragraph with the same speech seed, exact stream/WAV
+sample counts, and file cleanup. Separate service/device acceptance verified
+automatic reading without saved profiles, three bounded paragraph blocks,
+cancellation during reference preparation, recovery, persisted metadata, and no
+extra saved voices or cancelled history audio. A native compact-player run
+passed 15 checks including live profile updates and switching a retained reading
+between modes and a saved voice. Native Voice studio acceptance passed nine
+checks, including a real Spanish mode preview with matching text and language,
+preserving the chosen default during preview, and selecting/retaining saved
+profiles. These checks establish reference reuse and
+working audio paths; perceptual voice identity and pronunciation still need
+listening evaluation. Windows GUI/device behavior remains unproven. The release
+matrix adds the actual reference test and a profile-free service benchmark on
+both platforms; its new mode coverage is pending.
+
+The same UI revision passed 18 Pocket checks and 14 Phonon checks using real
+speech, including hiding Qwen-only random modes and preserving each model's
+preset/import workflow. The complete workspace suite passes 133 regular tests;
+actual-model tests remain separately opt-in and run in release acceptance.
+
+```sh
+python3 scripts/test-random-reading-modes.py --config /path/to/native-config.json
+python3 scripts/test-random-reading-modes.py --config /path/to/native-config.json --benchmark-only
+python3 scripts/test-desktop-ui.py --virtual-display --config /path/to/native-config.json --script scripts/desktop-random-modes-ui-smoke.js --voice-file /path/to/synthetic-reference.wav --reference-text 'Exact reference words' --timeout 300
+python3 scripts/test-desktop-ui.py --virtual-display --window main --config /path/to/native-config.json --script scripts/desktop-random-modes-management-ui-smoke.js --voice-file /path/to/synthetic-reference.wav --reference-text 'Exact reference words' --timeout 300
+```
 
 ## Release evidence
 

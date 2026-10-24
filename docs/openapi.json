@@ -19,6 +19,7 @@
           "capabilities": { "type": "object", "properties": {
             "language_selection": { "type": "boolean", "description": "This model accepts a separately selected speech language." },
             "voice_discovery": { "type": "boolean", "description": "The installed native Qwen Base backend can generate unconditioned voice candidates." },
+            "random_voice_sampling": { "type": "boolean", "description": "Native Qwen Base supports automatic stable and per-paragraph random reading without a saved voice profile." },
             "voice_generation_tuning": { "type": "boolean", "description": "Saved profiles for this model accept Qwen generation controls." }
           } },
           "selected_language": { "type": ["string", "null"], "description": "Saved per-model language code, including auto for automatic detection. Null when the model has no separate language selection." },
@@ -33,6 +34,22 @@
         "type": "object", "additionalProperties": false, "required": ["language"],
         "properties": { "language": { "type": "string", "enum": ["auto", "zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"], "description": "Qwen language code. Stored per model and retained across updates and backend changes." } }
       },
+      "VoiceSynthesisMode": {
+        "type": "string", "enum": ["standard", "automatic_stable", "random_per_paragraph"],
+        "description": "Standard uses the selected profile or preset. Native Qwen automatic_stable prepares one temporary synthetic reference per reading; random_per_paragraph prepares one per newline-delimited paragraph and reuses it across bounded blocks. Preparation audio is neither played nor archived. Random modes add preparation latency and do not create saved profiles."
+      },
+      "ModelVoiceModeRequest": {
+        "type": "object", "additionalProperties": false, "required": ["mode"],
+        "properties": { "mode": { "type": "string", "enum": ["automatic_stable", "random_per_paragraph"] } }
+      },
+      "SpeechJobVoiceFields": {
+        "type": "object", "description": "Additive fields on queued jobs and history jobs. Regeneration preserves the captured mode. Legacy jobs without voice_mode default to standard.",
+        "properties": { "voice_mode": { "$ref": "#/components/schemas/VoiceSynthesisMode" } }
+      },
+      "VoiceModeSettings": {
+        "type": "object", "description": "Additive response fields on GET /settings. Update through the model voice-mode endpoint or saved-profile selection, rather than POST /settings.",
+        "properties": { "voice_mode_by_model": { "type": "object", "additionalProperties": { "$ref": "#/components/schemas/VoiceSynthesisMode" }, "description": "Saved random mode per model. Native Qwen without a profile defaults to automatic_stable. Selecting a saved profile clears this model's random-mode preference." } }
+      },
       "SpeechSubmission": {
         "type": "object", "required": ["text"],
         "properties": {
@@ -40,6 +57,7 @@
           "model_id": { "type": ["string", "null"], "maxLength": 120, "pattern": "^[A-Za-z0-9_-]+$", "description": "Optional installed model ID. Defaults to the active model and is captured on the queued job/history. An override uses that model's saved profile and language without changing the global selection. Older history without model_id keeps its legacy active-model behavior." },
           "language": { "type": ["string", "null"], "description": "Optional per-request language code for models with language selection. The effective language is captured when queued and returned on the job and its history entry; changing the saved default does not change queued jobs." },
           "voice_profile_id": { "type": ["string", "null"], "format": "uuid" },
+          "voice_mode": { "anyOf": [{ "$ref": "#/components/schemas/VoiceSynthesisMode" }, { "type": "null" }], "description": "Optional captured override. Defaults to standard with a profile or unsupported backend, otherwise the model's saved random mode or automatic_stable. Random overrides ignore the global profile selection; explicitly supplying a profile together with a random mode is rejected. Standard native Qwen still requires a profile." },
           "source": { "type": "string", "enum": ["selection", "clipboard", "cli", "api", "history", "desktop"] },
           "queue_policy": { "type": "string", "enum": ["append", "replace", "interrupt"] },
           "confirmed_long_text": { "type": "boolean" },
@@ -177,6 +195,7 @@
     "/models/{id}/backend": {"post": {"summary": "Prepare and select the Qwen native ONNX or PyTorch backend without changing saved voice IDs", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ModelBackendRequest"}}}}, "responses": {"202": {"description": "Asynchronous backend setup started; inspect model download progress"}, "422": {"description": "Unsupported model, backend, or precision"}}, "security": [{"controlToken": []}]}},
     "/models": { "get": { "summary": "Model catalog and installation state", "responses": { "200": { "description": "Models" } } } },
     "/models/{id}/language": { "post": { "security": [{ "controlToken": [] }], "summary": "Save an installed model's speech language without changing the selected voice profile", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ModelLanguageRequest" } } } }, "responses": { "204": { "description": "Language saved; applies to new submissions" }, "422": { "description": "Unsupported language, unavailable model, or model without language selection" } } } },
+    "/models/{id}/voice-mode": { "post": { "security": [{ "controlToken": [] }], "summary": "Save a native Qwen random reading mode and clear this model's selected profile", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ModelVoiceModeRequest" } } } }, "responses": { "204": { "description": "Mode saved for future jobs; current and queued readings keep their captured mode. Saved profiles are retained." }, "422": { "description": "Unavailable model, unsupported backend, or mode. Select a saved profile to restore standard reading." } } } },
     "/models/{id}/update": { "post": { "security": [{ "controlToken": [] }], "summary": "Download, verify, and replace an outdated curated model", "responses": { "202": { "description": "Update started" } } } },
     "/models/{id}/voices/{voice_id}/select": { "post": { "security": [{ "controlToken": [] }], "summary": "Select a built-in voice exposed by an installed model", "responses": { "204": { "description": "Voice selected" } } } },
     "/models/{id}/unload": { "post": { "security": [{ "controlToken": [] }], "summary": "Release the resident inference engine without changing model selection", "responses": { "204": { "description": "Model unloaded" } } } },
