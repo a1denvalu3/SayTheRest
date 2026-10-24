@@ -16,7 +16,7 @@ sayit models
 ```
 
 Setup is asynchronous. Wait until the download reports `installed`, then select
-the model. Native Qwen can read with a random voice immediately or use a saved
+the model. Native Qwen can read with a random voice or use a saved
 voice profile. Switching preserves the model ID, voice
 UUIDs, recordings, and transcripts. Files are verified before replacing the
 active configuration.
@@ -157,7 +157,8 @@ not a CPU speed guarantee. The INT4 worker used approximately 2 GB RSS in the
 repeated-request check. Native CPU inference, cloning, discovery, cancellation,
 and all ten languages now pass the Linux/Windows release matrix. The random
 reading modes additionally pass real Linux service and native UI acceptance;
-their new Windows matrix coverage must pass before Windows support is claimed.
+their actual reference-reuse/cleanup tests and profile-free service benchmark
+also pass the complete Linux/Windows release matrix at commit `2e45357`.
 CUDA acceleration and Windows GUI/device behavior remain unverified.
 
 `scripts/test-random-reading-modes.py --audio-output /path/to/review` keeps its

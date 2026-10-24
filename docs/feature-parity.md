@@ -74,7 +74,7 @@ unavailable upstream. They are not requirements for parity with working upstream
 - [x] Per-model voice selection and speaking pace.
 - [ ] Voice descriptions where supported.
 - [x] Local recording/import, quality analysis, trimming, and voice cloning where supported.
-- [ ] Voice discovery/random generation where supported (native Qwen candidate generation, preview, save, reuse, and tuning pass Linux native acceptance; automatic stable/per-paragraph modes pass Linux real-model/device acceptance, with Windows mode acceptance pending).
+- [ ] Voice discovery/random generation where supported (native Qwen Base discovery, tuning, and stable/per-paragraph engine/API checks pass Linux/Windows; Linux native UI/device acceptance passes, while other variants and Windows voice UI/device acceptance remain).
 - [x] Rename, preview, tune, select, and delete local voice profiles.
 - [x] Require an affirmative speaker-permission acknowledgement for cloning.
 
@@ -481,7 +481,8 @@ profiles. These checks establish reference reuse and
 working audio paths; perceptual voice identity and pronunciation still need
 listening evaluation. Windows GUI/device behavior remains unproven. The release
 matrix adds the actual reference test and a profile-free service benchmark on
-both platforms; its new mode coverage is pending.
+both platforms; commit `2e45357` passed the complete Linux/Windows matrix with
+those checks. Windows voice UI/device acceptance remains separate.
 
 The same UI revision passed 18 Pocket checks and 14 Phonon checks using real
 speech, including hiding Qwen-only random modes and preserving each model's
@@ -522,6 +523,21 @@ python3 scripts/test-queued-presets.py --config /path/to/kokoro-config.json
 ```
 
 ## Release evidence
+
+Commit `2e45357` passed the complete Linux/Windows matrix with native Qwen's
+automatic stable and per-paragraph reference generation, reuse, changed-paragraph
+audio, stream/WAV sample counts, temporary-file cleanup, and a profile-free
+service benchmark. The actual Windows reference test ran once and passed in
+344.53 s; its three-iteration benchmark reported a 100.19 s cold start including
+voice preparation. These observed CPU timings show substantial preparation
+latency and do not establish speed parity. Windows voice/device UI acceptance
+and GPU execution remain unproven. GitHub Actions run:
+[40121644612](https://github.com/a1denvalu3/SayTheRest/actions/runs/40121644612).
+
+Commit `ea66579` passed the complete Linux/Windows matrix after correcting the
+Linux headless startup allowance, including real mouse menu/focus acceptance
+on Linux. GitHub Actions run:
+[40121557926](https://github.com/a1denvalu3/SayTheRest/actions/runs/40121557926).
 
 Commit `c0b4b1f` passed the complete Linux/Windows matrix, including native Qwen
 seeded free/clone isolation, managed streaming/archive counts, tuning,
