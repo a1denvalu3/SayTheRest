@@ -54,9 +54,11 @@ def main():
             model=root/'ui-only.onnx';tokens=root/'tokens.txt';model.write_bytes(b'UI metadata fixture; inference is not called');tokens.write_text('UI fixture')
             config=root/'config.json';config.write_text(json.dumps({'engine':'sherpa-onnx-vits','executable':'unused-ui-fixture','model':str(model),'tokens':str(tokens),'provider':'cpu'}))
         with (root/'runner.log').open('w+') as log:
-            runner=subprocess.Popen([sys.executable,str(repo/'scripts/test-desktop-ui.py'),'--config',str(config.resolve()),'--bin-dir',str(args.bin_dir.resolve()),'--script',str(script),'--pointer-target',str(target),'--timeout','40'],stdout=log,stderr=subprocess.STDOUT)
+            runner=subprocess.Popen([sys.executable,'-u',str(repo/'scripts/test-desktop-ui.py'),'--config',str(config.resolve()),'--bin-dir',str(args.bin_dir.resolve()),'--script',str(script),'--pointer-target',str(target),'--timeout','60'],stdout=log,stderr=subprocess.STDOUT)
             try:
-                deadline=time.monotonic()+20
+                # Include the service startup allowance and the child's UI
+                # deadline, so a failed webview returns its diagnostic logs.
+                deadline=time.monotonic()+80
                 while not target.exists():
                     assert runner.poll() is None,'native driver exited before readiness'
                     assert time.monotonic()<deadline,'native menu readiness timed out'
