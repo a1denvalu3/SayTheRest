@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -21,6 +22,7 @@ def main():
     parser.add_argument('--config',type=Path,required=True)
     parser.add_argument('--bin-dir',type=Path,default=Path('target/release'))
     parser.add_argument('--benchmark-only',action='store_true')
+    parser.add_argument('--audio-output',type=Path,help='Keep completed synthetic samples and their expected text for listening or local ASR review')
     args=parser.parse_args()
     binary=args.bin_dir.resolve()/('sayit-service.exe' if os.name=='nt' else 'sayit-service')
     with tempfile.TemporaryDirectory(prefix='sayit-random-reading-') as temporary:
@@ -71,6 +73,12 @@ def main():
                     assert wav.getframerate()==24000 and wav.getnchannels()==1
                     assert abs(wav.getnframes()/wav.getframerate()-playback['duration_seconds'])<.001
                     assert any(wav.readframes(wav.getnframes()))
+                if args.audio_output:
+                    args.audio_output.mkdir(parents=True,exist_ok=True)
+                    destination=args.audio_output/f"{job['voice_mode']}-{job['id']}"
+                    shutil.copyfile(item['audio_path'],destination.with_suffix('.wav'))
+                    destination.with_suffix('.txt').write_text(job['text'],encoding='utf-8')
+                    destination.with_suffix('.json').write_text(json.dumps({'job':job,'playback':playback},ensure_ascii=False,indent=2),encoding='utf-8')
                 return playback
             try:
                 start();api('settings',{'volume':0,'compute_device':'cpu'})

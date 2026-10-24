@@ -159,3 +159,12 @@ and all ten languages now pass the Linux/Windows release matrix. The random
 reading modes additionally pass real Linux service and native UI acceptance;
 their new Windows matrix coverage must pass before Windows support is claimed.
 CUDA acceleration and Windows GUI/device behavior remain unverified.
+
+`scripts/test-random-reading-modes.py --audio-output /path/to/review` keeps its
+completed synthetic WAVs, expected text, and playback metadata for listening or
+local speech-recognition review. With cached Whisper tiny.en running offline,
+the automatic-mode test sentence and the post-cancellation recovery sentence
+both transcribed exactly. Whole-recording recognition collapsed one repeat in
+the four-sentence paragraph; shorter overlapping windows recovered all four
+repeated sentences and the final paragraph. This is a limited English check,
+separate from perceptual voice similarity or multilingual pronunciation grading.
