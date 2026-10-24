@@ -59,3 +59,4 @@ SAYIT_ONNX_TEST_MODEL="$TEST_MODEL" SAYIT_ONNX_TEST_RUNTIME="$TEST_RUNTIME" SAYI
 python3 "$ROOT_DIR/scripts/test-voice-discovery.py" --config "$TEST_CONFIG" --bin-dir "$TEST_BIN" --headless --reference-output "$TEST_REFERENCE"
 python3 "$ROOT_DIR/scripts/test-qwen-languages.py" --config "$TEST_CONFIG" --reference "$TEST_REFERENCE" \
   --reference-text 'A quiet morning brings a clear new sentence. Every voice gives familiar words its own color, character, and rhythm.'
+python3 "$ROOT_DIR/scripts/test-voice-discovery.py" --config "$TEST_CONFIG" --bin-dir "$TEST_BIN" --headless --candidates 2 --randomize

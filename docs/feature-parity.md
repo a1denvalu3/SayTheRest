@@ -284,9 +284,9 @@ candidates are private temporary files and are not restored after restart.
 Linux real-model service acceptance checked the default four-candidate batch, silent device preview,
 two concurrent saves, reading new text with the saved voice, cancellation, and
 collection cleanup. Native desktop acceptance passed 25 checks in Spanish,
-including editing profile generation settings. It exposed a missing
-`Intl.DisplayNames` fallback in WebKit and a legacy grid rule compressing the
-new form; both were corrected and covered by native layout checks. Light/dark
+including editing profile generation settings. The language labels include an
+`Intl.DisplayNames` fallback for older webviews. Screenshot review exposed a
+legacy grid rule compressing the new form; it was corrected and covered by native layout checks. Light/dark
 screenshots were inspected. Rejection tests cover invalid controls/languages,
 full collections preserving their prior samples, clearing during generation,
 saved profile persistence, language restoration, and legacy profile defaults.
@@ -309,6 +309,17 @@ concurrent saving, then synthesizes all ten languages and automatic detection
 from a locally generated synthetic reference. It requires no recorded human voice.
 It does not establish pronunciation quality, Windows GUI/device behavior, or GPU
 execution. Setting `SAYIT_QWEN_TEST_MODEL` reuses checksum-verified local assets.
+
+The voice-character slider interpolates the three presets with the upstream
+parameter steps. **Surprise me** instead chooses a separate bounded recipe for
+each candidate, disables fixed tuning inputs, and retains the optional seed.
+Candidates return their actual recipe, which is preserved on save and reuse.
+With the pinned runtime, the same seed reproduces the recipe. A real Linux
+two-candidate run verified different recipes, valid audio, preview, saved-profile
+reuse, concurrent saving, and cancellation in 1.01 s. Native desktop acceptance
+passed 29 checks, including slider endpoints, randomized generation, appending
+without losing an existing card's name, and cancellation retaining both samples.
+These controls do not enable automatic stable/per-paragraph reading modes.
 
 Generation controls validate temperature, nucleus/top-k sampling, repetition
 penalty, seed, and token limits. Real managed-worker acceptance verified that

@@ -4361,6 +4361,7 @@ dependencies = [
  "chrono",
  "flate2",
  "hound",
+ "rand 0.9.5",
  "reqwest 0.12.28",
  "rminiaudio",
  "sayit-core",

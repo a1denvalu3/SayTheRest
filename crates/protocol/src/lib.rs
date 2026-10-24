@@ -421,6 +421,8 @@ pub struct VoiceDiscoveryRequest {
     #[serde(default)]
     pub seed: Option<u32>,
     #[serde(default)]
+    pub randomize_tuning: bool,
+    #[serde(default)]
     pub tuning: VoiceGenerationTuning,
 }
 

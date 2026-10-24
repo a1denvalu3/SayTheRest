@@ -39,6 +39,11 @@ voices**. Choose the sample text, language, sample count, and style, then select
 and then **Use this voice**. Saved voices can read new text and survive restarts.
 No recording or transcript from a human speaker is needed for this workflow.
 
+Move **Voice character** between Faithful and Expressive, or enable **Surprise
+me** to explore different generation settings for each candidate. The optional
+seed also makes these recipes repeatable with the same runtime. Each saved voice
+keeps the settings used for its sample.
+
 New batches append to the current collection, up to 32 candidates. Cancellation
 keeps completed samples. Unsaved candidates are temporary; save favorites before
 restarting. A sample that fails reference-quality checks can still be previewed,

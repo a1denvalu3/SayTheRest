@@ -96,6 +96,7 @@
           "language": { "type": ["string", "null"], "description": "Optional Qwen language code. Defaults to the selected model's saved language." },
           "candidate_count": { "type": "integer", "minimum": 1, "maximum": 8, "default": 4 },
           "seed": { "type": ["integer", "null"], "minimum": 0, "maximum": 4294967295, "description": "First candidate's seed; subsequent candidates increment it with 32-bit wrapping. Null chooses a random seed." },
+          "randomize_tuning": { "type": "boolean", "default": false, "description": "Choose a separate bounded tuning recipe for each candidate. Recipes are repeatable for the same seed with the pinned runtime; each candidate returns its actual tuning, which is retained when saved." },
           "tuning": { "$ref": "#/components/schemas/VoiceGenerationTuning" }
         }
       },

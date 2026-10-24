@@ -23,6 +23,7 @@ def main():
     parser.add_argument('--bin-dir',type=Path,default=Path('target/release'))
     parser.add_argument('--headless',action='store_true')
     parser.add_argument('--candidates',type=int,choices=range(1,9),help='Override the default batch of four')
+    parser.add_argument('--randomize',action='store_true',help='Use and verify a different tuning recipe for each candidate')
     parser.add_argument('--reference-output',type=Path,help='Keep the generated synthetic reference for further local model tests')
     args=parser.parse_args()
     binary=args.bin_dir.resolve()/('sayit-service.exe' if os.name=='nt' else 'sayit-service')
@@ -55,18 +56,22 @@ def main():
                 assert next(model for model in api('models') if model['selected'])['capabilities']['voice_discovery']
                 assert api('voices/discovery') is None
                 sample='A quiet morning brings a clear new sentence. Every voice gives familiar words its own color, character, and rhythm.'
-                request={'sample_text':sample,'language':'en','seed':417}
+                request={'sample_text':sample,'language':'en','seed':417,'randomize_tuning':args.randomize}
                 if args.candidates is not None:request['candidate_count']=args.candidates
                 expected=args.candidates or 4
                 start=time.monotonic();api('voices/discovery',request)
                 def ready():
                     snapshot=api('voices/discovery');assert snapshot['state']!='failed',snapshot
                     return snapshot if snapshot['state']=='ready' else None
-                snapshot=until(ready,timeout=420);candidate=snapshot['candidates'][0]
+                snapshot=until(ready,timeout=420)
+                candidate=next((item for item in snapshot['candidates'] if item['save_error'] is None),None)
+                assert candidate is not None,'no candidate passed reference-quality checks'
                 assert snapshot['completed']==snapshot['total']==len(snapshot['candidates'])==expected
                 assert [item['seed'] for item in snapshot['candidates']]==list(range(417,417+expected))
                 assert len({item['id'] for item in snapshot['candidates']})==expected
                 assert all(item['duration_seconds']>0.5 for item in snapshot['candidates'])
+                if args.randomize and expected>1:
+                    assert len({json.dumps(item['tuning'],sort_keys=True) for item in snapshot['candidates']})>1,'randomized tuning was identical for every candidate'
                 assert candidate['duration_seconds']>3
                 assert candidate['save_error'] is None,candidate
                 assert api('history')==[],'discovery created speech history'
@@ -79,7 +84,7 @@ def main():
                 with ThreadPoolExecutor(max_workers=2) as pool:
                     saved=list(pool.map(lambda _:api(path,{'name':'Generated narrator'}),range(2)))
                 profile=saved[0];assert saved[1]['id']==profile['id'],'concurrent save created duplicate profiles'
-                assert profile['generated'] and profile['language']=='en' and profile['generation_tuning']['temperature']==0.65
+                assert profile['generated'] and profile['language']=='en' and profile['generation_tuning']==candidate['tuning']
                 assert len(api('voices'))==1 and Path(profile['reference_audio_path']).is_file()
                 if args.reference_output:
                     args.reference_output.parent.mkdir(parents=True,exist_ok=True)

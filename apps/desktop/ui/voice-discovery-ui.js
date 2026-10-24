@@ -4,9 +4,14 @@
   const keys=['temperature','top_p','top_k','repetition_penalty'];
   const escape=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
   function languageLabel(code){if(code==='auto')return 'Automatic';try{return new Intl.DisplayNames(navigator.languages,{type:'language'}).of(code)||code}catch{return code}}
-  function write(form,tuning){for(const key of keys)form.elements[key].value=String(tuning[key]);form.elements.preset.value=Object.keys(presets).find(name=>keys.every(key=>presets[name][key]===tuning[key]))||'custom'}
+  function characterTuning(position){
+    const from=position<=.5?presets.faithful:presets.natural,to=position<=.5?presets.natural:presets.expressive;
+    const fraction=position<=.5?position*2:(position-.5)*2;
+    return Object.fromEntries(keys.map(key=>{const step=key==='top_k'?1:.05;return [key,Number((Math.round((from[key]+(to[key]-from[key])*fraction)/step)*step).toFixed(2))]}));
+  }
+  function write(form,tuning,position){for(const key of keys)form.elements[key].value=String(tuning[key]);const preset=Object.keys(presets).find(name=>keys.every(key=>presets[name][key]===tuning[key]));form.elements.preset.value=preset||'custom';if(form.elements.character){if(position!==undefined||preset)form.elements.character.value=String(position??({faithful:0,natural:.5,expressive:1}[preset]));form.elements.character.setAttribute('aria-valuetext',preset||'Custom settings')}}
   function read(form){return Object.fromEntries(keys.map(key=>[key,Number(form.elements[key].value)]))}
-  function bind(form){form.elements.preset.onchange=()=>{const preset=presets[form.elements.preset.value];if(preset)write(form,preset)};for(const key of keys)form.elements[key].oninput=()=>{form.elements.preset.value='custom'}}
+  function bind(form){form.elements.preset.onchange=()=>{const preset=presets[form.elements.preset.value];if(preset)write(form,preset)};for(const key of keys)form.elements[key].oninput=()=>{form.elements.preset.value='custom';form.elements.character?.setAttribute('aria-valuetext','Custom settings')};if(form.elements.character)form.elements.character.oninput=()=>{const position=Number(form.elements.character.value);write(form,characterTuning(position),position)}}
   class VoiceDiscoveryView{
     constructor({get,post,del,notify,changed,visible}){
       Object.assign(this,{get,post,del,notify,changed,visible});
@@ -16,6 +21,7 @@
       write(this.form,presets.natural);bind(this.form);bind(this.editor);
       this.form.onsubmit=event=>{event.preventDefault();this.generate()};
       this.form.elements.language.onchange=()=>this.defaultText();
+      this.form.elements.randomize_tuning.onchange=()=>this.syncControls();
       document.querySelector('#discovery-cancel').onclick=()=>this.action(()=>this.post('voices/discovery/cancel',{}));
       document.querySelector('#discovery-clear').onclick=()=>this.action(()=>this.del('voices/discovery'));
       document.querySelector('#cancel-voice-generation').onclick=()=>this.dialog.close();
@@ -40,7 +46,7 @@
     renderSnapshot(snapshot){
       if(snapshot?.model_id!==this.model)snapshot=null;
       this.generating=snapshot?.state==='generating';
-      for(const field of this.form.querySelectorAll('[name]'))field.disabled=this.generating;
+      this.syncControls();
       this.form.querySelector('[type=submit]').disabled=this.generating;
       document.querySelector('#discovery-cancel').hidden=!this.generating;
       document.querySelector('#discovery-clear').hidden=this.generating||!snapshot;
@@ -63,9 +69,10 @@
         const select=card.querySelector('[data-candidate-action=select]');select.hidden=!saved;select.disabled=saved?.id===this.settings.active_voice_profile_id;select.textContent=select.disabled?'In use':'Use this voice';
       }
     }
+    syncControls(){for(const field of this.form.querySelectorAll('[name]'))field.disabled=this.generating;const random=this.form.elements.randomize_tuning.checked;for(const name of [...keys,'character','preset'])this.form.elements[name].disabled=this.generating||random}
     async generate(){
       const button=this.form.querySelector('[type=submit]');button.disabled=true;
-      try{const seed=this.form.elements.seed.value;await this.post('voices/discovery',{sample_text:this.form.elements.sample_text.value,language:this.form.elements.language.value,candidate_count:Number(this.form.elements.candidate_count.value),seed:seed===''?null:Number(seed),tuning:read(this.form)});await this.refresh()}catch(error){this.notify(String(error));button.disabled=false}
+      try{const seed=this.form.elements.seed.value,random=this.form.elements.randomize_tuning.checked;await this.post('voices/discovery',{sample_text:this.form.elements.sample_text.value,language:this.form.elements.language.value,candidate_count:Number(this.form.elements.candidate_count.value),seed:seed===''?null:Number(seed),randomize_tuning:random?true:undefined,tuning:random?undefined:read(this.form)});await this.refresh()}catch(error){this.notify(String(error));button.disabled=false}
     }
     async action(run){try{await run();await this.refresh()}catch(error){this.notify(String(error))}}
     async candidateAction(card,button){

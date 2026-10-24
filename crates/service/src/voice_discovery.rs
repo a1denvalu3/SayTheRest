@@ -1,4 +1,5 @@
 use super::*;
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use sayit_core::{QwenGenerationOptions, QwenSamplingOptions};
 use sayit_protocol::{
     VoiceCandidate, VoiceDiscoveryRequest, VoiceDiscoverySnapshot, VoiceDiscoveryState,
@@ -27,6 +28,16 @@ pub(super) fn sampling(tuning: VoiceGenerationTuning) -> QwenSamplingOptions {
         top_p: tuning.top_p,
         top_k: tuning.top_k,
         repetition_penalty: tuning.repetition_penalty,
+    }
+}
+
+fn randomized_tuning(seed: u32) -> VoiceGenerationTuning {
+    let mut rng = StdRng::seed_from_u64(u64::from(seed) ^ 0x5354_525f_564f_4943);
+    VoiceGenerationTuning {
+        temperature: rng.random_range(4..=24) as f32 / 20.0,
+        top_p: rng.random_range(10..=20) as f32 / 20.0,
+        top_k: rng.random_range(0..=100),
+        repetition_penalty: rng.random_range(18..=30) as f32 / 20.0,
     }
 }
 
@@ -235,6 +246,7 @@ pub(super) async fn start(
                 seed,
                 count,
                 request.tuning,
+                request.randomize_tuning,
                 &worker_cancel,
             )
         })
@@ -281,6 +293,7 @@ fn run_batch(
     seed: u32,
     count: usize,
     tuning: VoiceGenerationTuning,
+    randomize: bool,
     cancelled: &AtomicBool,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -304,6 +317,11 @@ fn run_batch(
             .tempdir_in(directory)?;
         let source = candidate_directory.path().join("sample.wav");
         let candidate_seed = seed.wrapping_add(index as u32);
+        let tuning = if randomize {
+            randomized_tuning(candidate_seed)
+        } else {
+            tuning
+        };
         let options = QwenGenerationOptions {
             seed: Some(u64::from(candidate_seed)),
             max_new_tokens: Some(512),
@@ -553,8 +571,25 @@ mod tests {
             language: Some("en".into()),
             candidate_count: 1,
             seed: Some(417),
+            randomize_tuning: false,
             tuning: VoiceGenerationTuning::default(),
         }
+    }
+
+    #[test]
+    fn random_recipes_are_bounded_repeatable_and_vary_between_candidates() {
+        let mut recipes = std::collections::HashSet::new();
+        for seed in 0..256 {
+            let tuning = randomized_tuning(seed);
+            sampling(tuning).validate().unwrap();
+            let encoded = serde_json::to_string(&tuning).unwrap();
+            assert_eq!(
+                encoded,
+                serde_json::to_string(&randomized_tuning(seed)).unwrap()
+            );
+            recipes.insert(encoded);
+        }
+        assert!(recipes.len() > 240);
     }
 
     fn collection(state: &ServiceState, count: usize, status: VoiceDiscoveryState) -> Vec<Uuid> {
