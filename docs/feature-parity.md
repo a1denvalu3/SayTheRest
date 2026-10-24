@@ -154,9 +154,10 @@ python3 scripts/test-desktop-ui.py --config /path/to/installed/preset/config.jso
 node --test apps/desktop/tests/reader-timing.test.cjs
 ```
 
-The native UI runner currently targets Linux and supports an active display or
-`--virtual-display` with Xvfb;
-it does not establish Windows GUI or compositor-specific tray placement. Linux
+The native UI runner supports Linux displays/`--virtual-display` with Xvfb and
+an interactive Windows desktop. Real-model native UI acceptance documented here
+has run on Linux; Windows GUI/device behavior and compositor-specific tray
+placement remain separate checks. Linux
 AppIndicator exposes the player through its menu because Tauri does not provide
 tray click coordinates/events there. Windows uses direct tray clicks. On Wayland,
 window placement follows the compositor when explicit positioning is unavailable.
@@ -182,6 +183,16 @@ python3 scripts/test-player-native-menu.py
 python3 scripts/test-desktop-ui.py --virtual-display --config /path/to/installed/preset/config.json
 ```
 
+The Windows mouse driver uses Win32 input, a private outside-click target, and
+the same actual-webview geometry/result driver. Its UI-only fixture requires no
+model runtime or audio device. The runner isolates Windows app state and sets a
+private [WebView2 user-data folder](https://learn.microsoft.com/microsoft-edge/webview2/reference/win32/webview2-idl),
+with bounded retries for WebView2's asynchronous file cleanup. CI now includes
+the Windows debug UI build and mouse driver; that new check is pending.
+
+```powershell
+python scripts/test-player-native-menu-windows.py --bin-dir target/x86_64-pc-windows-msvc/debug
+```
 
 Kokoro's current 103-voice INT8 bundle passed real Linux synthesis for every
 speaker: two US English presets, one British English preset, and 100 Mandarin

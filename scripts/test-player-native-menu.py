@@ -77,7 +77,7 @@ def main():
                 time.sleep(.75);opened=visible()
                 assert window in opened,'player dismissed when its native menu opened'
                 assert opened-before,'no native popup appeared after mouse input'
-                assert xdo('mousemove','--window',window,100,100,'click','1').returncode==0
+                assert xdo('mousemove','--window',window,200,20,'click','1').returncode==0
                 time.sleep(.5);assert window in visible(),'player dismissed while closing its own menu'
                 time.sleep(4)
                 assert xdo('mousemove','0','0','click','1').returncode==0
