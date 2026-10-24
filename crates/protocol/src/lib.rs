@@ -31,6 +31,8 @@ pub enum QueuePolicy {
 pub struct SpeechSubmission {
     pub text: String,
     #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
     pub language: Option<String>,
     #[serde(default)]
     pub voice_profile_id: Option<Uuid>,
@@ -72,6 +74,8 @@ pub enum JobState {
 pub struct SpeechJob {
     pub id: Uuid,
     pub text: String,
+    #[serde(default)]
+    pub model_id: Option<String>,
     #[serde(default)]
     pub language: Option<String>,
     pub source: SpeechSource,

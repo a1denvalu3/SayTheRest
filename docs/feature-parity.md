@@ -321,6 +321,32 @@ passed 29 checks, including slider endpoints, randomized generation, appending
 without losing an existing card's name, and cancellation retaining both samples.
 These controls do not enable automatic stable/per-paragraph reading modes.
 
+A focused native probe subsequently reproduced the label failure: WebKit
+reports `navigator.languages = ["C"]` on this host, and `Intl.DisplayNames`
+rejects that language tag with `RangeError`. The fallback keeps the controls
+usable in that locale. Snapshot checks disable animation only in the debug
+driver so occluded webviews cannot leave an entrance animation half-painted.
+
+Queued speech now captures its model ID as well as its language/profile. An
+optional API model override uses that model's saved voice and language without
+changing the active selection. History regeneration uses the captured model;
+older entries without this metadata retain their existing behavior. Rejected
+submissions validate before replacement/interrupt side effects, preserving valid
+queued work and playback. Models with queued/active readings cannot be removed;
+a concurrent removal that wins before enqueue produces a rejection instead of
+an unusable queued job.
+
+Real Linux device acceptance queued Piper readings, paused the first, switched
+the active model to Phonon, and verified that queued/explicitly requested Piper
+audio remained 22,050 Hz while a subsequent Phonon reading was 24,000 Hz. It also
+checked invalid interruption, removal protection, history regeneration, and model
+metadata surviving service restart. The suite reads installed model assets and
+uses private service state at zero volume:
+
+```sh
+python3 scripts/test-queued-models.py --piper-config /path/to/piper/config.json --phonon-config /path/to/phonon/config.json
+```
+
 Generation controls validate temperature, nucleus/top-k sampling, repetition
 penalty, seed, and token limits. Real managed-worker acceptance verified that
 tuning changes the native output, streamed/archive frame counts match,

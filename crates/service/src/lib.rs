@@ -347,7 +347,11 @@ impl ServiceState {
     }
 
     async fn process_job(&self, job: SpeechJob) {
-        let Some(config_path) = self.resolve_engine_config().await else {
+        let config_path = match job.model_id.as_deref() {
+            Some(id) => Some(self.models.config_path(id)),
+            None => self.resolve_engine_config().await,
+        };
+        let Some(config_path) = config_path else {
             self.finish_job(
                 job.id,
                 Err(anyhow::anyhow!("no inference configuration installed")),
@@ -1264,7 +1268,11 @@ async fn regenerate_history(
         .ok_or((StatusCode::NOT_FOUND, "history item not found".into()))?;
     // Older Qwen entries could retain a pace that the backend ignored.
     // Regenerate those at the natural pace actually used by that model.
-    let speaking_pace = if let Some(path) = state.resolve_engine_config().await
+    let model_config = match item.job.model_id.as_deref() {
+        Some(id) => Some(state.models.config_path(id)),
+        None => state.resolve_engine_config().await,
+    };
+    let speaking_pace = if let Some(path) = model_config
         && !EngineConfig::from_path(&path)
             .map_err(unprocessable)?
             .supports_native_speaking_pace()
@@ -1276,6 +1284,7 @@ async fn regenerate_history(
     submit_job(
         State(state),
         Json(SpeechSubmission {
+            model_id: item.job.model_id,
             language: item.job.language,
             text: item.job.text,
             voice_profile_id: item.job.voice_profile_id,
@@ -1635,6 +1644,7 @@ async fn preview_voice(
     submit_job(
         State(state),
         Json(SpeechSubmission {
+            model_id: None,
             language: None,
             text: format!("This is a preview of the voice {}.", voice.name),
             voice_profile_id: Some(id),
@@ -2323,10 +2333,23 @@ async fn remove_model(
     State(state): State<ServiceState>,
     RoutePath(id): RoutePath<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    if state.inner.read().await.settings.active_model_id.as_deref() == Some(id.as_str()) {
+    let inner = state.inner.read().await;
+    if inner.settings.active_model_id.as_deref() == Some(id.as_str()) {
         return Err((
             StatusCode::CONFLICT,
             "select another model before removing this one".into(),
+        ));
+    }
+    if inner.jobs.iter().any(|job| {
+        job.model_id.as_deref() == Some(id.as_str())
+            && matches!(
+                job.state,
+                JobState::Queued | JobState::Synthesizing | JobState::Playing | JobState::Paused
+            )
+    }) {
+        return Err((
+            StatusCode::CONFLICT,
+            "finish or cancel this model's queued readings before removing it".into(),
         ));
     }
     state.models.remove(&id).map_err(unprocessable)?;
@@ -2337,10 +2360,31 @@ async fn submit_job(
     State(state): State<ServiceState>,
     Json(submission): Json<SpeechSubmission>,
 ) -> Result<(StatusCode, Json<SpeechJob>), (StatusCode, String)> {
-    let config_path = state.resolve_engine_config().await.ok_or((
-        StatusCode::CONFLICT,
-        "download and select a speech model before reading text aloud".into(),
-    ))?;
+    let model_id =
+        submission
+            .model_id
+            .clone()
+            .or(state.inner.read().await.settings.active_model_id.clone());
+    if model_id.as_deref().is_some_and(|id| {
+        id.is_empty()
+            || id.len() > 120
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    }) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid model identifier".into(),
+        ));
+    }
+    let config_path = model_id
+        .as_deref()
+        .map(|id| state.models.config_path(id))
+        .filter(|path| path.is_file())
+        .ok_or((
+            StatusCode::CONFLICT,
+            "download and select a speech model before reading text aloud".into(),
+        ))?;
     let config = EngineConfig::from_path(&config_path).map_err(unprocessable)?;
     let requires_voice_profile = config.requires_reference();
     let language = match submission.language.as_deref().or(config.language()) {
@@ -2393,27 +2437,12 @@ async fn submit_job(
             "speaking pace must be one of 0.75, 0.9, 1.0, 1.1, 1.25, or 1.5".into(),
         ));
     }
-    let active = if submission.queue_policy == QueuePolicy::Interrupt {
-        state.player.snapshot().job_id.or(state
-            .inner
-            .read()
-            .await
-            .jobs
-            .iter()
-            .find(|job| job.state == JobState::Synthesizing)
-            .map(|job| job.id))
-    } else {
-        None
-    };
-    if active.is_some() {
-        state.synthesis_cancelled.store(true, Ordering::Relaxed);
-        state.player.stop().map_err(internal_error)?;
-    }
     let mut inner = state.inner.write().await;
-    if let Some(active) = active
-        && let Some(job) = inner.jobs.iter_mut().find(|job| job.id == active)
-    {
-        job.state = JobState::Cancelled;
+    if !config_path.is_file() {
+        return Err((
+            StatusCode::CONFLICT,
+            "the requested model was removed before this reading could be queued".into(),
+        ));
     }
     let character_count = text.chars().count();
     if character_count > 200_000 {
@@ -2433,6 +2462,59 @@ async fn submit_job(
             ),
         ));
     }
+    let voice_profile_id = submission.voice_profile_id.or_else(|| {
+        if model_id == inner.settings.active_model_id {
+            inner.settings.active_voice_profile_id
+        } else {
+            model_id.as_ref().and_then(|id| {
+                inner
+                    .settings
+                    .voice_profile_by_model
+                    .get(id)
+                    .copied()
+                    .flatten()
+            })
+        }
+    });
+    if requires_voice_profile && voice_profile_id.is_none() {
+        return Err((
+            StatusCode::CONFLICT,
+            "The selected model requires a cloned voice; open Voices and create or select a voice profile first"
+                .into(),
+        ));
+    }
+    if let Some(voice_id) = voice_profile_id {
+        let active_model = model_id.as_deref();
+        let compatible = inner.voices.iter().any(|voice| {
+            voice.id == voice_id
+                && Some(voice.model_id.as_str()) == active_model
+                && (voice.reference_kind == sayit_protocol::VoiceReferenceKind::PhononEmbedding)
+                    == phonon
+        });
+        if !compatible {
+            return Err((
+                StatusCode::CONFLICT,
+                "voice profile is not compatible with the requested model".into(),
+            ));
+        }
+    }
+    // Validate the complete request before replacement/interrupt side effects.
+    if submission.queue_policy == QueuePolicy::Interrupt {
+        let active = state.player.snapshot().job_id.or_else(|| {
+            inner
+                .jobs
+                .iter()
+                .find(|job| job.state == JobState::Synthesizing)
+                .map(|job| job.id)
+        });
+        if let Some(active) = active {
+            state.synthesis_cancelled.store(true, Ordering::Relaxed);
+            state.player.stop().map_err(internal_error)?;
+            if let Some(job) = inner.jobs.iter_mut().find(|job| job.id == active) {
+                job.state = JobState::Cancelled;
+            }
+        }
+    }
     if matches!(
         submission.queue_policy,
         QueuePolicy::Replace | QueuePolicy::Interrupt
@@ -2445,33 +2527,9 @@ async fn submit_job(
             queued.state = JobState::Cancelled;
         }
     }
-    let voice_profile_id = submission
-        .voice_profile_id
-        .or(inner.settings.active_voice_profile_id);
-    if requires_voice_profile && voice_profile_id.is_none() {
-        return Err((
-            StatusCode::CONFLICT,
-            "The selected model requires a cloned voice; open Voices and create or select a voice profile first"
-                .into(),
-        ));
-    }
-    if let Some(voice_id) = voice_profile_id {
-        let active_model = inner.settings.active_model_id.as_deref();
-        let compatible = inner.voices.iter().any(|voice| {
-            voice.id == voice_id
-                && Some(voice.model_id.as_str()) == active_model
-                && (voice.reference_kind == sayit_protocol::VoiceReferenceKind::PhononEmbedding)
-                    == phonon
-        });
-        if !compatible {
-            return Err((
-                StatusCode::CONFLICT,
-                "voice profile is not compatible with the active model".into(),
-            ));
-        }
-    }
     voice_discovery::cancel_active(&state);
     let job = SpeechJob {
+        model_id,
         language,
         id: Uuid::new_v4(),
         text,
@@ -2777,6 +2835,7 @@ mod tests {
         let state = ServiceState::default();
         let job_id = Uuid::new_v4();
         state.inner.write().await.jobs.push_back(SpeechJob {
+            model_id: None,
             language: None,
             id: job_id,
             text: "Visible while synthesis is running.".into(),
@@ -2801,6 +2860,7 @@ mod tests {
         let active_id = Uuid::new_v4();
         let replay_id = Uuid::new_v4();
         let make_job = |id, state| SpeechJob {
+            model_id: None,
             language: None,
             id,
             text: id.to_string(),
@@ -2839,6 +2899,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state = ServiceState::open(directory.path().to_owned(), None).unwrap();
         let submission = SpeechSubmission {
+            model_id: None,
             language: None,
             text: "persist me".into(),
             voice_profile_id: None,
@@ -2848,6 +2909,7 @@ mod tests {
             speaking_pace: None,
         };
         let job = SpeechJob {
+            model_id: None,
             language: None,
             id: Uuid::new_v4(),
             text: submission.text,
@@ -2870,6 +2932,7 @@ mod tests {
         let state = ServiceState::open(directory.path().to_owned(), None).unwrap();
         let job_id = Uuid::new_v4();
         state.inner.write().await.jobs.push_back(SpeechJob {
+            model_id: None,
             language: None,
             id: job_id,
             text: "recover after a crash".into(),
@@ -2917,6 +2980,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state = ServiceState::open(directory.path().to_owned(), None).unwrap();
         state.inner.write().await.jobs.push_back(SpeechJob {
+            model_id: None,
             language: None,
             id: Uuid::new_v4(),
             text: "survives journal corruption".into(),
@@ -3005,6 +3069,229 @@ for line in sys.stdin:
         state.inner.try_write().unwrap().settings.active_model_id = Some("qwen3-tts".into());
         write_persisted_state(&state.store_path, &state.inner.try_read().unwrap(), false).unwrap();
         state
+    }
+
+    #[tokio::test]
+    async fn model_is_captured_and_history_regenerates_with_it_after_selection_changes() {
+        let state = ServiceState::default();
+        let primary = "piper-en-us-lessac-medium";
+        let alternate = "alternate-model";
+        let path = state.models.config_path(alternate);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::copy(state.models.config_path(primary), path).unwrap();
+        let request: SpeechSubmission = serde_json::from_value(
+            serde_json::json!({"text":"A queued reading.","queue_policy":"append"}),
+        )
+        .unwrap();
+        let (_, Json(first)) = submit_job(State(state.clone()), Json(request.clone()))
+            .await
+            .unwrap();
+        assert_eq!(first.model_id.as_deref(), Some(primary));
+        select_model(State(state.clone()), RoutePath(alternate.into()))
+            .await
+            .unwrap();
+        let (_, Json(second)) = submit_job(State(state.clone()), Json(request.clone()))
+            .await
+            .unwrap();
+        assert_eq!(second.model_id.as_deref(), Some(alternate));
+        assert_eq!(
+            remove_model(State(state.clone()), RoutePath(primary.into()))
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::CONFLICT
+        );
+        assert!(state.models.config_path(primary).is_file());
+        let (_, Json(explicit)) = submit_job(
+            State(state.clone()),
+            Json(SpeechSubmission {
+                model_id: Some(primary.into()),
+                ..request
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(explicit.model_id.as_deref(), Some(primary));
+        assert_eq!(
+            state.inner.read().await.settings.active_model_id.as_deref(),
+            Some(alternate)
+        );
+        state.inner.write().await.history.push(HistoryItem {
+            job: SpeechJob {
+                state: JobState::Completed,
+                ..first.clone()
+            },
+            audio_path: None,
+            duration_seconds: None,
+            pinned: false,
+            spoken_chunks: Vec::new(),
+        });
+        let (_, Json(regenerated)) = regenerate_history(State(state.clone()), RoutePath(first.id))
+            .await
+            .unwrap();
+        assert_eq!(regenerated.model_id.as_deref(), Some(primary));
+        assert_eq!(
+            state.inner.read().await.settings.active_model_id.as_deref(),
+            Some(alternate)
+        );
+        state.persist().await.unwrap();
+        let reopened = ServiceState::open(state.store_path.parent().unwrap().into(), None).unwrap();
+        let inner = reopened.inner.read().await;
+        assert_eq!(inner.history[0].job.model_id.as_deref(), Some(primary));
+        assert_eq!(
+            inner
+                .jobs
+                .iter()
+                .find(|job| job.id == regenerated.id)
+                .unwrap()
+                .model_id
+                .as_deref(),
+            Some(primary)
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_model_or_profile_overrides_do_not_interrupt_or_replace_existing_work() {
+        let state = ServiceState::default();
+        let request: SpeechSubmission = serde_json::from_value(
+            serde_json::json!({"text":"An existing reading.","queue_policy":"append"}),
+        )
+        .unwrap();
+        let (_, Json(queued)) = submit_job(State(state.clone()), Json(request.clone()))
+            .await
+            .unwrap();
+        let active = Uuid::new_v4();
+        state.inner.write().await.jobs.push_back(SpeechJob {
+            id: active,
+            state: JobState::Synthesizing,
+            ..queued.clone()
+        });
+        for policy in [QueuePolicy::Replace, QueuePolicy::Interrupt] {
+            for (model_id, voice_profile_id, expected) in [
+                (
+                    Some("../invalid".into()),
+                    None,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                ),
+                (Some("uninstalled-model".into()), None, StatusCode::CONFLICT),
+                (None, Some(Uuid::new_v4()), StatusCode::CONFLICT),
+            ] {
+                let error = submit_job(
+                    State(state.clone()),
+                    Json(SpeechSubmission {
+                        model_id,
+                        voice_profile_id,
+                        queue_policy: policy.clone(),
+                        ..request.clone()
+                    }),
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(error.0, expected);
+                let inner = state.inner.read().await;
+                assert_eq!(inner.jobs.len(), 2);
+                assert_eq!(inner.jobs[0].state, JobState::Queued);
+                assert_eq!(inner.jobs[1].state, JobState::Synthesizing);
+                assert!(!state.synthesis_cancelled.load(Ordering::Relaxed));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_removal_before_enqueue_rejects_the_job_without_queue_side_effects() {
+        let state = ServiceState::default();
+        let primary = "piper-en-us-lessac-medium";
+        let alternate = state.models.config_path("alternate-model");
+        fs::create_dir_all(alternate.parent().unwrap()).unwrap();
+        fs::copy(state.models.config_path(primary), alternate).unwrap();
+        select_model(State(state.clone()), RoutePath("alternate-model".into()))
+            .await
+            .unwrap();
+        // A remover holds the same read lock while it checks in-flight work.
+        let removing = state.inner.read().await;
+        let background = state.clone();
+        let queued = tokio::spawn(async move {
+            submit_job(
+                State(background),
+                Json(
+                    serde_json::from_value(
+                        serde_json::json!({"text":"A racing submission.","model_id":primary}),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .await
+        });
+        // Tokio's fair lock makes a later reader wait once submission reaches
+        // the enqueue write lock; no production timing hooks are required.
+        let start = Instant::now();
+        loop {
+            if tokio::time::timeout(std::time::Duration::from_millis(5), state.inner.read())
+                .await
+                .is_err()
+            {
+                break;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(5));
+            tokio::task::yield_now().await;
+        }
+        fs::remove_file(state.models.config_path(primary)).unwrap();
+        drop(removing);
+        assert_eq!(queued.await.unwrap().unwrap_err().0, StatusCode::CONFLICT);
+        assert!(state.inner.read().await.jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn model_override_uses_its_saved_profile_and_language_without_changing_active_selection()
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let state = qwen_voice_test_state(directory.path());
+        let voice = Uuid::new_v4();
+        state.inner.write().await.voices.push(VoiceProfile {
+            id: voice,
+            name: "Saved narrator".into(),
+            model_id: "qwen3-tts".into(),
+            generated: false,
+            language: None,
+            generation_tuning: None,
+            reference_kind: sayit_protocol::VoiceReferenceKind::Audio,
+            reference_audio_path: "reference.wav".into(),
+            reference_text: Some("Exact reference text.".into()),
+            reference_duration_seconds: 4.0,
+            created_at: chrono::Utc::now(),
+            quality: VoiceQuality::default(),
+            refinement_steps: 5,
+        });
+        select_voice(State(state.clone()), RoutePath(voice))
+            .await
+            .unwrap();
+        state.models.select_language("qwen3-tts", "es").unwrap();
+        let piper = ServiceState::default();
+        let path = state.models.config_path("piper-en-us-lessac-medium");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::copy(piper.models.config_path("piper-en-us-lessac-medium"), path).unwrap();
+        select_model(
+            State(state.clone()),
+            RoutePath("piper-en-us-lessac-medium".into()),
+        )
+        .await
+        .unwrap();
+        let request: SpeechSubmission = serde_json::from_value(
+            serde_json::json!({"text":"Buenos días.","model_id":"qwen3-tts"}),
+        )
+        .unwrap();
+        let (_, Json(job)) = submit_job(State(state.clone()), Json(request))
+            .await
+            .unwrap();
+        assert_eq!(job.model_id.as_deref(), Some("qwen3-tts"));
+        assert_eq!(job.language.as_deref(), Some("es"));
+        assert_eq!(job.voice_profile_id, Some(voice));
+        let inner = state.inner.read().await;
+        assert_eq!(
+            inner.settings.active_model_id.as_deref(),
+            Some("piper-en-us-lessac-medium")
+        );
+        assert!(inner.settings.active_voice_profile_id.is_none());
     }
 
     pub(super) fn native_voice_test_state(directory: &Path) -> ServiceState {
@@ -3132,6 +3419,7 @@ for line in sys.stdin:
         let state = qwen_voice_test_state(directory.path());
         let id = Uuid::new_v4();
         state.inner.write().await.jobs.push_back(SpeechJob {
+            model_id: None,
             language: None,
             id,
             text: "hello".into(),
@@ -3204,6 +3492,7 @@ for line in sys.stdin:
         state.models.select_language("qwen3-tts", "es").unwrap();
         state.inner.write().await.settings.speaking_pace = 1.25;
         let submission = SpeechSubmission {
+            model_id: None,
             text: "Buenos días.".into(),
             language: None,
             voice_profile_id: Some(voice),
@@ -3241,6 +3530,7 @@ for line in sys.stdin:
         let error = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                model_id: None,
                 language: None,
                 speaking_pace: Some(1.25),
                 text: "Unsupported pace.".into(),
@@ -3409,6 +3699,7 @@ for line in sys.stdin:
         for transcript in [Some("Mi voz, con su transcripción exacta."), None] {
             state.inner.write().await.voices[0].reference_text = transcript.map(str::to_owned);
             let job = SpeechJob {
+                model_id: None,
                 language: Some("es".into()),
                 id: Uuid::new_v4(),
                 text: "Text to generate, different from the reference transcript.".into(),
@@ -3519,6 +3810,7 @@ for line in sys.stdin:
         let error = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                model_id: None,
                 language: None,
                 text: "This must not enter the queue.".into(),
                 voice_profile_id: None,
@@ -3548,6 +3840,7 @@ for line in sys.stdin:
         state.inner.write().await.settings.speaking_pace = 1.25;
         let submission = |pace| {
             Json(SpeechSubmission {
+                model_id: None,
                 language: None,
                 text: "A preset is ready without a saved profile.".into(),
                 voice_profile_id: None,
@@ -3649,6 +3942,7 @@ for line in sys.stdin:
             .settings
             .long_text_confirmation_characters = 500;
         let submission = SpeechSubmission {
+            model_id: None,
             language: None,
             text: "x".repeat(501),
             voice_profile_id: None,
@@ -3676,6 +3970,7 @@ for line in sys.stdin:
         let error = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                model_id: None,
                 language: None,
                 text: "This must not become a failed history item.".into(),
                 voice_profile_id: None,
@@ -3699,6 +3994,7 @@ for line in sys.stdin:
             let _ = submit_job(
                 State(state.clone()),
                 Json(SpeechSubmission {
+                    model_id: None,
                     language: None,
                     text: text.into(),
                     voice_profile_id: None,
@@ -3714,6 +4010,7 @@ for line in sys.stdin:
         let _ = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                model_id: None,
                 language: None,
                 text: "replacement".into(),
                 voice_profile_id: None,
@@ -3839,6 +4136,7 @@ for line in sys.stdin:
         let (_, Json(job)) = submit_job(
             State(state.clone()),
             Json(SpeechSubmission {
+                model_id: None,
                 language: None,
                 text: raw,
                 voice_profile_id: None,
@@ -3866,6 +4164,7 @@ for line in sys.stdin:
         let (_, Json(job)) = submit_job(
             State(state),
             Json(SpeechSubmission {
+                model_id: None,
                 language: None,
                 text: raw.into(),
                 voice_profile_id: None,
@@ -3894,6 +4193,7 @@ for line in sys.stdin:
         let make_item = |text: &str, created_at, path: &std::path::Path, pinned| HistoryItem {
             spoken_chunks: Vec::new(),
             job: SpeechJob {
+                model_id: None,
                 language: None,
                 id: Uuid::new_v4(),
                 text: text.into(),
@@ -3957,6 +4257,7 @@ for line in sys.stdin:
         state.inner.write().await.history.push(HistoryItem {
             spoken_chunks: Vec::new(),
             job: SpeechJob {
+                model_id: None,
                 language: None,
                 id: Uuid::new_v4(),
                 text: "old".into(),

@@ -244,6 +244,7 @@ fn main() -> Result<()> {
             let text = text.map(Ok).unwrap_or_else(read_stdin)?;
             let response = authorized(Client::new().post(format!("{base}/jobs")))?
                 .json(&SpeechSubmission {
+                    model_id: None,
                     language: None,
                     text,
                     voice_profile_id,
