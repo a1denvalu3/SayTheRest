@@ -196,7 +196,8 @@ with bounded retries for WebView2's asynchronous file cleanup. Commit `6fcf4b5`
 passed both the Linux and Windows real-mouse checks in CI run
 [40123332015](https://github.com/a1denvalu3/SayTheRest/actions/runs/40123332015).
 This establishes menu/focus behavior on the runner; its complete release matrix
-and Windows model/device UI acceptance remain separate checks.
+also passed on both platforms. Windows model/device UI acceptance remains a
+separate check.
 
 A later preset-capture rerun passed both Windows UI assertions but exposed
 WebView2 recreating a cache directory during teardown (`WinError 145`). The
@@ -231,12 +232,27 @@ unsupported controls, and no preview history/profiles. The release matrix now
 adds the complete preset test on Linux and Windows; Windows acceptance for this
 new test passed at commit `6fcf4b5` in CI run
 [40123332015](https://github.com/a1denvalu3/SayTheRest/actions/runs/40123332015),
-with the complete matrix still running. These checks cover the shipped English/Mandarin pack;
+and its complete release matrix passed on both platforms. These checks cover the shipped English/Mandarin pack;
 Kokoro's six additional Mac languages and perceptual quality grading remain open.
+
+Native control acceptance now also runs against actual installed Kokoro and
+native Qwen configurations, without requiring an audio device. Local Linux
+acceptance passed 18 Kokoro checks and 30 Qwen checks. Kokoro covers every
+catalog name/locale, four actual selections spanning its locale groups,
+speaking pace, settings navigation, and hidden unsupported controls. Qwen covers
+both reading modes, discovery styles/character/seed controls, localized sample
+passages, recording requirements, all ten language selections plus automatic
+detection, and settings navigation. Both suites verify that they create no
+speech jobs, history, or saved profiles. They explicitly report inference and
+audio-device coverage as false; those claims require the separate real-model
+and device suites. The release workflow reuses its verified model downloads
+for these controls on Linux and Windows; new Windows acceptance is pending.
 
 ```sh
 bash scripts/test-kokoro-model.sh x86_64-unknown-linux-gnu
 python3 scripts/test-desktop-ui.py --virtual-display --window main --config /path/to/kokoro-config.json --script scripts/desktop-kokoro-ui-smoke.js --timeout 300
+python3 scripts/test-desktop-ui.py --virtual-display --window main --config /path/to/kokoro-config.json --script scripts/desktop-kokoro-controls-ui-smoke.js --timeout 180
+python3 scripts/test-desktop-ui.py --virtual-display --window main --config /path/to/native-qwen-config.json --script scripts/desktop-qwen-controls-ui-smoke.js --timeout 180
 ```
 
 The native Phonon worker uses the pinned `ptts` 0.4.0 CPU/Q8 runtime. A real

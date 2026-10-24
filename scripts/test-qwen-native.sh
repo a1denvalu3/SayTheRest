@@ -50,6 +50,18 @@ config={'engine':'qwen3-tts-onnx','model':sys.argv[2],'worker':sys.argv[3],'runt
 Path(sys.argv[1]).write_text(json.dumps(config))
 PY
 
+if [[ -n ${SAYIT_QWEN_UI_BIN_DIR:-} ]]; then
+  ui_arguments=()
+  case "$TARGET" in
+    *windows*) ;;
+    *) ui_arguments+=(--virtual-display) ;;
+  esac
+  python3 "$ROOT_DIR/scripts/test-desktop-ui.py" --config "$TEST_CONFIG" \
+    --bin-dir "$SAYIT_QWEN_UI_BIN_DIR" --window main \
+    --script "$ROOT_DIR/scripts/desktop-qwen-controls-ui-smoke.js" \
+    --timeout 180 "${ui_arguments[@]}"
+fi
+
 SAYIT_ONNX_TEST_MODEL="$TEST_MODEL" SAYIT_ONNX_TEST_RUNTIME="$TEST_RUNTIME" \
   cargo test -p sayit-core --locked --target "$TARGET" \
     qwen_onnx::tests::free_voice_sampling_is_repeatable_and_isolated_from_saved_references -- --ignored --exact --nocapture

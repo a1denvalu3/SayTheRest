@@ -37,9 +37,11 @@ jobs:
         run: cargo test --workspace --locked --target '${{ matrix.target }}'
       - name: Test reader timing and Unicode word seeking
         run: node --test apps/desktop/tests/reader-timing.test.cjs
-      - name: Test native UI profile cleanup and error reporting
+      - name: Test native UI cleanup and speech-review input validation
         shell: bash
-        run: python3 scripts/test-native-ui-cleanup.py
+        run: |
+          python3 scripts/test-native-ui-cleanup.py
+          python3 scripts/test-speech-review.py
       - name: Build debug UI for native menu acceptance
         run: cargo build -p sayit-service-app -p sayit-desktop --locked --target '${{ matrix.target }}'
       - name: Test native GTK menus and outside-click dismissal
@@ -67,8 +69,10 @@ jobs:
       - name: Test Kitten models through packaged resident runtime
         shell: bash
         run: ./scripts/test-kitten-models.sh '${{ matrix.target }}'
-      - name: Test all 103 Kokoro presets, worker transport, and cancellation
+      - name: Test all Kokoro presets, cancellation, and native voice controls
         shell: bash
+        env:
+          SAYIT_KOKORO_UI_BIN_DIR: ${{ github.workspace }}/target/${{ matrix.target }}/debug
         run: bash scripts/test-kokoro-model.sh '${{ matrix.target }}'
       - name: Test Phonon install, voices, streaming, and recovery
         shell: bash
@@ -78,6 +82,8 @@ jobs:
         run: ./scripts/test-pocket-model.sh '${{ matrix.target }}'
       - name: Test native Qwen discovery, cloning, languages, and recovery
         shell: bash
+        env:
+          SAYIT_QWEN_UI_BIN_DIR: ${{ github.workspace }}/target/${{ matrix.target }}/debug
         run: ./scripts/test-qwen-native.sh '${{ matrix.target }}'
       - name: Audit Linux packages
         if: runner.os == 'Linux'
