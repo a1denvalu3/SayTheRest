@@ -44,7 +44,8 @@ jobs:
           $runtime = Join-Path $libraryDirectory 'onnxruntime.dll'
           $probe = Join-Path $stage 'sayit-crt-probe.exe'
           $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
-          & $compiler /nologo /platform:x64 "/out:$probe" scripts/windows-crt-probe.cs
+          $source = (Resolve-Path -LiteralPath 'scripts/windows-crt-probe.cs').Path
+          & $compiler /nologo /platform:x64 "/out:$probe" $source
           if ($LASTEXITCODE -ne 0) { throw 'Audit compilation failed' }
           & $probe $runtime
           if ($LASTEXITCODE -eq 0) { throw 'The old package without local CRT files incorrectly passed the audit' }
