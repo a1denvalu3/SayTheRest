@@ -88,6 +88,11 @@ existing Kokoro checkbox remains open. References: the
 [pinned Mac catalog](https://github.com/callebtc/sayit/blob/37d49718bb58853945577a6845dce0cfde84c90d/Sources/SayItCore/Resources/ModelCatalog.json)
 and [sherpa Kokoro bundles](https://github.com/k2-fsa/sherpa/blob/master/docs/source/onnx/tts/pretrained_models/kokoro.rst).
 
+The [international-language acceptance review](kokoro-language-acceptance.md)
+records the isolated candidate evaluation and its 20 actual synthetic samples.
+It found unresolved Hindi/Mandarin recognition errors and leaves all six
+additional locales unadvertised pending native runtime and platform acceptance.
+
 ## Interfaces and operations
 
 - [x] Desktop onboarding, settings, diagnostics, updates, and launch-at-login.
@@ -198,8 +203,10 @@ WebView2 recreating a cache directory during teardown (`WinError 145`). The
 harness now retries that transient error within its existing deadline, together
 with transient missing/locked-file errors. Four targeted tests cover recreation
 followed by actual removal, unrelated I/O failures, the deadline, and an already
-removed directory. The Windows CI step now runs three fresh profile cycles;
-their new acceptance is pending.
+removed directory. All three fresh Windows profile cycles passed at commit
+`9ec33ca` in CI run
+[40126598964](https://github.com/a1denvalu3/SayTheRest/actions/runs/40126598964);
+the complete release matrix remains in progress.
 
 ```powershell
 python scripts/test-player-native-menu-windows.py --bin-dir target/x86_64-pc-windows-msvc/debug
