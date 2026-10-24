@@ -134,7 +134,7 @@ const CATALOG: &[CatalogEntry] = &[
         languages: &["en-US", "en-GB", "zh-CN"],
         license: "Apache-2.0",
         license_url: "https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh/blob/main/LICENSE",
-        quality_note: "Natural multilingual speech with 53 named built-in voices.",
+        quality_note: "English and Mandarin speech with 103 built-in voices.",
         speed_note: "INT8 CPU model; benchmark locally to compare it with Piper.",
         capabilities: ModelCapabilitiesStatic {
             preset_voices: true,
@@ -2116,7 +2116,7 @@ fn config_for(id: &str, root: &Path, executable: &Path) -> Result<EngineConfig> 
             lexicons: vec![root.join("lexicon-us-en.txt"), root.join("lexicon-zh.txt")],
             provider: "cpu".into(),
             num_threads: 4,
-            speaker_id: 3,
+            speaker_id: 0,
         })),
         "kitten-mini-en-v0-8" => Ok(EngineConfig::SherpaOnnxKitten(KittenConfig {
             executable: executable.into(),
@@ -2473,6 +2473,18 @@ mod tests {
         )
         .unwrap();
         let manager = ModelManager::new(storage.path().into(), None).unwrap();
+        let initial = manager
+            .descriptors(Some("kokoro-int8-multi-lang-v1-1"), &HashMap::new())
+            .into_iter()
+            .find(|model| model.id == "kokoro-int8-multi-lang-v1-1")
+            .unwrap();
+        let initial_voice = initial
+            .preset_voices
+            .iter()
+            .find(|voice| voice.selected)
+            .unwrap();
+        assert_eq!(initial_voice.id, "af_maple");
+        assert_eq!(initial_voice.language, "en-US");
         manager
             .select_preset_voice("kokoro-int8-multi-lang-v1-1", "bf_vale")
             .unwrap();

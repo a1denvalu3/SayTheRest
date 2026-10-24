@@ -57,6 +57,9 @@ jobs:
       - name: Test Kitten models through packaged resident runtime
         shell: bash
         run: ./scripts/test-kitten-models.sh '${{ matrix.target }}'
+      - name: Test all 103 Kokoro presets, worker transport, and cancellation
+        shell: bash
+        run: bash scripts/test-kokoro-model.sh '${{ matrix.target }}'
       - name: Test Phonon install, voices, streaming, and recovery
         shell: bash
         run: ./scripts/test-phonon.sh '${{ matrix.target }}'

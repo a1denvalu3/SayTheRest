@@ -526,8 +526,147 @@ fn read_reference(path: &Path) -> Result<(Vec<f32>, i32)> {
 #[cfg(test)]
 mod tests {
     use super::{ResidentSherpaEngine, c_api_library};
-    use crate::{EngineConfig, KittenConfig, SynthesisRequest, wav_duration_seconds};
+    use crate::{EngineConfig, KittenConfig, KokoroConfig, SynthesisRequest, wav_duration_seconds};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    #[ignore = "requires verified Kokoro v1.1-zh INT8 assets, packaged runtime and worker via SAYIT_KOKORO_TEST_MODEL/SAYIT_TTS_TEST_RUNTIME/SAYIT_TEST_WORKER"]
+    fn kokoro_103_presets_synthesize_with_exact_archives_and_worker_cancellation() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let asset =
+            |key| PathBuf::from(std::env::var_os(key).expect("real Kokoro acceptance asset"));
+        let root = asset("SAYIT_KOKORO_TEST_MODEL");
+        let executable = asset("SAYIT_TTS_TEST_RUNTIME");
+        let worker = asset("SAYIT_TEST_WORKER");
+        let directory = tempfile::tempdir().unwrap();
+        let mut total = 0;
+        for (language, speakers, text, lexicon) in [
+            ("en-US", 0..2, "The morning is clear.", "lexicon-us-en.txt"),
+            ("en-GB", 2..3, "The morning is clear.", "lexicon-gb-en.txt"),
+            ("zh-CN", 3..103, "今天早上天气很好。", "lexicon-us-en.txt"),
+        ] {
+            let config = EngineConfig::SherpaOnnxKokoro(KokoroConfig {
+                executable: executable.clone(),
+                model: root.join("model.int8.onnx"),
+                voices: root.join("voices.bin"),
+                tokens: root.join("tokens.txt"),
+                data_dir: root.join("espeak-ng-data"),
+                lexicons: vec![root.join(lexicon), root.join("lexicon-zh.txt")],
+                provider: "cpu".into(),
+                num_threads: 4,
+                speaker_id: speakers.start,
+            });
+            config.validate().unwrap();
+            let mut engine = ResidentSherpaEngine::load(&config).unwrap();
+            for speaker in speakers.clone() {
+                engine.speaker_id = speaker as i32;
+                let output = directory.path().join(format!("speaker-{speaker}.wav"));
+                let mut streamed = Vec::new();
+                engine
+                    .synthesize_streaming(
+                        &SynthesisRequest {
+                            generation: None,
+                            text,
+                            output: &output,
+                            reference_audio: None,
+                            reference_text: None,
+                            speaking_pace: 1.0,
+                        },
+                        None,
+                        &mut |pcm, rate| {
+                            assert!(
+                                !output.exists(),
+                                "archive published before the stream finished"
+                            );
+                            assert_eq!(rate, 24000);
+                            assert!(pcm.iter().all(|sample| sample.is_finite()));
+                            streamed.extend_from_slice(pcm);
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                assert!(
+                    streamed.len() > 2400 && streamed.iter().any(|sample| sample.abs() > 0.001),
+                    "silent/empty Kokoro speaker {speaker}"
+                );
+                let mut wav = hound::WavReader::open(&output).unwrap();
+                assert_eq!(wav.spec().sample_rate, 24000);
+                assert_eq!(wav.len() as usize, streamed.len());
+                for (archived, sample) in wav.samples::<i16>().zip(&streamed) {
+                    assert_eq!(
+                        archived.unwrap(),
+                        (sample * 32767.0).clamp(-32768.0, 32767.0) as i16
+                    );
+                }
+                total += 1;
+            }
+            drop(engine);
+            let isolated = directory.path().join(format!("worker-{language}.wav"));
+            let request = SynthesisRequest {
+                generation: None,
+                text,
+                output: &isolated,
+                reference_audio: None,
+                reference_text: None,
+                speaking_pace: 1.0,
+            };
+            let engine = crate::SherpaOnnxEngine::from_config(config);
+            let mut streamed = 0;
+            engine
+                .synthesize_streaming_with_worker(
+                    &request,
+                    None,
+                    &mut |pcm, rate| {
+                        assert!(!isolated.exists());
+                        assert_eq!(rate, 24000);
+                        streamed += pcm.len();
+                        Ok(())
+                    },
+                    &worker,
+                )
+                .unwrap();
+            assert_eq!(
+                hound::WavReader::open(&isolated).unwrap().len() as usize,
+                streamed
+            );
+            let cancelled = AtomicBool::new(false);
+            let aborted = directory.path().join(format!("cancelled-{language}.wav"));
+            let error = engine
+                .synthesize_streaming_with_worker(
+                    &SynthesisRequest {
+                        output: &aborted,
+                        ..request.clone()
+                    },
+                    Some(&cancelled),
+                    &mut |_, _| {
+                        cancelled.store(true, Ordering::Relaxed);
+                        Ok(())
+                    },
+                    &worker,
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("cancelled"));
+            assert!(!aborted.exists());
+            let recovered = directory.path().join(format!("recovered-{language}.wav"));
+            engine
+                .synthesize_streaming_with_worker(
+                    &SynthesisRequest {
+                        output: &recovered,
+                        ..request
+                    },
+                    None,
+                    &mut |_, _| Ok(()),
+                    &worker,
+                )
+                .unwrap();
+            assert!(wav_duration_seconds(&recovered).unwrap() > 0.1);
+            eprintln!(
+                "Kokoro {language}: {} presets, worker transport, cancellation and recovery passed",
+                speakers.len()
+            );
+        }
+        assert_eq!(total, 103);
+    }
 
     #[test]
     #[ignore = "requires real Pocket assets, all eight public voice recordings, runtime and worker via SAYIT_POCKET_TEST_*/SAYIT_TTS_TEST_RUNTIME/SAYIT_TEST_WORKER"]

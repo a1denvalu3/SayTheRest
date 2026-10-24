@@ -2321,10 +2321,14 @@ async fn preview_preset_voice(
         .map_err(unprocessable)?;
     let preview_id = Uuid::new_v4();
     let output = state.audio_dir.join(format!("preview-{preview_id}.wav"));
-    let text = format!(
-        "Hello! This is a preview of {}. Choose the voice that makes listening feel effortless.",
-        voice.name
-    );
+    let text = if voice.language.starts_with("zh") {
+        "你好，这是声音试听。请选择一个让你听得轻松的声音。".into()
+    } else {
+        format!(
+            "Hello! This is a preview of {}. Choose the voice that makes listening feel effortless.",
+            voice.name
+        )
+    };
     let preview_text = text.clone();
     let speaking_pace = if !config.supports_native_speaking_pace() {
         1.0

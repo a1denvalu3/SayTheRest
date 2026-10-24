@@ -78,6 +78,16 @@ unavailable upstream. They are not requirements for parity with working upstream
 - [x] Rename, preview, tune, select, and delete local voice profiles.
 - [x] Require an affirmative speaker-permission acknowledgement for cloning.
 
+Kokoro's remaining language gap is explicit: the pinned Mac catalog supplies
+54 v1.0 voices and nine locales (`en-US`, `en-GB`, `es`, `fr`, `it`, `pt`, `ja`,
+`hi`, `cmn`). Our current v1.1 Chinese/English bundle supplies a different set
+of 103 voices and advertises `en-US`, `en-GB`, and `zh-CN`. Matching the remaining
+Spanish, French, Italian, Portuguese, Japanese, and Hindi workflows requires
+verified voice assets and pronunciation processing for those languages. The
+existing Kokoro checkbox remains open. References: the
+[pinned Mac catalog](https://github.com/callebtc/sayit/blob/37d49718bb58853945577a6845dce0cfde84c90d/Sources/SayItCore/Resources/ModelCatalog.json)
+and [sherpa Kokoro bundles](https://github.com/k2-fsa/sherpa/blob/master/docs/source/onnx/tts/pretrained_models/kokoro.rst).
+
 ## Interfaces and operations
 
 - [x] Desktop onboarding, settings, diagnostics, updates, and launch-at-login.
@@ -170,6 +180,32 @@ Debug-only script/geometry hooks are absent from release builds.
 ```sh
 python3 scripts/test-player-native-menu.py
 python3 scripts/test-desktop-ui.py --virtual-display --config /path/to/installed/preset/config.json
+```
+
+
+Kokoro's current 103-voice INT8 bundle passed real Linux synthesis for every
+speaker: two US English presets, one British English preset, and 100 Mandarin
+presets. Every output contained audible finite PCM, and every archived sample
+matched its streamed value and count. Worker transport, cancellation before
+publishing a WAV, and recovery passed for all three locale groups. The verified
+asset archive matches the catalog's SHA-256. The complete run took 250.68 s on
+the development laptop; this is an observed acceptance timing. All 103 catalog
+names and numeric speaker IDs also matched the actual ONNX model's embedded
+`speaker_names`/`id2speaker` metadata.
+
+Fresh Kokoro installs now select the English Maple preset rather than the old
+numeric default pointing to a Mandarin preset. The model card reports 103
+voices, and Mandarin preset previews use a Chinese passage. Native management
+acceptance passed 11 checks with actual US English, British English, and Mandarin
+preview audio; it also checked selection, displayed reader text, layout, hidden
+unsupported controls, and no preview history/profiles. The release matrix now
+adds the complete preset test on Linux and Windows; Windows acceptance for this
+new test is pending. These checks cover the shipped English/Mandarin pack;
+Kokoro's six additional Mac languages and perceptual quality grading remain open.
+
+```sh
+bash scripts/test-kokoro-model.sh x86_64-unknown-linux-gnu
+python3 scripts/test-desktop-ui.py --virtual-display --window main --config /path/to/kokoro-config.json --script scripts/desktop-kokoro-ui-smoke.js --timeout 300
 ```
 
 The native Phonon worker uses the pinned `ptts` 0.4.0 CPU/Q8 runtime. A real
