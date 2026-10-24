@@ -57,7 +57,7 @@ and capability tests for every feature advertised by that model.
 - [x] Kitten Mini and Kitten Nano (real synthesis, progressive callbacks, worker transport, and cancellation pass on Linux and Windows)
 - [x] Pocket TTS (eight presets, optional cloning, cancellation/recovery, and install/update repair pass Linux and Windows; native Linux UI acceptance also passes)
 - [ ] Soprano
-- [ ] Qwen3 TTS Base, VoiceDesign, and CustomVoice
+- [ ] Qwen3 TTS Base, VoiceDesign, and CustomVoice (native Base CPU synthesis, cloning, discovery, and ten languages pass Linux/Windows; the remaining backends and variants are not established)
 - [ ] Chatterbox, Chatterbox Turbo, and Chatterbox Multilingual
 - [ ] OmniVoice
 - [ ] Irodori
@@ -144,11 +144,33 @@ python3 scripts/test-desktop-ui.py --config /path/to/installed/preset/config.jso
 node --test apps/desktop/tests/reader-timing.test.cjs
 ```
 
-The native UI runner currently targets Linux and requires an active display;
+The native UI runner currently targets Linux and supports an active display or
+`--virtual-display` with Xvfb;
 it does not establish Windows GUI or compositor-specific tray placement. Linux
 AppIndicator exposes the player through its menu because Tauri does not provide
 tray click coordinates/events there. Windows uses direct tray clicks. On Wayland,
 window placement follows the compositor when explicit positioning is unavailable.
+
+The compact player waits for its visibility listener to register before taking
+the initial window snapshot. This fixes a reproduced startup race where the
+window was visible but its UI retained an earlier hidden state and never loaded
+the model choices. On Linux, focus-loss dismissal also waits for GTK's native
+menu grab to end. Opening the player's native model menu no longer dismisses it;
+clicking outside still does. Reopening a focused player preserves its focus
+tracking, and stale dismissal callbacks are invalidated when focus returns.
+
+The native mouse regression runs on an isolated Xvfb display using xdotool,
+with geometry from the actual webview. It checks startup, a real native popup,
+closing that popup inside the player, and outside-click dismissal. An A/B run
+rejected the old immediate-hide callback and passed the corrected callback.
+The default fixture tests menu metadata only; it performs no inference and does
+not establish model support. Real-model synthesis acceptance runs separately.
+Debug-only script/geometry hooks are absent from release builds.
+
+```sh
+python3 scripts/test-player-native-menu.py
+python3 scripts/test-desktop-ui.py --virtual-display --config /path/to/installed/preset/config.json
+```
 
 The native Phonon worker uses the pinned `ptts` 0.4.0 CPU/Q8 runtime. A real
 Linux run with the immutable 31M assets checked progressive PCM, exact archive
@@ -253,8 +275,9 @@ different global pace preference was saved. These checks establish valid audio
 and working controls; pronunciation quality still needs listening evaluation.
 Native visibility checks also verify that unsupported controls are hidden in
 Pocket and Phonon. A shared hidden-state rule prevents grid layout styles from
-leaving those controls visible. Windows Qwen synthesis and GUI acceptance remain
-separate requirements.
+leaving those controls visible. Native Qwen CPU synthesis now passes the Linux
+and Windows release matrix; Windows GUI/device behavior and PyTorch acceptance
+remain separate requirements.
 
 ```sh
 python3 scripts/test-qwen-languages.py --config /path/to/native-config.json --reference /path/to/reference.wav
@@ -293,8 +316,8 @@ saved profile persistence, language restoration, and legacy profile defaults.
 Failed and cancelled attempts release their temporary audio while completed
 candidates remain available. Pocket passed 17 native UI checks and Phonon passed
 13, including their existing workflows and hiding unsupported discovery.
-The release matrix now includes real Qwen CPU tests on both platforms; a new
-matrix run must pass before Windows synthesis coverage is claimed.
+The release matrix includes real Qwen CPU tests on both platforms; commit
+`c0b4b1f` passed that complete matrix. Windows GUI/device behavior remains separate.
 
 ```sh
 python3 scripts/test-voice-discovery.py --config /path/to/native-config.json
@@ -376,6 +399,21 @@ causing an endless service crash loop. Automated tests cover malformed and missi
 backup restoration, retry, cleanup, and the repeated-interruption guard.
 
 ## Release evidence
+
+Commit `c0b4b1f` passed the complete Linux/Windows matrix, including native Qwen
+seeded free/clone isolation, managed streaming/archive counts, tuning,
+cancellation/recovery, a four-candidate discovery batch, concurrent saving,
+and all ten supported languages plus automatic detection using a synthetic
+reference. Windows discovery cancellation completed in 1.03 s; its default
+four-candidate acceptance run took 303.03 s on that runner. These are observed
+CPU timings, not a general speed guarantee. GitHub Actions run:
+[40115192775](https://github.com/a1denvalu3/SayTheRest/actions/runs/40115192775).
+
+Commit `9f99861` passed the complete Linux/Windows matrix with the additional
+two-candidate randomized-recipe acceptance and saved tuning checks. Linux
+native desktop/device evidence is documented above; Windows GUI/device
+acceptance remains separate. GitHub Actions run:
+[40115786816](https://github.com/a1denvalu3/SayTheRest/actions/runs/40115786816).
 
 Commit `4675481` passed the complete Linux/Windows matrix, including all eight
 real Pocket presets, streamed/archive sample comparisons, reference resampling,

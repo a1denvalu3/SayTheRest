@@ -4309,6 +4309,7 @@ dependencies = [
  "clipboard-rs",
  "clipboard-win",
  "enigo",
+ "gtk",
  "hound",
  "reqwest 0.12.28",
  "rminiaudio",

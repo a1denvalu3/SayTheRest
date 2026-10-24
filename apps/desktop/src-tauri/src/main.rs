@@ -1307,8 +1307,26 @@ fn main() {
             {
                 let state = window.state::<presentation::PresentationState>();
                 if *focused {
-                    state.0.store(true, std::sync::atomic::Ordering::Relaxed);
-                } else if state.0.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    state
+                        .has_focus
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(target_os = "linux")]
+                    state
+                        .focus_epoch
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else if state
+                    .has_focus
+                    .swap(false, std::sync::atomic::Ordering::Relaxed)
+                {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let epoch = state
+                            .focus_epoch
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                            .wrapping_add(1);
+                        presentation::hide_after_focus_loss(window.clone(), epoch);
+                    }
+                    #[cfg(not(target_os = "linux"))]
                     let _ = presentation::hide(window.app_handle(), "player");
                 }
             }

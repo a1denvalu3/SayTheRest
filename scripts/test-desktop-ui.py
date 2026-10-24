@@ -10,6 +10,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
@@ -19,6 +20,7 @@ from pathlib import Path
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config',type=Path,required=True)
+    parser.add_argument('--bin-dir',type=Path,default=Path(__file__).resolve().parents[1]/'target/debug',help='Directory containing debug desktop and service binaries')
     parser.add_argument('--snapshots',type=Path,help='Save native Linux WebKit screenshots in this directory')
     parser.add_argument('--script',type=Path,help='Native UI acceptance script (defaults to player checks)')
     parser.add_argument('--window',choices=['player','main'],default='player')
@@ -26,8 +28,17 @@ def main():
     parser.add_argument('--reference-text',help='Exact words spoken in the reference audio for Qwen acceptance')
     parser.add_argument('--timeout',type=float,default=120,help='Native test deadline in seconds')
     parser.add_argument('--model-cache',type=Path,help='Seed isolated model asset directories for a verified-cache install test')
+    parser.add_argument('--virtual-display',action='store_true',help='Run on an isolated Linux Xvfb display (requires xvfb-run and Xvfb)')
+    parser.add_argument('--pointer-target',type=Path,help='Debug-only geometry output for the isolated native mouse acceptance test')
     args=parser.parse_args()
+    if args.virtual_display:
+        if not sys.platform.startswith('linux') or not shutil.which('xvfb-run'):
+            parser.error('--virtual-display requires Linux, xvfb-run, and Xvfb')
+        env=dict(os.environ,GDK_BACKEND='x11');env.pop('WAYLAND_DISPLAY',None)
+        command=['xvfb-run','-a',sys.executable,str(Path(__file__).resolve()),*[arg for arg in sys.argv[1:] if arg!='--virtual-display']]
+        raise SystemExit(subprocess.run(command,env=env).returncode)
     repo=Path(__file__).resolve().parents[1]
+    binaries=args.bin_dir.resolve()
     with tempfile.TemporaryDirectory(prefix='sayit-native-ui-') as temporary:
         root=Path(temporary)
         fixture={'voice_file':str(args.voice_file.resolve()) if args.voice_file else None,'bad_voice_file':str(root/'invalid.safetensors'),'reference_text':args.reference_text}
@@ -46,8 +57,10 @@ def main():
         if args.snapshots:
             args.snapshots.mkdir(parents=True,exist_ok=True)
             env['SAYIT_UI_TEST_SNAPSHOTS']=str(args.snapshots.resolve())
+        if args.pointer_target:
+            env['SAYIT_UI_TEST_POINTER_TARGET']=str(args.pointer_target.resolve())
         with (root/'service.log').open('w+') as service_log,(root/'desktop.log').open('w+') as desktop_log:
-            service=subprocess.Popen([str(repo/'target/debug/sayit-service'),'--port',str(port),'--data-dir',str(data),'--config',str(args.config.resolve())],
+            service=subprocess.Popen([str(binaries/'sayit-service'),'--port',str(port),'--data-dir',str(data),'--config',str(args.config.resolve())],
                                      env=env,stdout=service_log,stderr=subprocess.STDOUT)
             desktop=None
             try:
@@ -59,7 +72,7 @@ def main():
                         assert service.poll() is None,'service exited during startup'
                         assert time.monotonic()<deadline,'service startup timed out'
                         time.sleep(0.1)
-                desktop=subprocess.Popen([str(repo/'target/debug/sayit-desktop')],env=env,stdout=desktop_log,stderr=subprocess.STDOUT)
+                desktop=subprocess.Popen([str(binaries/'sayit-desktop')],env=env,stdout=desktop_log,stderr=subprocess.STDOUT)
                 desktop.wait(timeout=args.timeout)
                 assert (root/'result.json').exists(),'native UI did not return an acceptance result'
                 result=json.loads((root/'result.json').read_text())
@@ -71,6 +84,12 @@ def main():
                     log.flush();log.seek(0);print(label+' log:\n'+log.read()[-6000:])
                 raise
             finally:
+                if service.poll() is None:
+                    try:
+                        request=urllib.request.Request(f'http://127.0.0.1:{port}/v1/playback/stop',data=b'{}',
+                            headers={'Authorization':'Bearer '+(data/'api-token').read_text().strip(),'Content-Type':'application/json'})
+                        with urllib.request.urlopen(request,timeout=2):pass
+                    except (OSError,ValueError):pass
                 for process in [desktop,service]:
                     if process is not None and process.poll() is None:
                         process.terminate()

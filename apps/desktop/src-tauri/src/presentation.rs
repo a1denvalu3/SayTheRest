@@ -2,7 +2,48 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{Emitter, Manager};
 
 #[derive(Default)]
-pub struct PresentationState(pub AtomicBool);
+pub struct PresentationState {
+    pub has_focus: AtomicBool,
+    #[cfg(target_os = "linux")]
+    pub focus_epoch: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(target_os = "linux")]
+pub fn hide_after_focus_loss(window: tauri::Window, epoch: u64) {
+    use gtk::prelude::{GtkWindowExt, WindowGroupExt};
+    let scheduled = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        // Native WebKit select menus take a GTK grab and temporarily move
+        // focus away from the player. Recheck after menu activation, and wait
+        // for the grab to end before deciding whether focus left the app.
+        // https://docs.gtk.org/gtk3/func.grab_get_current.html
+        gtk::glib::timeout_add_local(std::time::Duration::from_millis(40), move || {
+            if scheduled
+                .state::<PresentationState>()
+                .focus_epoch
+                .load(Ordering::Relaxed)
+                != epoch
+                || !scheduled.is_visible().unwrap_or(false)
+            {
+                return gtk::glib::ControlFlow::Break;
+            }
+            let grabbed = scheduled
+                .gtk_window()
+                .ok()
+                .and_then(|window| window.group())
+                .and_then(|group| group.current_grab())
+                .is_some()
+                || gtk::grab_get_current().is_some();
+            if grabbed {
+                return gtk::glib::ControlFlow::Continue;
+            }
+            if !scheduled.is_focused().unwrap_or(false) {
+                let _ = hide(scheduled.app_handle(), "player");
+            }
+            gtk::glib::ControlFlow::Break
+        });
+    });
+}
 
 pub fn show_management(app: &tauri::AppHandle, section: &str) -> Result<(), String> {
     if !["player", "models", "voices", "history", "settings"].contains(&section) {
@@ -56,9 +97,12 @@ pub fn show_player(app: &tauri::AppHandle, anchor: Option<tauri::Rect>) -> Resul
     let window = app
         .get_webview_window("player")
         .ok_or("player window is unavailable")?;
-    app.state::<PresentationState>()
-        .0
-        .store(false, Ordering::Relaxed);
+    let state = app.state::<PresentationState>();
+    state
+        .has_focus
+        .store(window.is_focused().unwrap_or(false), Ordering::Relaxed);
+    #[cfg(target_os = "linux")]
+    state.focus_epoch.fetch_add(1, Ordering::Relaxed);
     // AppIndicator does not supply tray click coordinates on Linux. The menu
     // entry remains available; use the cursor if positioning is permitted.
     let location = anchor

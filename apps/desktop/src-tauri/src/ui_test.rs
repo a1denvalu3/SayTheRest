@@ -22,6 +22,17 @@ pub fn install(app: &tauri::AppHandle) {
         }
         handle.exit(if passed { 0 } else { 1 });
     });
+    if let Some(path) = std::env::var_os("SAYIT_UI_TEST_POINTER_TARGET") {
+        let path = std::path::PathBuf::from(path);
+        app.listen("ui-test-pointer-target", move |event| {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+                let pending = path.with_extension("pending");
+                if std::fs::write(&pending, serde_json::to_vec(&value).unwrap()).is_ok() {
+                    let _ = std::fs::rename(pending, &path);
+                }
+            }
+        });
+    }
     #[cfg(target_os = "linux")]
     if let Some(directory) = std::env::var_os("SAYIT_UI_TEST_SNAPSHOTS") {
         let directory = std::path::PathBuf::from(directory);

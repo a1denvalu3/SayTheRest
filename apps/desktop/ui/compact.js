@@ -67,7 +67,7 @@ $('#player-model').onchange=async event=>{
   } catch(error) {toast(String(error));await refresh(true);}
 };
 document.addEventListener('keydown',event=>{if(event.key==='Escape')invoke('close_player')});
-window.__TAURI__.event.listen('window-visibility',event=>{
+const visibilityReady=window.__TAURI__.event.listen('window-visibility',event=>{
   if(event.payload.label!=='player')return;
   visibilityChanged=true;visible=event.payload.visible;player.setVisible(visible);if(visible)refresh(true);
 });
@@ -77,5 +77,5 @@ window.__TAURI__.event.listen('service-event',event=>{
   pending=setTimeout(()=>{pending=null;const details=['models','settings','voices'].some(resource=>resources.has(resource));resources.clear();refresh(details)},100);
 });
 window.__TAURI__.event.listen('capture-status',event=>{if(!event.payload.ok)toast(event.payload.error||'Text could not be captured');refresh(false)});
-invoke('window_visible').then(value=>{if(visibilityChanged)return;visible=value;player.setVisible(value);if(value)refresh(true)});
+visibilityReady.then(()=>invoke('window_visible')).then(value=>{if(visibilityChanged)return;visible=value;player.setVisible(value);if(value)refresh(true)});
 setInterval(()=>refresh(false),15000);

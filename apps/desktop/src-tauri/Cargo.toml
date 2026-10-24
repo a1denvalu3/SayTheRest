@@ -30,6 +30,7 @@ clipboard-win = "5.4.1"
 uiautomation = { version = "0.25", default-features = false, features = ["pattern", "input", "control"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
 webkit2gtk = "2.0"
 cairo-rs = { version = "0.18", features = ["png"] }
 atspi = "0.30"
