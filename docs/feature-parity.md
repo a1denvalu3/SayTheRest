@@ -193,6 +193,14 @@ passed both the Linux and Windows real-mouse checks in CI run
 This establishes menu/focus behavior on the runner; its complete release matrix
 and Windows model/device UI acceptance remain separate checks.
 
+A later preset-capture rerun passed both Windows UI assertions but exposed
+WebView2 recreating a cache directory during teardown (`WinError 145`). The
+harness now retries that transient error within its existing deadline, together
+with transient missing/locked-file errors. Four targeted tests cover recreation
+followed by actual removal, unrelated I/O failures, the deadline, and an already
+removed directory. The Windows CI step now runs three fresh profile cycles;
+their new acceptance is pending.
+
 ```powershell
 python scripts/test-player-native-menu-windows.py --bin-dir target/x86_64-pc-windows-msvc/debug
 ```
@@ -214,7 +222,9 @@ acceptance passed 11 checks with actual US English, British English, and Mandari
 preview audio; it also checked selection, displayed reader text, layout, hidden
 unsupported controls, and no preview history/profiles. The release matrix now
 adds the complete preset test on Linux and Windows; Windows acceptance for this
-new test is pending. These checks cover the shipped English/Mandarin pack;
+new test passed at commit `6fcf4b5` in CI run
+[40123332015](https://github.com/a1denvalu3/SayTheRest/actions/runs/40123332015),
+with the complete matrix still running. These checks cover the shipped English/Mandarin pack;
 Kokoro's six additional Mac languages and perceptual quality grading remain open.
 
 ```sh

@@ -18,18 +18,26 @@ import urllib.request
 from pathlib import Path
 
 
+def remove_test_directory(root,windows=None,timeout=15):
+    windows=os.name=='nt' if windows is None else windows
+    deadline=time.monotonic()+timeout
+    while True:
+        try:shutil.rmtree(root);return
+        except OSError as error:
+            if isinstance(error,FileNotFoundError) and not root.exists():return
+            # WebView2 may remove/recreate cache entries or retain a handle
+            # briefly after the app exits. ERROR_DIR_NOT_EMPTY is an OSError,
+            # not a PermissionError, and was reproduced on the Windows runner.
+            transient=windows and getattr(error,'winerror',None) in {2,3,5,32,33,145}
+            if not transient or time.monotonic()>=deadline:raise
+            time.sleep(.2)
+
+
 @contextmanager
 def native_test_directory():
     root=Path(tempfile.mkdtemp(prefix='sayit-native-ui-'))
     try:yield root
-    finally:
-        # WebView2 closes its profile files asynchronously after the app exits.
-        deadline=time.monotonic()+15
-        while True:
-            try:shutil.rmtree(root);break
-            except PermissionError:
-                if os.name!='nt' or time.monotonic()>=deadline:raise
-                time.sleep(.2)
+    finally:remove_test_directory(root)
 
 
 def main():

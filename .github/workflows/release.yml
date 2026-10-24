@@ -37,6 +37,9 @@ jobs:
         run: cargo test --workspace --locked --target '${{ matrix.target }}'
       - name: Test reader timing and Unicode word seeking
         run: node --test apps/desktop/tests/reader-timing.test.cjs
+      - name: Test native UI profile cleanup and error reporting
+        shell: bash
+        run: python3 scripts/test-native-ui-cleanup.py
       - name: Build debug UI for native menu acceptance
         run: cargo build -p sayit-service-app -p sayit-desktop --locked --target '${{ matrix.target }}'
       - name: Test native GTK menus and outside-click dismissal
@@ -44,7 +47,12 @@ jobs:
         run: python3 scripts/test-player-native-menu.py --bin-dir 'target/${{ matrix.target }}/debug'
       - name: Test native Windows menus and outside-click dismissal
         if: runner.os == 'Windows'
-        run: python scripts/test-player-native-menu-windows.py --bin-dir 'target/${{ matrix.target }}/debug'
+        shell: pwsh
+        run: |
+          foreach ($iteration in 1..3) {
+            python scripts/test-player-native-menu-windows.py --bin-dir 'target/${{ matrix.target }}/debug'
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Test rich clipboard preservation on Linux display
         if: runner.os == 'Linux'
         shell: bash
