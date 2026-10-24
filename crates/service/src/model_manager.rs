@@ -504,6 +504,8 @@ impl ModelManager {
                     selected: installed && selected == Some(entry.id),
                     requires_voice_profile: installed_config.as_ref().map_or(entry.capabilities.voice_cloning,EngineConfig::requires_reference),
                     capabilities: ModelCapabilities {
+                        voice_generation_tuning: entry.id == "qwen3-tts-06b-base",
+                        voice_discovery: native.is_some(),
                         language_selection: entry.id == "qwen3-tts-06b-base",
                         voice_file_import: entry.id == "phonon-31m-en",
                         preset_voices: entry.capabilities.preset_voices,
@@ -559,6 +561,9 @@ impl ModelManager {
                 requires_voice_profile: EngineConfig::from_path(&self.config_path(&entry.id))
                     .map_or(entry.voice_cloning, |config| config.requires_reference()),
                 capabilities: ModelCapabilities {
+                    voice_generation_tuning: EngineConfig::from_path(&self.config_path(&entry.id))
+                        .is_ok_and(|config| config.is_qwen()),
+                    voice_discovery: false,
                     language_selection: EngineConfig::from_path(&self.config_path(&entry.id))
                         .is_ok_and(|config| config.is_qwen()),
                     voice_file_import: false,

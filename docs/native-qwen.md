@@ -31,6 +31,24 @@ Returning to PyTorch reuses its original weights/settings when available;
 otherwise it downloads and prepares that backend. ONNX remains opt-in while
 quality and performance are evaluated across supported hardware.
 
+## Generate a voice locally
+
+With the native backend selected, open **Voice studio → Explore generated
+voices**. Choose the sample text, language, sample count, and style, then select
+**Generate samples**. Preview a candidate, give it a name, select **Save voice**,
+and then **Use this voice**. Saved voices can read new text and survive restarts.
+No recording or transcript from a human speaker is needed for this workflow.
+
+New batches append to the current collection, up to 32 candidates. Cancellation
+keeps completed samples. Unsaved candidates are temporary; save favorites before
+restarting. A sample that fails reference-quality checks can still be previewed,
+but cannot be saved. **Clear candidates** preserves saved voices.
+
+**Generation settings** on a saved Qwen profile controls temperature, top P,
+top K, and repetition penalty for future readings. Legacy profiles retain their
+previous defaults until edited. Explicitly selecting a profile also restores its
+preferred language. Listening speed remains a separate playback control.
+
 ## References and precision
 
 New profiles require the exact recording transcript. References retain the
@@ -69,7 +87,8 @@ attribution. Sources:
 
 Unit tests cover runtime fallback, INT4 preservation on CPU, cancellation,
 worker cleanup, cached-download integrity, and existing model behavior. Full
-model checks require downloaded assets and a permitted local reference.
+model checks require downloaded assets and a local reference, which can be
+generated synthetically with the discovery workflow.
 Compare tokenization, the complete prompt, speaker embedding, and early greedy
 audio tokens against the pinned ONNX reference, then check sampled speech and
 long references. Greedy decoding can repeat instead of ending; normal speech

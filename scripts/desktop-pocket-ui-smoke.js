@@ -35,6 +35,7 @@
     await invoke('open_management',{section:'voices'});
     await until(()=>document.querySelectorAll('[data-preset-action=preview]').length===8);
     check(getComputedStyle($('#voice-form')).display!=='none'&&getComputedStyle($('#voice-file-form')).display==='none','Pocket keeps optional audio cloning available');
+    check(getComputedStyle($('#voice-discovery')).display==='none','unsupported voice discovery stays hidden for Pocket');
     check($('[data-preset-voice=cosette]').closest('article').textContent.includes('CC-BY-NC-4.0'),'preset recording license is visible');
     $('[data-preset-voice=cosette][data-preset-action=preview]').click();
     await until(async()=>{const p=(await get('state')).playback;return p.job_id&&p.job_id!==job.id;});

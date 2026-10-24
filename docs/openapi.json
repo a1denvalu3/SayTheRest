@@ -16,7 +16,11 @@
         "type": "object",
         "description": "Additive fields on each /models entry. Voice cloning can be optional when a model also supplies a default preset.",
         "properties": {
-          "capabilities": { "type": "object", "properties": { "language_selection": { "type": "boolean", "description": "This model accepts a separately selected speech language." } } },
+          "capabilities": { "type": "object", "properties": {
+            "language_selection": { "type": "boolean", "description": "This model accepts a separately selected speech language." },
+            "voice_discovery": { "type": "boolean", "description": "The installed native Qwen Base backend can generate unconditioned voice candidates." },
+            "voice_generation_tuning": { "type": "boolean", "description": "Saved profiles for this model accept Qwen generation controls." }
+          } },
           "selected_language": { "type": ["string", "null"], "description": "Saved per-model language code, including auto for automatic detection. Null when the model has no separate language selection." },
           "requires_voice_profile": { "type": "boolean", "description": "The current installed configuration requires a saved voice profile before speech can be queued. Older Pocket installations need a preset-pack update to make profiles optional." },
           "preset_voices": { "type": "array", "items": { "type": "object", "properties": {
@@ -76,6 +80,57 @@
           "reference_text": { "type": "string", "minLength": 1, "maxLength": 2000, "description": "Exact transcript of this profile's original recording. Must be nonblank; surrounding whitespace is trimmed. Applies to future generations. Older profiles without this field continue to use embedding-only Qwen cloning until a transcript is added." }
         }
       },
+      "VoiceGenerationTuning": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "temperature": { "type": "number", "minimum": 0.2, "maximum": 1.2, "default": 0.65 },
+          "top_p": { "type": "number", "minimum": 0.5, "maximum": 1, "default": 0.9 },
+          "top_k": { "type": "integer", "minimum": 0, "maximum": 100, "default": 40, "description": "Zero disables top-k filtering." },
+          "repetition_penalty": { "type": "number", "minimum": 0.9, "maximum": 1.5, "default": 1.2 }
+        }
+      },
+      "VoiceDiscoveryRequest": {
+        "type": "object", "additionalProperties": false, "required": ["sample_text"],
+        "properties": {
+          "sample_text": { "type": "string", "minLength": 20, "maxLength": 160, "description": "Length bounds apply after configured text cleaning." },
+          "language": { "type": ["string", "null"], "description": "Optional Qwen language code. Defaults to the selected model's saved language." },
+          "candidate_count": { "type": "integer", "minimum": 1, "maximum": 8, "default": 4 },
+          "seed": { "type": ["integer", "null"], "minimum": 0, "maximum": 4294967295, "description": "First candidate's seed; subsequent candidates increment it with 32-bit wrapping. Null chooses a random seed." },
+          "tuning": { "$ref": "#/components/schemas/VoiceGenerationTuning" }
+        }
+      },
+      "VoiceCandidate": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "sample_text": { "type": "string" }, "language": { "type": "string" },
+          "seed": { "type": "integer" }, "tuning": { "$ref": "#/components/schemas/VoiceGenerationTuning" },
+          "duration_seconds": { "type": "number" },
+          "save_error": { "type": ["string", "null"], "description": "Audio quality or duration prevents reuse as a reference. Preview remains available." },
+          "saved_voice_profile_id": { "type": ["string", "null"], "format": "uuid" }
+        }
+      },
+      "VoiceDiscoverySnapshot": {
+        "type": "object",
+        "description": "One ephemeral collection per service, at most 32 candidates. New batches append for the same model. Restarting discards unsaved candidates. Preview creates no speech history.",
+        "properties": {
+          "id": { "type": "string", "format": "uuid", "description": "Current batch ID." },
+          "model_id": { "type": "string" },
+          "state": { "type": "string", "enum": ["generating", "ready", "cancelled", "failed"] },
+          "completed": { "type": "integer", "description": "Completed candidates in the current batch." },
+          "total": { "type": "integer", "description": "Requested candidates in the current batch." },
+          "candidates": { "type": "array", "items": { "$ref": "#/components/schemas/VoiceCandidate" } },
+          "error": { "type": ["string", "null"] }
+        }
+      },
+      "GeneratedVoiceProfileFields": {
+        "type": "object", "description": "Additive saved-profile fields. Legacy profiles default to false/null/null, preserving their generation behavior.",
+        "properties": {
+          "generated": { "type": "boolean", "default": false },
+          "language": { "type": ["string", "null"], "description": "Preferred language restored on explicit profile selection." },
+          "generation_tuning": { "anyOf": [{ "$ref": "#/components/schemas/VoiceGenerationTuning" }, { "type": "null" }], "description": "Controls applied to new readings with this profile. Null retains the backend's legacy defaults." }
+        }
+      },
       "ServiceSettingsUpdate": {
         "type": "object",
         "additionalProperties": false,
@@ -132,6 +187,15 @@
       "post": { "security": [{ "controlToken": [] }], "summary": "Create a voice profile with speaker permission and a matching reference transcript", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VoiceCloneRequest" } } } }, "responses": { "201": { "description": "Created profile, including reference_text" }, "422": { "description": "Invalid reference audio, permission, or transcript; Qwen requires a nonblank transcript" } } }
     },
     "/voices/import": {"post": {"summary": "Import an exported Phonon voice file", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/VoiceImportRequest"}}}}, "responses": {"201": {"description": "Local voice profile with reference_kind=phonon-embedding and a private copy of the voice file"}, "409": {"description": "Select and install a Phonon model first"}, "422": {"description": "Invalid name, file, shape, or non-finite/silent speaker latents"}}, "security": [{"controlToken": []}]}},
+    "/voices/discovery": {
+      "get": { "summary": "Current ephemeral voice collection", "responses": { "200": { "description": "Collection or null", "content": { "application/json": { "schema": { "anyOf": [{ "$ref": "#/components/schemas/VoiceDiscoverySnapshot" }, { "type": "null" }] } } } } } },
+      "post": { "security": [{ "controlToken": [] }], "summary": "Generate and append native Qwen Base voice candidates", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VoiceDiscoveryRequest" } } } }, "responses": { "202": { "description": "Generation started; poll GET or listen for voices events", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VoiceDiscoverySnapshot" } } } }, "409": { "description": "Unsupported backend, reading/generation active, or collection full" }, "422": { "description": "Invalid text, count, language, or tuning" } } },
+      "delete": { "security": [{ "controlToken": [] }], "summary": "Discard temporary candidates; saved profiles remain", "responses": { "204": { "description": "Cleared" }, "409": { "description": "Cancel generation and wait for it to stop first" } } }
+    },
+    "/voices/discovery/cancel": { "post": { "security": [{ "controlToken": [] }], "summary": "Request cancellation while keeping completed candidates", "responses": { "204": { "description": "Cancellation requested; poll until generating ends" } } } },
+    "/voices/discovery/{id}/preview": { "post": { "security": [{ "controlToken": [] }], "summary": "Play candidate audio and its sample text without creating history", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string", "format": "uuid" } }], "responses": { "202": { "description": "Playing" }, "404": { "description": "Candidate expired or unknown" }, "409": { "description": "Reading active or candidate belongs to another model" } } } },
+    "/voices/discovery/{id}/save": { "post": { "security": [{ "controlToken": [] }], "summary": "Copy a candidate into a durable named voice profile; repeated saves return the same profile", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string", "format": "uuid" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 80 } } } } } }, "responses": { "201": { "description": "Created profile with generated=true, reference transcript, language, and tuning" }, "200": { "description": "Previously saved profile" }, "404": { "description": "Candidate expired or unknown" }, "409": { "description": "Select the candidate's model first" }, "422": { "description": "Invalid name or candidate cannot be reused as a reference" } } } },
+    "/voices/{id}/generation": { "post": { "security": [{ "controlToken": [] }], "summary": "Save Qwen generation controls for future readings with this profile", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string", "format": "uuid" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VoiceGenerationTuning" } } } }, "responses": { "204": { "description": "Saved" }, "404": { "description": "Profile unknown" }, "409": { "description": "Profile uses a model without Qwen generation controls" }, "422": { "description": "Invalid generation controls" } } } },
     "/voices/{id}/transcript": { "post": { "security": [{ "controlToken": [] }], "summary": "Add or correct a saved voice profile's reference transcript", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string", "format": "uuid" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VoiceTranscriptRequest" } } } }, "responses": { "204": { "description": "Transcript saved for future generations" }, "404": { "description": "Voice profile not found" }, "422": { "description": "Transcript is blank or too long" } } } },
     "/voices/{id}/{action}": { "post": { "security": [{ "controlToken": [] }], "summary": "Select, preview, rename, or tune a voice", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string" } }, { "in": "path", "name": "action", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Applied" }, "202": { "description": "Preview queued" } } } },
     "/voices/{id}": { "delete": { "security": [{ "controlToken": [] }], "summary": "Delete a voice profile", "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Deleted" } } } },

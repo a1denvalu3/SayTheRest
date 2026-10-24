@@ -54,6 +54,23 @@
     <section class="view" id="models-view"><div class="section-intro"><h2>Choose the engine.</h2><p>Download once. Synthesize privately, even offline.</p></div><div id="model-list" class="card-list"></div><details class="community-import"><summary>Import compatible local model</summary><form id="model-import-form" class="studio-card settings-form"><label>Model directory or archive<input name="directory" required placeholder="Folder, .tar.bz2, or .tbz2 containing config.json"></label><p>Archives are unpacked locally with path, file-count, and size checks. Nothing is uploaded.</p><label>Display name<input name="display_name" required maxlength="100"></label><label>License identifier<input name="license" required placeholder="MIT, Apache-2.0, or source terms"></label><label>License URL<input name="license_url" type="url" required placeholder="https://..."></label><label class="consent"><input name="acknowledged" type="checkbox" required><span>I understand this community model is untested and I reviewed its license.</span></label><button type="submit" class="action">Validate and import</button></form></details><details class="community-import"><summary>Import from Hugging Face</summary><form id="hf-import-form" class="studio-card settings-form"><label>Repository ID<input name="repository" required placeholder="namespace/model"></label><label>Revision<input name="revision" placeholder="main or commit/tag"></label><label>Display name<input name="display_name" required maxlength="100"></label><label>License identifier<input name="license" required></label><label>License URL<input name="license_url" type="url" required placeholder="https://huggingface.co/..."></label><label>Access token (only for this request)<input name="access_token" type="password" autocomplete="off"></label><label class="consent"><input name="acknowledged" type="checkbox" required><span>I understand this model is untested and I reviewed its model card and license.</span></label><button type="submit" class="action">Resolve, validate, and import</button></form></details></section>
     <section class="view" id="voices-view">
       <div class="section-intro"><h2>A voice, held locally.</h2><p id="voice-reference-intro">Record or import a clean 3–45 second sample from a speaker who gave permission.</p></div>
+      <section id="voice-discovery" class="studio-card" hidden>
+        <h3>Explore generated voices</h3>
+        <p>Generate samples, preview them, and save a favorite. Saved voices stay available after restarting.</p>
+        <form id="discovery-form" class="settings-form">
+          <label>Sample text<textarea name="sample_text" rows="3" required minlength="20" maxlength="160"></textarea></label>
+          <div class="discovery-controls"><label>Language<select name="language"></select></label><label>Samples<select name="candidate_count"><option value="1">One</option><option value="2">Two</option><option value="4" selected>Four</option><option value="8">Eight</option></select></label></div>
+          <label>Voice style<select name="preset"><option value="faithful">Faithful</option><option value="natural" selected>Natural</option><option value="expressive">Expressive</option><option value="custom">Custom</option></select></label>
+          <details><summary>Generation settings</summary><div class="discovery-controls">
+            <label>Temperature<input name="temperature" type="number" min="0.2" max="1.2" step="0.05" required></label><label>Top P<input name="top_p" type="number" min="0.5" max="1" step="0.05" required></label>
+            <label>Top K<input name="top_k" type="number" min="0" max="100" step="1" required></label><label>Repetition<input name="repetition_penalty" type="number" min="0.9" max="1.5" step="0.05" required></label>
+            <label>Seed<input name="seed" type="number" min="0" max="4294967295" step="1" placeholder="Random"></label>
+          </div></details>
+          <div class="card-actions"><button type="submit" class="action">Generate samples</button><button type="button" id="discovery-cancel" class="action secondary" hidden>Cancel generation</button><button type="button" id="discovery-clear" class="action secondary" hidden>Clear candidates</button></div>
+        </form>
+        <p id="discovery-status" role="status" aria-live="polite"></p>
+        <div id="discovery-candidates" class="card-list compact"></div>
+      </section>
       <form id="voice-form" class="studio-card">
         <label>Name<input name="name" required maxlength="80" placeholder="Warm narrator"></label>
         <div class="recording-passage" aria-labelledby="recording-passage-title">
@@ -132,8 +149,15 @@
       <div class="card-actions"><button type="submit" class="action">Save transcript</button><button id="cancel-voice-transcript" type="button" class="action secondary">Cancel</button></div>
     </form>
   </dialog>
+  <dialog id="voice-generation-dialog"><form id="voice-generation-form" class="studio-card settings-form">
+    <h2>Voice generation settings</h2><p>Adjust how this voice reads new text. Existing recordings keep their original sound.</p>
+    <label>Style<select name="preset"><option value="faithful">Faithful</option><option value="natural">Natural</option><option value="expressive">Expressive</option><option value="custom">Custom</option></select></label>
+    <div class="discovery-controls"><label>Temperature<input name="temperature" type="number" min="0.2" max="1.2" step="0.05" required></label><label>Top P<input name="top_p" type="number" min="0.5" max="1" step="0.05" required></label><label>Top K<input name="top_k" type="number" min="0" max="100" step="1" required></label><label>Repetition<input name="repetition_penalty" type="number" min="0.9" max="1.5" step="0.05" required></label></div>
+    <div class="card-actions"><button type="submit" class="action">Save settings</button><button type="button" id="cancel-voice-generation" class="action secondary">Cancel</button></div>
+  </form></dialog>
   <dialog id="onboarding"><form method="dialog"><p class="eyebrow">WELCOME</p><h2>Your computer can speak for itself.</h2><ol><li>Choose and download a model. Piper is the quick preset; PocketTTS enables local voice cloning.</li><li>Select text in another app and press <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>S</kbd>.</li><li>Use <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>V</kbd> only when you intentionally want to read the clipboard.</li></ol><p>Everything is processed locally. Voice cloning requires permission from the recorded speaker.</p><button class="action" value="ready">Get started</button></form></dialog>
   <script src="reader-timing.js"></script>
+  <script src="voice-discovery-ui.js"></script>
   <script src="playback-ui.js"></script>
   <script src="app.js"></script>
 </body>

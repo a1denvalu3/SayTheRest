@@ -74,7 +74,7 @@ unavailable upstream. They are not requirements for parity with working upstream
 - [x] Per-model voice selection and speaking pace.
 - [ ] Voice descriptions where supported.
 - [x] Local recording/import, quality analysis, trimming, and voice cloning where supported.
-- [ ] Voice discovery/random generation where supported.
+- [ ] Voice discovery/random generation where supported (native Qwen candidate generation, preview, save, reuse, and tuning pass Linux native acceptance; automatic stable/per-paragraph reading modes remain).
 - [x] Rename, preview, tune, select, and delete local voice profiles.
 - [x] Require an affirmative speaker-permission acknowledgement for cloning.
 
@@ -267,8 +267,48 @@ recording, using the prompt layout in the pinned Mac runtime. Linux real-model
 acceptance verified repeatable seeded output, different audio for different
 seeds, reuse of a generated sample as a cloning reference, and isolation between
 cloned and unconditioned requests. Existing cloned output remained byte-for-byte
-equal to its earlier baseline. This is backend evidence; the discovery UI,
-candidate saving, and automatic stable/random reading modes remain incomplete.
+equal to its earlier baseline. This establishes the native Base sampling path;
+automatic stable/per-paragraph random reading modes and the separate VoiceDesign
+and CustomVoice model workflows remain incomplete.
+
+Voice studio now exposes native Qwen candidate generation with editable sample
+text, ten languages plus automatic detection, four samples by default, optional
+seeds, and Faithful/Natural/Expressive generation presets. New batches append to
+the current collection (up to 32 samples). Completed candidates remain available
+after cancellation. Preview plays the generated recording and matching reader
+text without adding history. Saving copies analyzed reference audio, transcript,
+language, and tuning into a durable named profile; simultaneous saves return
+the same profile. Clearing candidates leaves saved profiles intact. Unsaved
+candidates are private temporary files and are not restored after restart.
+
+Linux real-model service acceptance checked the default four-candidate batch, silent device preview,
+two concurrent saves, reading new text with the saved voice, cancellation, and
+collection cleanup. Native desktop acceptance passed 25 checks in Spanish,
+including editing profile generation settings. It exposed a missing
+`Intl.DisplayNames` fallback in WebKit and a legacy grid rule compressing the
+new form; both were corrected and covered by native layout checks. Light/dark
+screenshots were inspected. Rejection tests cover invalid controls/languages,
+full collections preserving their prior samples, clearing during generation,
+saved profile persistence, language restoration, and legacy profile defaults.
+Failed and cancelled attempts release their temporary audio while completed
+candidates remain available. Pocket passed 17 native UI checks and Phonon passed
+13, including their existing workflows and hiding unsupported discovery.
+The release matrix now includes real Qwen CPU tests on both platforms; a new
+matrix run must pass before Windows synthesis coverage is claimed.
+
+```sh
+python3 scripts/test-voice-discovery.py --config /path/to/native-config.json
+python3 scripts/test-desktop-ui.py --config /path/to/native-config.json --window main --script scripts/desktop-discovery-ui-smoke.js --snapshots /tmp/sayit-discovery-ui --timeout 300
+scripts/test-qwen-native.sh <rust-target>
+```
+
+The last command uses the packaged service, worker, and native runtime, downloads
+only pinned/checksummed INT4 model files, verifies seeded free/clone isolation,
+managed streaming/archive counts, cancellation/recovery, headless discovery and
+concurrent saving, then synthesizes all ten languages and automatic detection
+from a locally generated synthetic reference. It requires no recorded human voice.
+It does not establish pronunciation quality, Windows GUI/device behavior, or GPU
+execution. Setting `SAYIT_QWEN_TEST_MODEL` reuses checksum-verified local assets.
 
 Generation controls validate temperature, nucleus/top-k sampling, repetition
 penalty, seed, and token limits. Real managed-worker acceptance verified that

@@ -57,6 +57,9 @@ jobs:
       - name: Test Pocket presets, cloning, cancellation, and installation
         shell: bash
         run: ./scripts/test-pocket-model.sh '${{ matrix.target }}'
+      - name: Test native Qwen discovery, cloning, languages, and recovery
+        shell: bash
+        run: ./scripts/test-qwen-native.sh '${{ matrix.target }}'
       - name: Audit Linux packages
         if: runner.os == 'Linux'
         shell: bash

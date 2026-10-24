@@ -14,6 +14,7 @@ const longVoicePassage = 'On a clear morning, I stepped outside and listened to 
 let windowVisible = false;
 let visibilityChanged = false;
 let playbackView = null;
+let voiceDiscoveryView = null;
 let availableUpdate = null;
 let serviceEventTimer = null;
 let modelDownloadActive = false;
@@ -60,13 +61,14 @@ function renderVoices(voices,settings,models){
   voiceProfiles=voices;
   const selected=settings.active_voice_profile_id;
   const model=models.find(candidate=>candidate.selected);
+  voiceDiscoveryView?.render(model,voices,settings);
   $('#voice-form').hidden=!model?.capabilities.voice_cloning;
   $('#voice-file-form').hidden=!model?.capabilities.voice_file_import;
   const usesTranscript=Boolean(model?.id.startsWith('qwen3-tts'));
   $('#voice-form').elements.reference_text.required=usesTranscript;
   const maximumSeconds=usesTranscript?45:15;
   $('#voice-form').dataset.maximumSeconds=String(maximumSeconds);
-  $('#voice-reference-intro').textContent=model?.capabilities.voice_file_import
+  $('#voice-reference-intro').textContent=model?.capabilities.voice_discovery?'Explore generated voices or create a profile from a recording. Your voices stay on this device.':model?.capabilities.voice_file_import
     ?'Choose a preset or import an exported Phonon voice file. Your voices stay on this device.'
     :model?.capabilities.voice_cloning?`Record or import a clean 3–${maximumSeconds} second sample from a speaker who gave permission.`:'Choose a built-in voice and preview it locally.';
   $('#voice-recording-script').textContent=usesTranscript?longVoicePassage:shortVoicePassage;
@@ -78,7 +80,7 @@ function renderVoices(voices,settings,models){
     const active=!selected&&voice.selected;
     return `<article class="data-card"><header><h3>${escapeHtml(voice.name)}</h3><div><span class="tag">${escapeHtml(voice.language)}</span>${active?' <span class="tag accent">Selected</span>':''}</div></header><p>Built into ${escapeHtml(model.name)} · processed locally.</p>${voice.license?`<p title="${escapeHtml(voice.attribution||'')}">${escapeHtml(voice.license)}</p>`:''}<div class="card-actions"><button class="action" data-preset-model="${escapeHtml(model.id)}" data-preset-voice="${escapeHtml(voice.id)}" data-preset-action="preview">Preview</button>${active?'<button class="action secondary" disabled>In use</button>':`<button class="action secondary" data-preset-model="${escapeHtml(model.id)}" data-preset-voice="${escapeHtml(voice.id)}" data-preset-action="select">Use this voice</button>`}</div></article>`;
   }).join('');
-  const noVoice=!builtIns&&!voices.length?'<p class="empty">This model needs a cloned voice. Record or import a permitted reference sample below.</p>':'';
+  const noVoice=!builtIns&&!voices.length?'<p class="empty">Create or save a voice to start reading.</p>':'';
   const clones=voices.map(voice=>{
     const embedding=voice.reference_kind==='phonon-embedding';
     const active=voice.id===selected;
@@ -88,7 +90,7 @@ function renderVoices(voices,settings,models){
     const tuning=embedding?'':usesTranscript
       ?`<button class="action secondary" data-voice="${voice.id}" data-voice-action="transcript">${voice.reference_text?'Edit':'Add'} transcript</button>`
       :`<button class="action secondary" data-voice="${voice.id}" data-voice-action="tune" data-refinement-steps="${voice.refinement_steps||5}">Tune</button>`;
-    return `<article class="data-card"><header><h3>${escapeHtml(voice.name)}</h3><div><span>${embedding?'Phonon voice file':`${voice.reference_duration_seconds.toFixed(1)} sec`}</span>${active?' <span class="tag accent">Selected</span>':''}</div></header><p>${embedding?'Imported voice file':'Local reference profile'} · created ${new Date(voice.created_at).toLocaleDateString()}${usesTranscript||embedding?'':` · refinement ${voice.refinement_steps||5}/8`}</p>${transcriptStatus}${quality.sample_rate?`<div class="voice-quality"><strong>${quality.quality_score}/100</strong><span>${Math.round(quality.sample_rate/1000)} kHz · RMS ${quality.rms_dbfs.toFixed(1)} dBFS · clipped ${quality.clipped_sample_percent.toFixed(2)}%</span></div>${issues?`<ul class="quality-issues">${issues}</ul>`:''}`:''}<div class="card-actions"><button class="action" data-voice="${voice.id}" data-voice-action="preview">Preview</button>${active?'<button class="action secondary" disabled>In use</button>':`<button class="action secondary" data-voice="${voice.id}" data-voice-action="select">Use this voice</button>`}${tuning}<button class="action secondary" data-voice="${voice.id}" data-voice-action="rename" data-voice-name="${escapeHtml(voice.name)}">Rename</button>${active?'':`<button class="action secondary danger" data-voice="${voice.id}" data-voice-action="delete">Delete</button>`}</div></article>`;
+    return `<article class="data-card"><header><h3>${escapeHtml(voice.name)}</h3><div><span>${embedding?'Phonon voice file':`${voice.reference_duration_seconds.toFixed(1)} sec`}</span>${active?' <span class="tag accent">Selected</span>':''}</div></header><p>${embedding?'Imported voice file':voice.generated?'Generated voice profile':'Local reference profile'} · created ${new Date(voice.created_at).toLocaleDateString()}${usesTranscript||embedding?'':` · refinement ${voice.refinement_steps||5}/8`}</p>${transcriptStatus}${quality.sample_rate?`<div class="voice-quality"><strong>${quality.quality_score}/100</strong><span>${Math.round(quality.sample_rate/1000)} kHz · RMS ${quality.rms_dbfs.toFixed(1)} dBFS · clipped ${quality.clipped_sample_percent.toFixed(2)}%</span></div>${issues?`<ul class="quality-issues">${issues}</ul>`:''}`:''}<div class="card-actions"><button class="action" data-voice="${voice.id}" data-voice-action="preview">Preview</button>${active?'<button class="action secondary" disabled>In use</button>':`<button class="action secondary" data-voice="${voice.id}" data-voice-action="select">Use this voice</button>`}${tuning}${model?.capabilities.voice_generation_tuning?`<button class="action secondary" data-voice="${voice.id}" data-voice-action="generation">Generation settings</button>`:''}<button class="action secondary" data-voice="${voice.id}" data-voice-action="rename" data-voice-name="${escapeHtml(voice.name)}">Rename</button>${active?'':`<button class="action secondary danger" data-voice="${voice.id}" data-voice-action="delete">Delete</button>`}</div></article>`;
   }).join('');
   $('#voice-list').innerHTML=builtIns+noVoice+clones;
   document.querySelectorAll('[data-voice]').forEach(button=>button.onclick=()=>voiceAction(button));
@@ -98,6 +100,7 @@ async function refreshVoices(){const [voices,settings,models]=await Promise.all(
 async function voiceAction(button){
   const {voice:id,voiceAction:action,voiceName,refinementSteps}=button.dataset;
   try{
+    if(action==='generation'){voiceDiscoveryView.openTuning(voiceProfiles.find(voice=>voice.id===id));return}
     if(action==='transcript'){
       const voice=voiceProfiles.find(voice=>voice.id===id);
       const form=$('#voice-transcript-form');
@@ -271,6 +274,7 @@ invoke('desktop_settings').then(showShortcuts).catch(console.error);
 setInterval(()=>{const section=document.querySelector('.nav-item.active').dataset.view;refresh(section,section==='models')},15000);
 setInterval(pollModelProgress,1000);
 
+voiceDiscoveryView=new window.VoiceDiscoveryView({get,post,del,notify:toast,changed:refreshVoices,visible:()=>windowVisible&&document.querySelector('.nav-item.active')?.dataset.view==='voices'});
 playbackView=new window.SayItPlaybackView({post,notify:toast,changed:()=>refresh()});
 window.__TAURI__.event.listen('window-visibility',event=>{if(event.payload.label==='main'){visibilityChanged=true;windowVisible=event.payload.visible;playbackView.setVisible(windowVisible);if(windowVisible)refresh(document.querySelector('.nav-item.active').dataset.view)}});
 window.__TAURI__.event.listen('show-section',event=>{const button=document.querySelector(`[data-view="${event.payload}"]`);if(button)button.click()});

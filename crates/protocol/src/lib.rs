@@ -316,6 +316,10 @@ pub struct HuggingFaceModelImportRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelCapabilities {
     #[serde(default)]
+    pub voice_generation_tuning: bool,
+    #[serde(default)]
+    pub voice_discovery: bool,
+    #[serde(default)]
     pub language_selection: bool,
     #[serde(default)]
     pub voice_file_import: bool,
@@ -362,6 +366,12 @@ pub struct VoiceCloneRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct VoiceProfile {
+    #[serde(default)]
+    pub generated: bool,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub generation_tuning: Option<VoiceGenerationTuning>,
     pub id: Uuid,
     pub name: String,
     #[serde(default)]
@@ -378,6 +388,76 @@ pub struct VoiceProfile {
     pub quality: VoiceQuality,
     #[serde(default = "default_voice_refinement_steps")]
     pub refinement_steps: u32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VoiceGenerationTuning {
+    pub temperature: f32,
+    pub top_p: f32,
+    pub top_k: usize,
+    pub repetition_penalty: f32,
+}
+
+impl Default for VoiceGenerationTuning {
+    fn default() -> Self {
+        Self {
+            temperature: 0.65,
+            top_p: 0.9,
+            top_k: 40,
+            repetition_penalty: 1.2,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VoiceDiscoveryRequest {
+    pub sample_text: String,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default = "default_candidate_count")]
+    pub candidate_count: u8,
+    #[serde(default)]
+    pub seed: Option<u32>,
+    #[serde(default)]
+    pub tuning: VoiceGenerationTuning,
+}
+
+fn default_candidate_count() -> u8 {
+    4
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct VoiceCandidate {
+    pub id: Uuid,
+    pub sample_text: String,
+    pub language: String,
+    pub seed: u32,
+    pub tuning: VoiceGenerationTuning,
+    pub duration_seconds: f64,
+    pub save_error: Option<String>,
+    pub saved_voice_profile_id: Option<Uuid>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceDiscoveryState {
+    Generating,
+    Ready,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct VoiceDiscoverySnapshot {
+    pub id: Uuid,
+    pub model_id: String,
+    pub state: VoiceDiscoveryState,
+    pub completed: usize,
+    pub total: usize,
+    pub candidates: Vec<VoiceCandidate>,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]

@@ -46,6 +46,7 @@ mod player;
 pub mod qwen_runtime;
 mod speech_blocks;
 mod stretch;
+mod voice_discovery;
 use model_manager::ModelManager;
 use player::{PlaybackController, PlayerStatus};
 
@@ -68,6 +69,8 @@ pub struct ServiceState {
     inference_runtime: InferenceRuntime,
     last_inference_device: Arc<Mutex<Option<InferenceDeviceStatus>>>,
     synthesis_cancelled: Arc<AtomicBool>,
+    voice_studio: Arc<Mutex<Option<voice_discovery::Studio>>>,
+    voice_studio_save: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct ResidentEngineSlot {
@@ -236,6 +239,8 @@ impl ServiceState {
             inference_runtime: InferenceRuntime::new(&data_dir),
             last_inference_device: Arc::new(Mutex::new(None)),
             synthesis_cancelled: Arc::new(AtomicBool::new(false)),
+            voice_studio: Arc::new(Mutex::new(None)),
+            voice_studio_save: Arc::new(tokio::sync::Mutex::new(())),
             inner: Arc::new(RwLock::new(inner)),
             notify: Arc::new(Notify::new()),
             store_path,
@@ -356,6 +361,7 @@ impl ServiceState {
             reference_text,
             speaking_pace,
             refinement_steps,
+            generation,
             prefer_gpu,
             rate,
             volume,
@@ -380,6 +386,13 @@ impl ServiceState {
                 voice.and_then(|voice| voice.reference_text.clone()),
                 job.speaking_pace.unwrap_or(inner.settings.speaking_pace),
                 voice.map(|voice| voice.refinement_steps),
+                voice
+                    .and_then(|voice| voice.generation_tuning)
+                    .map(|tuning| sayit_core::QwenGenerationOptions {
+                        seed: None,
+                        max_new_tokens: None,
+                        sampling: voice_discovery::sampling(tuning),
+                    }),
                 inner.settings.compute_device != "cpu",
                 inner.settings.playback_rate,
                 inner.settings.volume,
@@ -452,7 +465,7 @@ impl ServiceState {
                         tempfile::NamedTempFile::new_in(output.parent().unwrap())?.into_temp_path();
                     slot.engine.synthesize_streaming(
                         &SynthesisRequest {
-                            generation: None,
+                            generation: generation.as_ref(),
                             text: block.text,
                             output: part.as_ref(),
                             reference_audio: reference_audio.as_deref(),
@@ -931,6 +944,22 @@ pub fn router(state: ServiceState) -> Router {
         .route("/v1/models/{id}", axum::routing::delete(remove_model))
         .route("/v1/voices", get(voices).post(create_voice))
         .route("/v1/voices/import", post(phonon_voices::import_voice))
+        .route(
+            "/v1/voices/discovery",
+            get(voice_discovery::snapshot)
+                .post(voice_discovery::start)
+                .delete(voice_discovery::clear),
+        )
+        .route("/v1/voices/discovery/cancel", post(voice_discovery::cancel))
+        .route(
+            "/v1/voices/discovery/{id}/preview",
+            post(voice_discovery::preview),
+        )
+        .route(
+            "/v1/voices/discovery/{id}/save",
+            post(voice_discovery::save),
+        )
+        .route("/v1/voices/{id}/generation", post(voice_discovery::tune))
         .route("/v1/voices/default/select", post(select_default_voice))
         .route("/v1/voices/{id}/select", post(select_voice))
         .route("/v1/voices/{id}/preview", post(preview_voice))
@@ -1565,6 +1594,12 @@ async fn select_voice(
             "voice profile belongs to a different model".into(),
         ));
     }
+    if let Some(language) = voice.language.clone() {
+        state
+            .models
+            .select_language(&model_id, &language)
+            .map_err(unprocessable)?;
+    }
     inner.settings.active_voice_profile_id = Some(id);
     inner
         .settings
@@ -1572,6 +1607,8 @@ async fn select_voice(
         .insert(model_id, Some(id));
     drop(inner);
     state.persist().await.map_err(internal_error)?;
+    state.emit("voices");
+    state.emit("models");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1765,6 +1802,7 @@ async fn resume(State(state): State<ServiceState>) -> Result<StatusCode, (Status
 }
 
 async fn stop(State(state): State<ServiceState>) -> Result<StatusCode, (StatusCode, String)> {
+    voice_discovery::cancel_active(&state);
     let active = state.player.snapshot().job_id;
     state.player.stop().map_err(internal_error)?;
     if let Some(job) = state.inner.write().await.jobs.iter_mut().find(|job| {
@@ -1892,6 +1930,12 @@ async fn create_voice(
     let quality = analyze_and_trim_voice(&source, &destination, maximum_seconds)
         .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
     let profile = VoiceProfile {
+        generated: false,
+        language: config
+            .language()
+            .and_then(|value| sayit_core::language::qwen_language(value).ok())
+            .map(|language| language.code.to_owned()),
+        generation_tuning: None,
         reference_kind: sayit_protocol::VoiceReferenceKind::Audio,
         id,
         name: name.to_owned(),
@@ -2119,6 +2163,7 @@ async fn select_model(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let config = state.models.config_path(&id);
     EngineConfig::from_path(&config).map_err(unprocessable)?;
+    voice_discovery::cancel_active(&state);
     *state.engine_config_path.write().await = Some(config);
     if let Ok(mut resident) = state.resident_engine.try_lock() {
         *resident = None;
@@ -2425,6 +2470,7 @@ async fn submit_job(
             ));
         }
     }
+    voice_discovery::cancel_active(&state);
     let job = SpeechJob {
         language,
         id: Uuid::new_v4(),
@@ -2457,6 +2503,7 @@ async fn set_model_backend(
         .models
         .start_backend(&id, &request.backend, request.precision.as_deref())
         .map_err(unprocessable)?;
+    voice_discovery::cancel_active(&state);
     state.emit("models");
     Ok(StatusCode::ACCEPTED)
 }
@@ -2960,7 +3007,7 @@ for line in sys.stdin:
         state
     }
 
-    fn native_voice_test_state(directory: &Path) -> ServiceState {
+    pub(super) fn native_voice_test_state(directory: &Path) -> ServiceState {
         let model = directory.join("native-model");
         fs::create_dir_all(model.join("int4")).unwrap();
         for file in sayit_core::onnx_runtime::model_assets().files {
@@ -3140,6 +3187,9 @@ for line in sys.stdin:
         let state = qwen_voice_test_state(directory.path());
         let voice = Uuid::new_v4();
         state.inner.write().await.voices.push(VoiceProfile {
+            generated: false,
+            language: None,
+            generation_tuning: None,
             id: voice,
             name: "Reference".into(),
             model_id: "qwen3-tts".into(),
@@ -3333,6 +3383,9 @@ for line in sys.stdin:
         let state = qwen_voice_test_state(directory.path());
         let id = Uuid::new_v4();
         state.inner.write().await.voices.push(VoiceProfile {
+            generated: false,
+            language: None,
+            generation_tuning: None,
             reference_kind: sayit_protocol::VoiceReferenceKind::Audio,
             id,
             name: "My voice".into(),
@@ -3398,6 +3451,9 @@ for line in sys.stdin:
                 .voice_profile_by_model
                 .insert("qwen3-tts".into(), Some(id));
             inner.voices.push(VoiceProfile {
+                generated: false,
+                language: None,
+                generation_tuning: None,
                 reference_kind: sayit_protocol::VoiceReferenceKind::Audio,
                 id,
                 name: "Reference".into(),
@@ -3518,6 +3574,9 @@ for line in sys.stdin:
         let state = ServiceState::default();
         let id = Uuid::new_v4();
         state.inner.write().await.voices.push(VoiceProfile {
+            generated: false,
+            language: None,
+            generation_tuning: None,
             reference_kind: sayit_protocol::VoiceReferenceKind::Audio,
             id,
             name: "Tunable".into(),
@@ -3998,6 +4057,9 @@ for line in sys.stdin:
         {
             let mut inner = state.inner.write().await;
             inner.voices.push(VoiceProfile {
+                generated: false,
+                language: None,
+                generation_tuning: None,
                 reference_kind: sayit_protocol::VoiceReferenceKind::Audio,
                 id: voice_id,
                 name: "Remembered".into(),

@@ -55,6 +55,9 @@ pub(super) async fn import_voice(
     let destination = state.voices_dir.join(format!("{id}.safetensors"));
     fs::write(&destination, &bytes).map_err(|error| internal_error(error.into()))?;
     let profile = VoiceProfile {
+        generated: false,
+        language: None,
+        generation_tuning: None,
         id,
         name: name.into(),
         model_id,
