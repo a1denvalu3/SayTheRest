@@ -536,15 +536,21 @@ impl ModelManager {
             })
             .collect::<Vec<_>>();
         descriptors.extend(self.community.lock().unwrap().iter().map(|entry| {
+            let config_path = self.config_path(&entry.id);
+            let installed = config_path.is_file();
+            let installed_config = if installed {
+                EngineConfig::from_path(&config_path).ok()
+            } else {
+                None
+            };
+            let is_qwen = installed_config.as_ref().is_some_and(EngineConfig::is_qwen);
             ModelDescriptor {
-                selected_language: EngineConfig::from_path(&self.config_path(&entry.id))
-                    .ok()
-                    .and_then(|config| {
-                        config
-                            .language()
-                            .and_then(|value| sayit_core::language::qwen_language(value).ok())
-                            .map(|language| language.code.into())
-                    }),
+                selected_language: installed_config.as_ref().and_then(|config| {
+                    config
+                        .language()
+                        .and_then(|value| sayit_core::language::qwen_language(value).ok())
+                        .map(|language| language.code.into())
+                }),
                 inference_backend: None,
                 weight_precision: None,
                 inference_device: None,
@@ -554,20 +560,18 @@ impl ModelManager {
                 size_bytes: entry.size,
                 license: entry.license.clone(),
                 license_url: entry.license_url.clone(),
-                installed: self.config_path(&entry.id).is_file(),
+                installed,
                 update_available: false,
                 resident: false,
-                selected: self.config_path(&entry.id).is_file()
-                    && selected == Some(entry.id.as_str()),
-                requires_voice_profile: EngineConfig::from_path(&self.config_path(&entry.id))
-                    .map_or(entry.voice_cloning, |config| config.requires_reference()),
+                selected: installed && selected == Some(entry.id.as_str()),
+                requires_voice_profile: installed_config
+                    .as_ref()
+                    .map_or(entry.voice_cloning, EngineConfig::requires_reference),
                 capabilities: ModelCapabilities {
                     random_voice_sampling: false,
-                    voice_generation_tuning: EngineConfig::from_path(&self.config_path(&entry.id))
-                        .is_ok_and(|config| config.is_qwen()),
+                    voice_generation_tuning: is_qwen,
                     voice_discovery: false,
-                    language_selection: EngineConfig::from_path(&self.config_path(&entry.id))
-                        .is_ok_and(|config| config.is_qwen()),
+                    language_selection: is_qwen,
                     voice_file_import: false,
                     preset_voices: !entry.voice_cloning,
                     voice_cloning: entry.voice_cloning,
@@ -580,12 +584,9 @@ impl ModelManager {
                 speed_note: "Run the local benchmark before relying on this model.".into(),
                 benchmark: benchmarks.get(&entry.id).cloned(),
                 recommended: recommended == Some(entry.id.as_str()),
-                supports_native_speaking_pace: EngineConfig::from_path(
-                    &self.config_path(&entry.id),
-                )
-                .map_or(!entry.voice_cloning, |config| {
-                    config.supports_native_speaking_pace()
-                }),
+                supports_native_speaking_pace: installed_config
+                    .as_ref()
+                    .map_or(!entry.voice_cloning, EngineConfig::supports_native_speaking_pace),
                 preset_voices: Vec::new(),
             }
         }));
@@ -880,7 +881,7 @@ impl ModelManager {
             runtime: None,
             device: "auto".into(),
             precision: precision.into(),
-            num_threads: 4,
+            num_threads: sayit_core::cpu_topology::recommended_qwen_onnx_threads(),
             language,
         });
         config.validate()?;
@@ -2108,6 +2109,8 @@ fn validate_model_files(id: &str, root: &Path) -> Result<()> {
 }
 
 fn config_for(id: &str, root: &Path, executable: &Path) -> Result<EngineConfig> {
+    let sherpa_threads = sayit_core::cpu_topology::recommended_sherpa_threads(false);
+    let kokoro_threads = sayit_core::cpu_topology::recommended_sherpa_threads(true);
     match id {
         "piper-en-us-lessac-medium" => Ok(EngineConfig::SherpaOnnxVits(VitsConfig {
             executable: executable.into(),
@@ -2116,7 +2119,7 @@ fn config_for(id: &str, root: &Path, executable: &Path) -> Result<EngineConfig> 
             data_dir: Some(root.join("espeak-ng-data")),
             lexicon: None,
             provider: "cpu".into(),
-            num_threads: 4,
+            num_threads: sherpa_threads,
             speaker_id: 0,
         })),
         "pocket-tts-int8" => Ok(EngineConfig::SherpaOnnxPocket(PocketConfig {
@@ -2131,7 +2134,7 @@ fn config_for(id: &str, root: &Path, executable: &Path) -> Result<EngineConfig> 
             vocab_json: root.join("vocab.json"),
             token_scores_json: root.join("token_scores.json"),
             provider: "cpu".into(),
-            num_threads: 4,
+            num_threads: sherpa_threads,
             num_steps: 5,
         })),
         "kokoro-int8-multi-lang-v1-1" => Ok(EngineConfig::SherpaOnnxKokoro(KokoroConfig {
@@ -2142,7 +2145,7 @@ fn config_for(id: &str, root: &Path, executable: &Path) -> Result<EngineConfig> 
             data_dir: root.join("espeak-ng-data"),
             lexicons: vec![root.join("lexicon-us-en.txt"), root.join("lexicon-zh.txt")],
             provider: "cpu".into(),
-            num_threads: 4,
+            num_threads: kokoro_threads,
             speaker_id: 0,
         })),
         "kitten-mini-en-v0-8" => Ok(EngineConfig::SherpaOnnxKitten(KittenConfig {
@@ -2152,7 +2155,7 @@ fn config_for(id: &str, root: &Path, executable: &Path) -> Result<EngineConfig> 
             tokens: root.join("tokens.txt"),
             data_dir: root.join("espeak-ng-data"),
             provider: "cpu".into(),
-            num_threads: 4,
+            num_threads: sherpa_threads,
             speaker_id: 1,
         })),
         "kitten-nano-en-v0-8-int8" => Ok(EngineConfig::SherpaOnnxKitten(KittenConfig {
@@ -2162,7 +2165,7 @@ fn config_for(id: &str, root: &Path, executable: &Path) -> Result<EngineConfig> 
             tokens: root.join("tokens.txt"),
             data_dir: root.join("espeak-ng-data"),
             provider: "cpu".into(),
-            num_threads: 4,
+            num_threads: sherpa_threads,
             speaker_id: 1,
         })),
         _ => bail!("unknown model"),

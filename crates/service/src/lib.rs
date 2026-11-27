@@ -62,8 +62,12 @@ pub struct ServiceState {
     engine_config_path: Arc<RwLock<Option<PathBuf>>>,
     models: ModelManager,
     player: PlaybackController,
+    #[cfg_attr(not(test), allow(dead_code))]
     api_token: Arc<String>,
+    #[cfg_attr(not(test), allow(dead_code))]
     api_read_token: Arc<String>,
+    api_auth_header: Arc<String>,
+    api_read_auth_header: Arc<String>,
     rate_limits: Arc<Mutex<HashMap<&'static str, VecDeque<Instant>>>>,
     events: broadcast::Sender<ServiceEvent>,
     event_sequence: Arc<AtomicU64>,
@@ -78,8 +82,34 @@ pub struct ServiceState {
 struct ResidentEngineSlot {
     config_path: PathBuf,
     config_bytes: Vec<u8>,
+    sherpa_base_signature: Option<Vec<u8>>,
     engine: ManagedEngine,
     last_used: Instant,
+}
+
+fn sherpa_reuse_signature(config: &EngineConfig, prefer_gpu: bool) -> Option<(Vec<u8>, u32)> {
+    let mut normalized = config.clone();
+    let speaker_id = match &mut normalized {
+        EngineConfig::SherpaOnnxVits(v) => {
+            let sid = v.speaker_id;
+            v.speaker_id = 0;
+            sid
+        }
+        EngineConfig::SherpaOnnxKokoro(v) => {
+            let sid = v.speaker_id;
+            v.speaker_id = 0;
+            sid
+        }
+        EngineConfig::SherpaOnnxKitten(v) => {
+            let sid = v.speaker_id;
+            v.speaker_id = 0;
+            sid
+        }
+        _ => return None,
+    };
+    let mut sig = serde_json::to_vec(&normalized).ok()?;
+    sig.push(u8::from(prefer_gpu));
+    Some((sig, speaker_id))
 }
 
 fn inference_device(engine: &ManagedEngine) -> InferenceDeviceStatus {
@@ -251,6 +281,8 @@ impl ServiceState {
             engine_config_path: Arc::new(RwLock::new(engine_config_path)),
             models,
             player: PlaybackController::new(),
+            api_auth_header: Arc::new(format!("Bearer {api_token}")),
+            api_read_auth_header: Arc::new(format!("Bearer {api_read_token}")),
             api_token: Arc::new(api_token),
             api_read_token: Arc::new(api_read_token),
             rate_limits: Arc::new(Mutex::new(HashMap::new())),
@@ -267,13 +299,11 @@ impl ServiceState {
         tokio::spawn(async move { state.model_unload_loop().await });
         let state = self.clone();
         tokio::spawn(async move {
-            // Two snapshots/second leave room for tray polling and management
-            // requests under the shared read-token limit of 240/minute. The UI
-            // interpolates position between these authoritative updates.
-            let mut interval = tokio::time::interval(Duration::from_millis(500));
+            // Event-driven playback broadcaster: zero idle wakeups when no job
+            // is actively playing or buffering; ticks at 500ms only while active.
+            let activity = state.player.activity_notify();
             let mut was_active = false;
             loop {
-                interval.tick().await;
                 let playback = state.player.snapshot();
                 let active = playback.job_id.is_some()
                     && (!playback.generation_complete
@@ -285,6 +315,14 @@ impl ServiceState {
                     state.emit("playback");
                 }
                 was_active = active;
+                if active {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                        _ = activity.notified() => {}
+                    }
+                } else {
+                    activity.notified().await;
+                }
             }
         });
         self.notify.notify_one();
@@ -439,10 +477,21 @@ impl ServiceState {
             }
             config_bytes.extend_from_slice(&refinement_steps.unwrap_or_default().to_le_bytes());
             config_bytes.push(u8::from(prefer_gpu));
+            let sherpa_sig = sherpa_reuse_signature(&config, prefer_gpu);
             let mut resident = resident_engine.lock().unwrap();
-            let reload = resident.as_ref().is_none_or(|slot| {
+            let mut reload = resident.as_ref().is_none_or(|slot| {
                 slot.config_path != config_path || slot.config_bytes != config_bytes
             });
+            if reload
+                && let (Some((sig, speaker_id)), Some(slot)) = (&sherpa_sig, resident.as_mut())
+                && slot.config_path == config_path
+                && slot.sherpa_base_signature.as_ref() == Some(sig)
+                && slot.engine.set_sherpa_speaker_id(*speaker_id)
+            {
+                slot.config_bytes = config_bytes.clone();
+                slot.last_used = Instant::now();
+                reload = false;
+            }
             if reload {
                 // Release the previous model before the replacement allocates
                 // weights; assignment alone keeps both alive during loading.
@@ -450,6 +499,7 @@ impl ServiceState {
                 *resident = Some(ResidentEngineSlot {
                     config_path: config_path.clone(),
                     config_bytes,
+                    sherpa_base_signature: sherpa_sig.map(|(sig, _)| sig),
                     engine: ManagedEngine::load(&config, &runtime, prefer_gpu)?,
                     last_used: Instant::now(),
                 });
@@ -811,14 +861,21 @@ fn write_persisted_state(store_path: &Path, state: &InnerState, rotate_backup: b
     if rotate_backup && store_path.is_file() {
         let backup = store_path.with_extension("json.bak");
         let backup_temporary = store_path.with_extension("json.bak.tmp");
-        fs::copy(store_path, &backup_temporary)?;
-        // Windows requires a writable handle for FlushFileBuffers, which is
-        // what File::sync_all uses. Opening the copied backup read-only works
-        // on Unix but fails with ERROR_ACCESS_DENIED on Windows.
-        fs::OpenOptions::new()
-            .write(true)
-            .open(&backup_temporary)?
-            .sync_all()?;
+        let _ = fs::remove_file(&backup_temporary);
+        #[cfg(unix)]
+        let linked = fs::hard_link(store_path, &backup_temporary).is_ok();
+        #[cfg(not(unix))]
+        let linked = false;
+        if !linked {
+            fs::copy(store_path, &backup_temporary)?;
+            // Windows requires a writable handle for FlushFileBuffers, which is
+            // what File::sync_all uses. Opening the copied backup read-only works
+            // on Unix but fails with ERROR_ACCESS_DENIED on Windows.
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&backup_temporary)?
+                .sync_all()?;
+        }
         replace_file(&backup_temporary, &backup)?;
     }
     replace_file(&temporary, store_path)?;
@@ -1008,11 +1065,11 @@ async fn require_auth(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
-    let control = format!("Bearer {}", state.api_token);
-    let read = format!("Bearer {}", state.api_read_token);
-    let scope = if supplied == Some(control.as_str()) {
+    let scope = if supplied == Some(state.api_auth_header.as_str()) {
         "control"
-    } else if supplied == Some(read.as_str()) && request.method() == axum::http::Method::GET {
+    } else if supplied == Some(state.api_read_auth_header.as_str())
+        && request.method() == axum::http::Method::GET
+    {
         "read"
     } else {
         return Err(StatusCode::UNAUTHORIZED);
@@ -1057,9 +1114,14 @@ async fn health() -> Json<Health> {
 }
 
 async fn openapi() -> Json<serde_json::Value> {
+    static OPENAPI_DOC: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
     Json(
-        serde_json::from_str(include_str!("../../../docs/openapi.json"))
-            .expect("embedded OpenAPI document must be valid JSON"),
+        OPENAPI_DOC
+            .get_or_init(|| {
+                serde_json::from_str(include_str!("../../../docs/openapi.json"))
+                    .expect("embedded OpenAPI document must be valid JSON")
+            })
+            .clone(),
     )
 }
 
@@ -2341,9 +2403,52 @@ async fn preview_preset_voice(
     let runtime = state.inference_runtime.clone();
     let last_device = state.last_inference_device.clone();
     let resident_engine = state.resident_engine.clone();
+    let config_path = state.models.config_path(&id);
     let synthesis_output = output.clone();
     tokio::task::spawn_blocking(move || {
         let mut resident = resident_engine.lock().unwrap();
+        let sherpa_sig = sherpa_reuse_signature(&config, prefer_gpu);
+        if let Some((sig, speaker_id)) = sherpa_sig {
+            let mut config_bytes = serde_json::to_vec(&config)?;
+            if let Some(directory) = config_path.parent()
+                && let Ok(manifest) = fs::read(directory.join("catalog-install.json"))
+            {
+                config_bytes.extend_from_slice(b"\0catalog\0");
+                config_bytes.extend_from_slice(&manifest);
+            }
+            config_bytes.extend_from_slice(&0u32.to_le_bytes());
+            config_bytes.push(u8::from(prefer_gpu));
+            let reused = resident.as_mut().is_some_and(|slot| {
+                slot.config_path == config_path
+                    && slot.sherpa_base_signature.as_ref() == Some(&sig)
+                    && slot.engine.set_sherpa_speaker_id(speaker_id)
+            });
+            if !reused {
+                *resident = None;
+                *resident = Some(ResidentEngineSlot {
+                    config_path: config_path.clone(),
+                    config_bytes: config_bytes.clone(),
+                    sherpa_base_signature: Some(sig),
+                    engine: ManagedEngine::load(&config, &runtime, prefer_gpu)?,
+                    last_used: Instant::now(),
+                });
+            } else if let Some(slot) = resident.as_mut() {
+                slot.config_bytes = config_bytes;
+                slot.last_used = Instant::now();
+            }
+            let slot = resident.as_mut().unwrap();
+            let result = slot.engine.synthesize(&SynthesisRequest {
+                generation: None,
+                text: &text,
+                output: &synthesis_output,
+                reference_audio: None,
+                reference_text: None,
+                speaking_pace,
+            });
+            slot.last_used = Instant::now();
+            *last_device.lock().unwrap() = Some(inference_device(&slot.engine));
+            return result;
+        }
         *resident = None;
         let engine = ManagedEngine::load(&config, &runtime, prefer_gpu)?;
         let result = engine.synthesize(&SynthesisRequest {
