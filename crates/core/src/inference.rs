@@ -526,6 +526,19 @@ impl ManagedEngine {
     pub fn device(&self) -> InferenceDevice {
         self.state.lock().unwrap().device.clone()
     }
+
+    /// Update the active speaker ID in place when a resident CPU sherpa-onnx
+    /// engine is loaded, avoiding a full model reload for compatible preset
+    /// voice previews.
+    pub fn set_sherpa_speaker_id(&self, speaker_id: u32) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if let Some(Backend::Sherpa(engine)) = state.backend.as_mut() {
+            engine.set_speaker_id(speaker_id);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl TtsEngine for ManagedEngine {
@@ -641,11 +654,11 @@ impl ManagedEngine {
                 &mut sink,
                 &mut delivered,
             )?;
+            anyhow::ensure!(
+                crate::wav_duration_seconds(pending.as_ref())? > 0.0,
+                "inference generated empty audio"
+            );
         }
-        anyhow::ensure!(
-            crate::wav_duration_seconds(pending.as_ref())? > 0.0,
-            "inference generated empty audio"
-        );
         // Publish only successful complete audio, including after GPU fallback.
         pending
             .persist(request.output)

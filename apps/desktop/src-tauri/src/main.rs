@@ -591,20 +591,67 @@ fn configure_launch_at_login(enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(4)
+            .build()
+            .expect("HTTP client")
+    })
+}
+
+fn api_token_cache() -> &'static RwLock<Option<String>> {
+    static CACHE: std::sync::OnceLock<RwLock<Option<String>>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(None))
+}
+
+fn api_read_token_cache() -> &'static RwLock<Option<String>> {
+    static CACHE: std::sync::OnceLock<RwLock<Option<String>>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(None))
+}
+
+fn invalidate_cached_tokens() {
+    if let Ok(mut guard) = api_token_cache().write() {
+        *guard = None;
+    }
+    if let Ok(mut guard) = api_read_token_cache().write() {
+        *guard = None;
+    }
+}
+
 fn api_token() -> Result<String, String> {
     if let Ok(token) = std::env::var("SAYIT_TOKEN").or_else(|_| std::env::var("SAY_THE_REST_TOKEN"))
     {
         return Ok(token);
     }
-    std::fs::read_to_string(default_data_dir().join("api-token"))
+    if let Ok(guard) = api_token_cache().read()
+        && let Some(cached) = guard.as_ref()
+    {
+        return Ok(cached.clone());
+    }
+    let token = std::fs::read_to_string(default_data_dir().join("api-token"))
         .map(|token| token.trim().to_owned())
-        .map_err(|error| format!("cannot read the local service token: {error}"))
+        .map_err(|error| format!("cannot read the local service token: {error}"))?;
+    if let Ok(mut guard) = api_token_cache().write() {
+        *guard = Some(token.clone());
+    }
+    Ok(token)
 }
 
 fn api_read_token() -> Result<String, String> {
-    std::fs::read_to_string(default_data_dir().join("api-read-token"))
+    if let Ok(guard) = api_read_token_cache().read()
+        && let Some(cached) = guard.as_ref()
+    {
+        return Ok(cached.clone());
+    }
+    let token = std::fs::read_to_string(default_data_dir().join("api-read-token"))
         .map(|token| token.trim().to_owned())
-        .map_err(|error| format!("cannot read the local service read token: {error}"))
+        .map_err(|error| format!("cannot read the local service read token: {error}"))?;
+    if let Ok(mut guard) = api_read_token_cache().write() {
+        *guard = Some(token.clone());
+    }
+    Ok(token)
 }
 
 fn default_data_dir() -> std::path::PathBuf {
@@ -760,11 +807,18 @@ async fn service_get(
 }
 
 async fn read_service_resource(resource: &str) -> Result<Value, String> {
-    let response =
-        authorized_read(reqwest::Client::new().get(format!("{}/{resource}", service_url())))?
+    let url = format!("{}/{resource}", service_url());
+    let mut response = authorized_read(http_client().get(&url))?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        invalidate_cached_tokens();
+        response = authorized_read(http_client().get(&url))?
             .send()
             .await
             .map_err(|error| error.to_string())?;
+    }
     checked_service_response(response)
         .await?
         .json()
@@ -801,14 +855,25 @@ async fn service_post(
     cache: tauri::State<'_, api_cache::SnapshotCache>,
 ) -> Result<Option<Value>, String> {
     let resource = safe_resource(&resource)?;
-    let request = authorized(reqwest::Client::new().post(format!("{}/{resource}", service_url())))?;
-    let response = match body {
-        Some(body) => request.json(&body),
-        None => request,
+    let url = format!("{}/{resource}", service_url());
+    let send = |body: &Option<Value>| -> Result<reqwest::RequestBuilder, String> {
+        let request = authorized(http_client().post(&url))?;
+        Ok(match body {
+            Some(body) => request.json(body),
+            None => request,
+        })
+    };
+    let mut response = send(&body)?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        invalidate_cached_tokens();
+        response = send(&body)?
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
     }
-    .send()
-    .await
-    .map_err(|error| error.to_string())?;
     let response = checked_service_response(response).await?;
     cache.invalidate();
     let bytes = response.bytes().await.map_err(|error| error.to_string())?;
@@ -826,11 +891,18 @@ async fn service_delete(
     cache: tauri::State<'_, api_cache::SnapshotCache>,
 ) -> Result<(), String> {
     let resource = safe_resource(&resource)?;
-    let response =
-        authorized(reqwest::Client::new().delete(format!("{}/{resource}", service_url())))?
+    let url = format!("{}/{resource}", service_url());
+    let mut response = authorized(http_client().delete(&url))?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        invalidate_cached_tokens();
+        response = authorized(http_client().delete(&url))?
             .send()
             .await
             .map_err(|error| error.to_string())?;
+    }
     checked_service_response(response).await?;
     cache.invalidate();
     Ok(())
@@ -877,7 +949,7 @@ fn handle_capture(app: tauri::AppHandle, kind: CaptureKind) {
         }
         let status = match result {
             Ok(text) => {
-                let client = reqwest::Client::new();
+                let client = http_client();
                 let threshold =
                     match authorized_read(client.get(format!("{}/settings", service_url()))) {
                         Ok(request) => match request.send().await {
@@ -978,18 +1050,17 @@ fn handle_capture(app: tauri::AppHandle, kind: CaptureKind) {
 fn handle_tray_playback(app: tauri::AppHandle, toggle: bool) {
     tauri::async_runtime::spawn(async move {
         let result = async {
+            let client = http_client();
             let resource = if toggle {
-                let state = authorized_read(
-                    reqwest::Client::new().get(format!("{}/state", service_url())),
-                )?
-                .send()
-                .await
-                .map_err(|error| error.to_string())?
-                .error_for_status()
-                .map_err(|error| error.to_string())?
-                .json::<Value>()
-                .await
-                .map_err(|error| error.to_string())?;
+                let state = authorized_read(client.get(format!("{}/state", service_url())))?
+                    .send()
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .error_for_status()
+                    .map_err(|error| error.to_string())?
+                    .json::<Value>()
+                    .await
+                    .map_err(|error| error.to_string())?;
                 match state.pointer("/playback/state").and_then(Value::as_str) {
                     Some("paused") => "playback/resume",
                     Some("playing") => "playback/pause",
@@ -998,7 +1069,7 @@ fn handle_tray_playback(app: tauri::AppHandle, toggle: bool) {
             } else {
                 "playback/stop"
             };
-            authorized(reqwest::Client::new().post(format!("{}/{resource}", service_url())))?
+            authorized(client.post(format!("{}/{resource}", service_url())))?
                 .send()
                 .await
                 .map_err(|error| error.to_string())?
@@ -1070,39 +1141,62 @@ fn start_tray_status_poll(
     status_item: MenuItem<tauri::Wry>,
     pause_item: MenuItem<tauri::Wry>,
     stop_item: MenuItem<tauri::Wry>,
+    refresh: std::sync::Arc<tokio::sync::Notify>,
 ) {
     tauri::async_runtime::spawn(async move {
+        let mut last_rendered: Option<(String, String, bool)> = None;
         loop {
-            let state = match authorized_read(
-                reqwest::Client::new().get(format!("{}/state", service_url())),
-            ) {
+            let state = match authorized_read(http_client().get(format!("{}/state", service_url())))
+            {
                 Ok(request) => match request.send().await {
                     Ok(response) if response.status().is_success() => {
                         response.json::<Value>().await.ok()
+                    }
+                    Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
+                        invalidate_cached_tokens();
+                        None
                     }
                     _ => None,
                 },
                 Err(_) => None,
             };
-            let (status, pause, controls_enabled) = state
+            let rendered = state
                 .as_ref()
                 .map(tray_status_text)
                 .unwrap_or_else(|| ("Service unavailable".into(), "Pause / resume".into(), false));
-            let _ = status_item.set_text(status);
-            let _ = pause_item.set_text(pause);
-            let _ = pause_item.set_enabled(controls_enabled);
-            let _ = stop_item.set_enabled(controls_enabled);
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if last_rendered.as_ref() != Some(&rendered) {
+                let (status, pause, controls_enabled) = &rendered;
+                let _ = status_item.set_text(status);
+                let _ = pause_item.set_text(pause);
+                let _ = pause_item.set_enabled(*controls_enabled);
+                let _ = stop_item.set_enabled(*controls_enabled);
+                last_rendered = Some(rendered);
+            }
+            let active = state
+                .as_ref()
+                .and_then(|s| s.pointer("/playback/state").and_then(Value::as_str))
+                .is_some_and(|s| matches!(s, "playing" | "synthesizing"));
+            let delay = if active {
+                std::time::Duration::from_secs(2)
+            } else {
+                std::time::Duration::from_secs(30)
+            };
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = refresh.notified() => {}
+            }
         }
     });
 }
 
-fn start_service_event_bridge(app: tauri::AppHandle) {
+fn start_service_event_bridge(
+    app: tauri::AppHandle,
+    tray_refresh: std::sync::Arc<tokio::sync::Notify>,
+) {
     tauri::async_runtime::spawn(async move {
         loop {
-            let response = match authorized_read(
-                reqwest::Client::new().get(format!("{}/events", service_url())),
-            ) {
+            let response = match authorized_read(http_client().get(format!("{}/events", service_url())))
+            {
                 Ok(request) => request.send().await,
                 Err(error) => {
                     eprintln!("service event stream unavailable: {error}");
@@ -1114,10 +1208,16 @@ fn start_service_event_bridge(app: tauri::AppHandle) {
                 tokio::time::sleep(std::time::Duration::from_secs(15)).await;
                 continue;
             };
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+                invalidate_cached_tokens();
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
             if !response.status().is_success() {
                 tokio::time::sleep(std::time::Duration::from_secs(15)).await;
                 continue;
             }
+            tray_refresh.notify_one();
             let mut pending = String::new();
             loop {
                 match response.chunk().await {
@@ -1134,9 +1234,10 @@ fn start_service_event_bridge(app: tauri::AppHandle) {
                             if let Ok(event) = serde_json::from_str::<Value>(&data) {
                                 if matches!(
                                     event["resource"].as_str(),
-                                    Some("playback" | "jobs" | "settings")
+                                    Some("playback" | "jobs" | "settings" | "state")
                                 ) {
                                     app.state::<api_cache::SnapshotCache>().invalidate();
+                                    tray_refresh.notify_one();
                                 }
                                 let _ = app.emit("service-event", event);
                             }
@@ -1145,6 +1246,7 @@ fn start_service_event_bridge(app: tauri::AppHandle) {
                     Ok(None) | Err(_) => break,
                 }
             }
+            tray_refresh.notify_one();
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     });
@@ -1291,8 +1393,9 @@ fn main() {
                     })
                     .build(app)?;
             }
-            start_service_event_bridge(app.handle().clone());
-            start_tray_status_poll(status, pause_resume, stop);
+            let tray_refresh = std::sync::Arc::new(tokio::sync::Notify::new());
+            start_service_event_bridge(app.handle().clone(), tray_refresh.clone());
+            start_tray_status_poll(status, pause_resume, stop, tray_refresh);
             Ok(())
         })
         .on_page_load(|webview, payload| {

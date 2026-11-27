@@ -2,12 +2,16 @@
 //! The prompt layout follows QwenLM/Qwen3-TTS and ONNX Community's inference.py.
 //! No Python code or remote tokenizer code is executed by this module.
 
+use crate::{
+    cpu_topology::{self, CpuTopology},
+    qwen_code_predictor::FastCodePredictor,
+};
 use anyhow::{Context, Result, bail, ensure};
 use ort::{
-    environment::Environment,
+    environment::{Environment, GlobalThreadPoolOptions},
     ep,
     memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType},
-    session::Session,
+    session::{Session, builder::GraphOptimizationLevel},
     value::{DynValue, Tensor},
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -18,6 +22,8 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
+    sync::mpsc,
+    thread::{self, JoinHandle},
     time::Instant,
 };
 use tokenizers::{
@@ -50,6 +56,10 @@ pub struct NativeRequest {
     pub do_sample: bool,
     #[serde(flatten)]
     pub sampling: crate::QwenSamplingOptions,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(default)]
+    pub stream_format: Option<String>,
 }
 fn auto_language() -> String {
     "Auto".into()
@@ -68,15 +78,93 @@ struct ReferencePrompt {
     codes: Vec<f32>,
 }
 
+struct CachedEmbeddings {
+    bos: Vec<f32>,
+    eos: Vec<f32>,
+    pad: Vec<f32>,
+    codec_pad: Vec<f32>,
+    codec_bos: Vec<f32>,
+}
+
+enum PredictorBackend {
+    Fast(Box<FastCodePredictor>),
+    Ort(Session),
+}
+
+enum DecoderMessage {
+    Decode {
+        codes: Vec<i64>,
+        reply: mpsc::Sender<Result<Vec<f32>>>,
+    },
+    Shutdown,
+}
+
+struct PipelinedDecoder {
+    tx: mpsc::Sender<DecoderMessage>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl PipelinedDecoder {
+    fn spawn(mut session: Session, main_cpu: Option<usize>) -> Result<Self> {
+        let (tx, rx) = mpsc::channel::<DecoderMessage>();
+        let handle = thread::Builder::new()
+            .name("qwen-tok-decoder".into())
+            .spawn(move || {
+                if let Some(cpu) = main_cpu {
+                    cpu_topology::set_current_thread_affinity(&[cpu]);
+                }
+                while let Ok(msg) = rx.recv() {
+                    match msg {
+                        DecoderMessage::Decode { codes, reply } => {
+                            let res = decode_chunk_session(&mut session, &codes);
+                            let _ = reply.send(res);
+                        }
+                        DecoderMessage::Shutdown => break,
+                    }
+                }
+            })
+            .context("cannot spawn pipelined Qwen audio decoder thread")?;
+        Ok(Self {
+            tx,
+            handle: Some(handle),
+        })
+    }
+
+    fn enqueue(&self, codes: Vec<i64>, reply: mpsc::Sender<Result<Vec<f32>>>) -> Result<()> {
+        self.tx
+            .send(DecoderMessage::Decode { codes, reply })
+            .map_err(|_| anyhow::anyhow!("pipelined audio decoder thread exited"))
+    }
+}
+
+impl Drop for PipelinedDecoder {
+    fn drop(&mut self) {
+        let _ = self.tx.send(DecoderMessage::Shutdown);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+enum DecoderBackend {
+    Inline(Session),
+    Pipelined(PipelinedDecoder),
+}
+
 pub struct NativeQwenPipeline {
+    env: Environment,
+    directory: PathBuf,
+    gpu: bool,
+    threads: usize,
+    gen_cpus: Vec<usize>,
     text_embed: Session,
     codec_embed: Session,
     residual_embed: Session,
     talker: Session,
-    predictor: Session,
-    encoder: Session,
-    decoder: Session,
-    speaker: Session,
+    predictor: PredictorBackend,
+    encoder: Option<Session>,
+    decoder: DecoderBackend,
+    speaker: Option<Session>,
     tokenizer: Tokenizer,
     config: Value,
     hidden: usize,
@@ -86,6 +174,9 @@ pub struct NativeQwenPipeline {
     past_names: Vec<String>,
     device: String,
     reference: Option<ReferencePrompt>,
+    cached_embeddings: CachedEmbeddings,
+    sample_candidates: Vec<(usize, f32)>,
+    sample_weights: Vec<f64>,
 }
 
 fn tensor_f32(shape: Vec<usize>, data: Vec<f32>) -> Result<DynValue> {
@@ -113,6 +204,137 @@ fn embed(session: &mut Session, input: &str, ids: &[i64]) -> Result<Vec<f32>> {
     )
 }
 
+fn build_shared_session(
+    env: &Environment,
+    directory: &Path,
+    name: &str,
+    gpu: bool,
+    threads: usize,
+    use_global_pool: bool,
+) -> Result<Session> {
+    let mut builder = Session::builder(env)?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if !use_global_pool {
+        builder = builder
+            .with_independent_thread_pool()
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .with_intra_threads(threads)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .with_inter_threads(1)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .with_intra_op_spinning(false)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    if gpu {
+        builder = builder
+            .with_execution_providers([ep::CUDA::default().build().error_on_failure()])
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    builder
+        .commit_from_file(directory.join(format!("{name}.onnx")))
+        .with_context(|| format!("cannot load native Qwen {name}"))
+}
+
+fn build_decoder_session(
+    env: &Environment,
+    directory: &Path,
+    gpu: bool,
+    threads: usize,
+    decoder_cpus: &[usize],
+    use_global_pool: bool,
+) -> Result<Session> {
+    if !gpu && !decoder_cpus.is_empty() {
+        let dec_threads = decoder_cpus.len();
+        let mut builder = Session::builder(env)?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .with_independent_thread_pool()
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .with_intra_threads(dec_threads)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .with_inter_threads(1)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .with_intra_op_spinning(false)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .with_flush_to_zero()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if let Some(affinity) = CpuTopology::ort_intra_affinity(decoder_cpus, dec_threads) {
+            builder = builder
+                .with_config_entry("session.intra_op_thread_affinities", affinity)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+        return builder
+            .commit_from_file(directory.join("tok_decoder.onnx"))
+            .context("cannot load native Qwen tok_decoder");
+    }
+    build_shared_session(env, directory, "tok_decoder", gpu, threads, use_global_pool)
+}
+
+fn decode_chunk_session(decoder: &mut Session, chunk: &[i64]) -> Result<Vec<f32>> {
+    ensure!(
+        !chunk.is_empty() && chunk.len().is_multiple_of(GROUPS),
+        "invalid generated audio codes"
+    );
+    let frames = chunk.len() / GROUPS;
+    ensure!(
+        frames <= DECODE_FRAMES,
+        "decoder chunk exceeds DECODE_FRAMES"
+    );
+    let padded = if frames == DECODE_FRAMES {
+        chunk.to_vec()
+    } else {
+        (0..DECODE_FRAMES * GROUPS)
+            .map(|i| chunk[i % chunk.len()])
+            .collect()
+    };
+    let output = run(
+        decoder,
+        vec![(
+            "audio_codes",
+            tensor_i64(vec![1, DECODE_FRAMES, GROUPS], padded)?,
+        )],
+    )?;
+    let samples = output[0].try_extract_tensor::<f32>()?.1;
+    let count = (samples.len() * frames + DECODE_FRAMES / 2) / DECODE_FRAMES;
+    let slice = &samples[..count];
+    ensure!(
+        slice.iter().all(|sample| sample.is_finite()),
+        "decoder generated invalid samples"
+    );
+    Ok(slice.to_vec())
+}
+
+fn init_environment(runtime: &Path, gpu: bool, threads: usize, gen_cpus: &[usize]) -> Result<(Environment, bool)> {
+    static PROCESS_ENV: std::sync::OnceLock<(Environment, bool)> = std::sync::OnceLock::new();
+    if let Some((env, has_pool)) = PROCESS_ENV.get() {
+        return Ok((env.clone(), *has_pool && !gpu));
+    }
+    let mut builder = ort::init_from(runtime)?
+        .with_name("sayit-qwen-onnx")
+        .with_telemetry(false);
+    if !gpu {
+        let mut pool = GlobalThreadPoolOptions::default()
+            .with_intra_threads(threads)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .with_inter_threads(1)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .with_spin_control(true)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .with_flush_to_zero()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if let Some(affinity) = CpuTopology::ort_intra_affinity(gen_cpus, threads) {
+            pool = pool
+                .with_intra_affinity(affinity)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+        builder = builder.with_global_thread_pool(pool);
+    }
+    let env = builder.build()?;
+    let _ = PROCESS_ENV.set((env.clone(), !gpu));
+    Ok((env, !gpu))
+}
+
 impl NativeQwenPipeline {
     pub fn load(
         model: &Path,
@@ -129,33 +351,40 @@ impl NativeQwenPipeline {
             matches!(device, "cpu" | "cuda" | "cuda:0"),
             "unsupported native Qwen device"
         );
+        let topo = cpu_topology::detect();
+        let threads = if threads == 0 {
+            topo.recommended_qwen_onnx_threads()
+        } else {
+            threads
+        };
         ensure!(
             threads > 0 && threads <= 64,
             "inference threads must be between 1 and 64"
         );
-        let env: Environment = ort::init_from(runtime)?
-            .with_name("sayit-qwen-onnx")
-            .with_telemetry(false)
-            .build()?;
         let gpu = device.starts_with("cuda");
-        let directory = model.join(precision);
-        let load = |name: &str| -> Result<Session> {
-            let mut builder = Session::builder(&env)?
-                .with_intra_threads(threads)
-                .map_err(|e| anyhow::anyhow!("{e}"))?
-                .with_inter_threads(1)
-                .map_err(|e| anyhow::anyhow!("{e}"))?
-                .with_intra_op_spinning(false)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            if gpu {
-                builder = builder
-                    .with_execution_providers([ep::CUDA::default().build().error_on_failure()])
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-            }
-            builder
-                .commit_from_file(directory.join(format!("{name}.onnx")))
-                .with_context(|| format!("cannot load native Qwen {name}"))
+        let gen_cpus = if gpu {
+            Vec::new()
+        } else {
+            topo.select_worker_cpus(threads)
         };
+        let decoder_cpus = if gpu {
+            Vec::new()
+        } else {
+            topo.pipelined_decoder_cpus(&gen_cpus)
+        };
+        let (env, use_global_pool) = init_environment(runtime, gpu, threads, &gen_cpus)?;
+        let directory = model.join(precision);
+
+        // Validate that lazy-loaded optional reference-encoding graphs exist up front.
+        for required in ["speaker_encoder", "tok_encoder"] {
+            let path = directory.join(format!("{required}.onnx"));
+            ensure!(
+                path.is_file(),
+                "cannot load native Qwen {required}: {} does not exist",
+                path.display()
+            );
+        }
+
         let config: Value = serde_json::from_slice(&fs::read(model.join("model.json"))?)?;
         ensure!(
             config["model_type"] == "qwen3_tts" && config["tts_model_type"] == "base",
@@ -172,7 +401,101 @@ impl NativeQwenPipeline {
         let layers = dimension("num_hidden_layers")?;
         let kv_heads = dimension("num_key_value_heads")?;
         let head_dim = dimension("head_dim")?;
-        let talker = load("talker_cache")?;
+
+        // Load independent heavy graphs concurrently to cut cold startup time.
+        let (talker, decoder_session, predictor, text_embed, codec_embed, residual_embed, tokenizer) =
+            thread::scope(|scope| -> Result<_> {
+                let decoder_handle = scope.spawn(|| {
+                    build_decoder_session(
+                        &env,
+                        &directory,
+                        gpu,
+                        threads,
+                        &decoder_cpus,
+                        use_global_pool,
+                    )
+                });
+                let talker_handle = scope.spawn(|| {
+                    build_shared_session(
+                        &env,
+                        &directory,
+                        "talker_cache",
+                        gpu,
+                        threads,
+                        use_global_pool,
+                    )
+                });
+                let predictor_handle = scope.spawn(|| -> Result<PredictorBackend> {
+                    if !gpu
+                        && precision == "int4"
+                        && let Some(fast) = FastCodePredictor::try_load(
+                            &directory.join("code_predictor.onnx"),
+                            threads,
+                            &gen_cpus,
+                        )?
+                    {
+                        return Ok(PredictorBackend::Fast(Box::new(fast)));
+                    }
+                    Ok(PredictorBackend::Ort(build_shared_session(
+                        &env,
+                        &directory,
+                        "code_predictor",
+                        gpu,
+                        threads,
+                        use_global_pool,
+                    )?))
+                });
+                let embeds_handle = scope.spawn(|| -> Result<_> {
+                    let text_embed = build_shared_session(
+                        &env,
+                        &directory,
+                        "text_embed",
+                        gpu,
+                        threads,
+                        use_global_pool,
+                    )?;
+                    let codec_embed = build_shared_session(
+                        &env,
+                        &directory,
+                        "codec_embed",
+                        gpu,
+                        threads,
+                        use_global_pool,
+                    )?;
+                    let residual_embed = build_shared_session(
+                        &env,
+                        &directory,
+                        "residual_embed",
+                        gpu,
+                        threads,
+                        use_global_pool,
+                    )?;
+                    Ok((text_embed, codec_embed, residual_embed))
+                });
+                let tokenizer = load_tokenizer(model)?;
+                let (text_embed, codec_embed, residual_embed) = embeds_handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("embedding loader panicked"))??;
+                let predictor = predictor_handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("predictor loader panicked"))??;
+                let talker = talker_handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("talker loader panicked"))??;
+                let decoder_session = decoder_handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("decoder loader panicked"))??;
+                Ok((
+                    talker,
+                    decoder_session,
+                    predictor,
+                    text_embed,
+                    codec_embed,
+                    residual_embed,
+                    tokenizer,
+                ))
+            })?;
+
         ensure!(
             talker.inputs().len() >= 3,
             "Qwen cache graph has too few inputs"
@@ -189,16 +512,65 @@ impl NativeQwenPipeline {
             talker.outputs().len() == 2 * layers + 2,
             "Qwen cache graph has unexpected outputs"
         );
-        let tokenizer = load_tokenizer(model)?;
+
+        let mut text_embed = text_embed;
+        let mut codec_embed = codec_embed;
+        let config_id = |key: &str| -> Result<i64> {
+            config[key]
+                .as_i64()
+                .or_else(|| config["talker_config"][key].as_i64())
+                .with_context(|| format!("missing Qwen token: {key}"))
+        };
+        let special = embed(
+            &mut text_embed,
+            "text_ids",
+            &[
+                config_id("tts_bos_token_id")?,
+                config_id("tts_eos_token_id")?,
+                config_id("tts_pad_token_id")?,
+            ],
+        )?;
+        ensure!(special.len() == 3 * hidden, "invalid special text embeddings");
+        let codec_special = embed(
+            &mut codec_embed,
+            "codec_ids",
+            &[config_id("codec_pad_id")?, config_id("codec_bos_id")?],
+        )?;
+        ensure!(
+            codec_special.len() == 2 * hidden,
+            "invalid special codec embeddings"
+        );
+        let cached_embeddings = CachedEmbeddings {
+            bos: special[..hidden].to_vec(),
+            eos: special[hidden..2 * hidden].to_vec(),
+            pad: special[2 * hidden..3 * hidden].to_vec(),
+            codec_pad: codec_special[..hidden].to_vec(),
+            codec_bos: codec_special[hidden..2 * hidden].to_vec(),
+        };
+
+        let decoder = if !gpu && !decoder_cpus.is_empty() {
+            DecoderBackend::Pipelined(PipelinedDecoder::spawn(
+                decoder_session,
+                decoder_cpus.first().copied(),
+            )?)
+        } else {
+            DecoderBackend::Inline(decoder_session)
+        };
+
         Ok(Self {
-            text_embed: load("text_embed")?,
-            codec_embed: load("codec_embed")?,
-            residual_embed: load("residual_embed")?,
+            env,
+            directory,
+            gpu,
+            threads,
+            gen_cpus,
+            text_embed,
+            codec_embed,
+            residual_embed,
             talker,
-            predictor: load("code_predictor")?,
-            encoder: load("tok_encoder")?,
-            decoder: load("tok_decoder")?,
-            speaker: load("speaker_encoder")?,
+            predictor,
+            encoder: None,
+            decoder,
+            speaker: None,
             tokenizer,
             config,
             hidden,
@@ -208,11 +580,44 @@ impl NativeQwenPipeline {
             past_names,
             device: if gpu { "cuda:0" } else { "cpu" }.into(),
             reference: None,
+            cached_embeddings,
+            sample_candidates: Vec::with_capacity(3072),
+            sample_weights: Vec::with_capacity(128),
         })
     }
 
     pub fn device(&self) -> &str {
         &self.device
+    }
+
+    fn speaker_session(&mut self) -> Result<&mut Session> {
+        if self.speaker.is_none() {
+            let session = build_shared_session(
+                &self.env,
+                &self.directory,
+                "speaker_encoder",
+                self.gpu,
+                self.threads,
+                !self.gpu,
+            )?;
+            self.speaker = Some(session);
+        }
+        Ok(self.speaker.as_mut().unwrap())
+    }
+
+    fn encoder_session(&mut self) -> Result<&mut Session> {
+        if self.encoder.is_none() {
+            let session = build_shared_session(
+                &self.env,
+                &self.directory,
+                "tok_encoder",
+                self.gpu,
+                self.threads,
+                !self.gpu,
+            )?;
+            self.encoder = Some(session);
+        }
+        Ok(self.encoder.as_mut().unwrap())
     }
 
     fn id(&self, key: &str) -> Result<i64> {
@@ -262,12 +667,11 @@ impl NativeQwenPipeline {
             return Ok(reference.clone());
         }
         let wav = read_reference(path)?;
-        let speaker = floats(
-            &run(
-                &mut self.speaker,
-                vec![("audio", tensor_f32(vec![1, wav.len()], wav.clone())?)],
-            )?[0],
+        let speaker_out = run(
+            self.speaker_session()?,
+            vec![("audio", tensor_f32(vec![1, wav.len()], wav.clone())?)],
         )?;
+        let speaker = floats(&speaker_out[0])?;
         ensure!(
             speaker.len() == self.hidden,
             "speaker embedding has unexpected dimensions"
@@ -278,24 +682,28 @@ impl NativeQwenPipeline {
             .as_deref()
             .is_some_and(|text| !text.trim().is_empty())
         {
+            let mut all_codec_ids = Vec::new();
             for chunk in wav.chunks(SAMPLE_RATE) {
                 let mut padded = vec![0.0; SAMPLE_RATE];
                 padded[..chunk.len()].copy_from_slice(chunk);
                 let encoded = run(
-                    &mut self.encoder,
+                    self.encoder_session()?,
                     vec![("audio", tensor_f32(vec![1, 1, SAMPLE_RATE], padded)?)],
                 )?;
                 let (_, data) = encoded[0].try_extract_tensor::<i64>()?;
                 ensure!(data.len() % GROUPS == 0, "invalid reference audio codes");
-                let frames = data.len() / GROUPS;
+                all_codec_ids.extend_from_slice(data);
+            }
+            if !all_codec_ids.is_empty() {
+                let total_frames = all_codec_ids.len() / GROUPS;
                 let output = run(
                     &mut self.residual_embed,
                     vec![(
                         "codec_ids",
-                        tensor_i64(vec![frames, GROUPS], data.to_vec())?,
+                        tensor_i64(vec![total_frames, GROUPS], all_codec_ids)?,
                     )],
                 )?;
-                codes.extend(floats(&output[0])?);
+                codes = floats(&output[0])?;
             }
         }
         let reference = ReferencePrompt {
@@ -318,15 +726,7 @@ impl NativeQwenPipeline {
             "<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n"
         ))?;
         ensure!(ids.len() >= 9, "text is too short to tokenize");
-        let special = [
-            self.id("tts_bos_token_id")?,
-            self.id("tts_eos_token_id")?,
-            self.id("tts_pad_token_id")?,
-        ];
-        let special = embed(&mut self.text_embed, "text_ids", &special)?;
         let h = self.hidden;
-        let (bos, rest) = special.split_at(h);
-        let (eos, pad) = rest.split_at(h);
         let language = crate::language::qwen_language(&request.language)?
             .name
             .to_lowercase();
@@ -352,17 +752,17 @@ impl NativeQwenPipeline {
         };
         let mut codec = embed(&mut self.codec_embed, "codec_ids", &prefix)?;
         codec.extend_from_slice(&reference.speaker);
-        let codec_pad_id = self.id("codec_pad_id")?;
-        let codec_bos_id = self.id("codec_bos_id")?;
-        codec.extend(embed(
-            &mut self.codec_embed,
-            "codec_ids",
-            &[codec_pad_id, codec_bos_id],
-        )?);
+        codec.extend_from_slice(&self.cached_embeddings.codec_pad);
+        codec.extend_from_slice(&self.cached_embeddings.codec_bos);
         let mut prompt = embed(&mut self.text_embed, "text_ids", &ids[..3])?;
         let frames = codec.len() / h;
         for (i, row) in codec[..codec.len() - h].chunks_exact(h).enumerate() {
-            prompt.extend(add(row, if i == frames - 2 { bos } else { pad })?);
+            let text_vec = if i == frames - 2 {
+                &self.cached_embeddings.bos
+            } else {
+                &self.cached_embeddings.pad
+            };
+            prompt.extend(add(row, text_vec)?);
         }
         if reference.speaker.is_empty() {
             // Qwen's unconditioned prompt supplies text alongside generated
@@ -372,8 +772,8 @@ impl NativeQwenPipeline {
             ensure!(body.len() >= h, "text has no generation tokens");
             prompt.extend(add(&body[..h], &codec[codec.len() - h..])?);
             let mut trailing = body[h..].to_vec();
-            trailing.extend_from_slice(eos);
-            return Ok((prompt, pad.to_vec(), trailing));
+            trailing.extend_from_slice(&self.cached_embeddings.eos);
+            return Ok((prompt, self.cached_embeddings.pad.clone(), trailing));
         }
         let mut body_ids = Vec::new();
         let icl = request
@@ -387,28 +787,33 @@ impl NativeQwenPipeline {
         }
         body_ids.extend_from_slice(&ids[3..ids.len() - 5]);
         let mut body = embed(&mut self.text_embed, "text_ids", &body_ids)?;
-        body.extend_from_slice(eos);
-        let codec_pad = embed(&mut self.codec_embed, "codec_ids", &[codec_pad_id])?;
+        body.extend_from_slice(&self.cached_embeddings.eos);
         for row in body.chunks_exact(h) {
-            prompt.extend(add(row, &codec_pad)?);
+            prompt.extend(add(row, &self.cached_embeddings.codec_pad)?);
         }
-        let codec_bos = embed(&mut self.codec_embed, "codec_ids", &[codec_bos_id])?;
-        prompt.extend(add(&codec_bos, pad)?);
+        prompt.extend(add(
+            &self.cached_embeddings.codec_bos,
+            &self.cached_embeddings.pad,
+        )?);
         if icl.is_some() {
             for row in reference.codes.chunks_exact(h) {
-                prompt.extend(add(row, pad)?);
+                prompt.extend(add(row, &self.cached_embeddings.pad)?);
             }
         }
-        Ok((prompt, pad.to_vec(), Vec::new()))
+        Ok((prompt, self.cached_embeddings.pad.clone(), Vec::new()))
     }
 
-    fn generate(
+    fn generate_and_stream<F>(
         &mut self,
         request: &NativeRequest,
         text: &str,
         reference: &ReferencePrompt,
         rng: &mut StdRng,
-    ) -> Result<Vec<i64>> {
+        mut on_audio: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&[f32]) -> Result<()>,
+    {
         let (input, pad, trailing_text) = self.prompt(request, text, reference)?;
         #[cfg(debug_assertions)]
         trace(
@@ -421,7 +826,10 @@ impl NativeQwenPipeline {
         let mut past = (0..self.layers * 2)
             .map(|_| tensor_f32(vec![1, self.kv_heads, 0, self.head_dim], Vec::new()))
             .collect::<Result<Vec<_>>>()?;
-        let mut codes = Vec::new();
+        let mut pending_codes = Vec::with_capacity(DECODE_FRAMES * GROUPS);
+        let mut generated_frames = 0usize;
+        #[cfg(debug_assertions)]
+        let mut trace_codes = Vec::new();
         let mut previous = HashSet::new();
         let eos = self.id("codec_eos_token_id")? as usize;
         let vocab = self.config["talker_config"]["vocab_size"]
@@ -431,12 +839,39 @@ impl NativeQwenPipeline {
             vocab > 1024 && vocab <= 65536 && eos < vocab,
             "invalid Qwen codec vocabulary"
         );
+
+        let (decode_tx, decode_rx) = mpsc::channel::<Result<Vec<f32>>>();
+        let mut in_flight_decodes = 0usize;
+        let mut first_logits = vec![0.0f32; vocab];
+
         for step in 0..request.max_new_tokens {
+            // Drain any completed pipelined audio chunks non-blockingly so
+            // streaming playback receives audio as soon as the E-core decoder
+            // finishes a 25-frame block.
+            while in_flight_decodes > 0 {
+                match decode_rx.try_recv() {
+                    Ok(decoded) => {
+                        in_flight_decodes -= 1;
+                        let samples = decoded?;
+                        on_audio(&samples)?;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        bail!("pipelined audio decoder disconnected");
+                    }
+                }
+            }
+
             let total = prefill_length + step;
             let cur = current.len() / h;
-            let positions = (0..3)
-                .flat_map(|_| ((total - cur)..total).map(|p| p as i64))
-                .collect();
+            let positions: Vec<i64> = if cur == 1 {
+                let p = (total - 1) as i64;
+                vec![p, p, p]
+            } else {
+                (0..3)
+                    .flat_map(|_| ((total - cur)..total).map(|p| p as i64))
+                    .collect()
+            };
             let mut inputs = vec![
                 ("inputs_embeds", tensor_f32(vec![1, cur, h], current)?),
                 ("position_ids", tensor_i64(vec![3, 1, cur], positions)?),
@@ -478,60 +913,132 @@ impl NativeQwenPipeline {
             past = out.collect();
             let (_, logits) = logits.try_extract_tensor::<f32>()?;
             ensure!(logits.len() >= vocab, "invalid Qwen logits");
-            let mut first = logits[logits.len() - vocab..].to_vec();
-            for (id, logit) in first.iter_mut().enumerate() {
-                if id >= vocab - 1024 && id != eos {
-                    *logit = f32::NEG_INFINITY;
-                }
-                if previous.contains(&id) {
+            first_logits.copy_from_slice(&logits[logits.len() - vocab..]);
+            let eos_logit = first_logits[eos];
+            first_logits[vocab - 1024..].fill(f32::NEG_INFINITY);
+            first_logits[eos] = eos_logit;
+            let penalty = request.sampling.repetition_penalty;
+            if (penalty - 1.0).abs() > f32::EPSILON {
+                for &id in &previous {
+                    let logit = &mut first_logits[id];
                     *logit = if *logit < 0.0 {
-                        *logit * request.sampling.repetition_penalty
+                        *logit * penalty
                     } else {
-                        *logit / request.sampling.repetition_penalty
+                        *logit / penalty
                     };
                 }
             }
-            let code0 = sample_with_options(&first, request.do_sample, &request.sampling, rng)?;
+            let code0 = sample_with_scratch(
+                &first_logits,
+                request.do_sample,
+                &request.sampling,
+                rng,
+                &mut self.sample_candidates,
+                &mut self.sample_weights,
+            )?;
             if code0 == eos {
-                ensure!(!codes.is_empty(), "Qwen produced no speech");
-                return Ok(codes);
+                ensure!(generated_frames > 0, "Qwen produced no speech");
+                if !pending_codes.is_empty() {
+                    match &mut self.decoder {
+                        DecoderBackend::Pipelined(worker) => {
+                            worker.enqueue(std::mem::take(&mut pending_codes), decode_tx.clone())?;
+                            in_flight_decodes += 1;
+                        }
+                        DecoderBackend::Inline(session) => {
+                            let samples = decode_chunk_session(session, &pending_codes)?;
+                            pending_codes.clear();
+                            on_audio(&samples)?;
+                        }
+                    }
+                }
+                while in_flight_decodes > 0 {
+                    let decoded = decode_rx
+                        .recv()
+                        .map_err(|_| anyhow::anyhow!("pipelined audio decoder exited"))??;
+                    in_flight_decodes -= 1;
+                    on_audio(&decoded)?;
+                }
+                return Ok(());
             }
             previous.insert(code0);
             let (_, state) = hidden.try_extract_tensor::<f32>()?;
             ensure!(state.len() >= h, "invalid Qwen hidden state");
             let state = &state[state.len() - h..];
-            let mut frame = vec![0; GROUPS];
-            frame[0] = code0 as i64;
-            for group in 1..GROUPS {
-                let predicted = run(
-                    &mut self.predictor,
-                    vec![
-                        ("talker_hidden", tensor_f32(vec![1, h], state.to_vec())?),
-                        ("codec_ids", tensor_i64(vec![1, GROUPS], frame.clone())?),
-                    ],
-                )?;
-                let (shape, logits) = predicted[0].try_extract_tensor::<f32>()?;
-                let vocabulary = *shape.last().context("invalid predictor shape")? as usize;
-                let start = (group - 1) * vocabulary;
-                ensure!(
-                    start + vocabulary <= logits.len(),
-                    "invalid predictor logits"
-                );
-                frame[group] = sample_with_options(
-                    &logits[start..start + vocabulary],
-                    request.do_sample,
-                    &request.sampling,
-                    rng,
-                )? as i64;
-            }
-            codes.extend_from_slice(&frame);
+            let frame: [i64; GROUPS] = match &mut self.predictor {
+                PredictorBackend::Fast(fast) => {
+                    let do_sample = request.do_sample;
+                    let sampling = &request.sampling;
+                    let candidates = &mut self.sample_candidates;
+                    let weights = &mut self.sample_weights;
+                    fast.predict_frame(state, code0 as i64, |group_logits| {
+                        sample_with_scratch(
+                            group_logits,
+                            do_sample,
+                            sampling,
+                            rng,
+                            candidates,
+                            weights,
+                        )
+                    })?
+                }
+                PredictorBackend::Ort(predictor) => {
+                    let mut frame = [0i64; GROUPS];
+                    frame[0] = code0 as i64;
+                    for group in 1..GROUPS {
+                        let predicted = run(
+                            predictor,
+                            vec![
+                                ("talker_hidden", tensor_f32(vec![1, h], state.to_vec())?),
+                                ("codec_ids", tensor_i64(vec![1, GROUPS], frame.to_vec())?),
+                            ],
+                        )?;
+                        let (shape, logits) = predicted[0].try_extract_tensor::<f32>()?;
+                        let vocabulary =
+                            *shape.last().context("invalid predictor shape")? as usize;
+                        let start = (group - 1) * vocabulary;
+                        ensure!(
+                            start + vocabulary <= logits.len(),
+                            "invalid predictor logits"
+                        );
+                        frame[group] = sample_with_scratch(
+                            &logits[start..start + vocabulary],
+                            request.do_sample,
+                            &request.sampling,
+                            rng,
+                            &mut self.sample_candidates,
+                            &mut self.sample_weights,
+                        )? as i64;
+                    }
+                    frame
+                }
+            };
+            pending_codes.extend_from_slice(&frame);
+            generated_frames += 1;
             #[cfg(debug_assertions)]
             if step < 3 {
-                trace("native-codes.json", &codes)?;
+                trace_codes.extend_from_slice(&frame);
+                trace("native-codes.json", &trace_codes)?;
+            }
+            if pending_codes.len() == DECODE_FRAMES * GROUPS {
+                match &mut self.decoder {
+                    DecoderBackend::Pipelined(worker) => {
+                        let chunk = std::mem::replace(
+                            &mut pending_codes,
+                            Vec::with_capacity(DECODE_FRAMES * GROUPS),
+                        );
+                        worker.enqueue(chunk, decode_tx.clone())?;
+                        in_flight_decodes += 1;
+                    }
+                    DecoderBackend::Inline(session) => {
+                        let samples = decode_chunk_session(session, &pending_codes)?;
+                        pending_codes.clear();
+                        on_audio(&samples)?;
+                    }
+                }
             }
             let output = run(
                 &mut self.residual_embed,
-                vec![("codec_ids", tensor_i64(vec![1, GROUPS], frame)?)],
+                vec![("codec_ids", tensor_i64(vec![1, GROUPS], frame.to_vec())?)],
             )?;
             let text = trailing_text.get(step * h..(step + 1) * h).unwrap_or(&pad);
             current = add(&floats(&output[0])?, text)?;
@@ -540,35 +1047,6 @@ impl NativeQwenPipeline {
             }
         }
         bail!("Qwen reached its generation limit before finishing; use a shorter text chunk")
-    }
-
-    fn decode(&mut self, codes: &[i64]) -> Result<Vec<f32>> {
-        ensure!(
-            !codes.is_empty() && codes.len().is_multiple_of(GROUPS),
-            "invalid generated audio codes"
-        );
-        let mut wav = Vec::new();
-        for chunk in codes.chunks(DECODE_FRAMES * GROUPS) {
-            let frames = chunk.len() / GROUPS;
-            let padded = (0..DECODE_FRAMES * GROUPS)
-                .map(|i| chunk[i % chunk.len()])
-                .collect();
-            let output = run(
-                &mut self.decoder,
-                vec![(
-                    "audio_codes",
-                    tensor_i64(vec![1, DECODE_FRAMES, GROUPS], padded)?,
-                )],
-            )?;
-            let samples = output[0].try_extract_tensor::<f32>()?.1;
-            let count = (samples.len() * frames + DECODE_FRAMES / 2) / DECODE_FRAMES;
-            wav.extend_from_slice(&samples[..count]);
-        }
-        ensure!(
-            wav.iter().all(|sample| sample.is_finite()),
-            "decoder generated invalid samples"
-        );
-        Ok(wav)
     }
 
     pub fn synthesize(&mut self, request: &NativeRequest) -> Result<()> {
@@ -594,6 +1072,14 @@ impl NativeQwenPipeline {
                 .is_none_or(|text| text.chars().count() <= 2000),
             "reference transcript exceeds 2000 characters"
         );
+        // Pin the caller thread to the primary performance core for the
+        // duration of synthesis so it does not compete with ORT / predictor
+        // worker threads pinned to gen_cpus[1..].
+        let _affinity_guard = self
+            .gen_cpus
+            .first()
+            .copied()
+            .and_then(|cpu| cpu_topology::pin_current_thread(&[cpu]));
         let start = Instant::now();
         let reference = self.reference(request)?;
         let mut rng = request
@@ -617,14 +1103,16 @@ impl NativeQwenPipeline {
             },
         )?;
         for text in text_chunks(&request.text, 160) {
-            let codes = self.generate(request, &text, &reference, &mut rng)?;
-            let samples = self.decode(&codes)?;
-            for chunk in samples.chunks(4096) {
-                for &sample in chunk {
-                    output.write_sample((sample.clamp(-1.0, 1.0) * 32767.0).round() as i16)?;
+            self.generate_and_stream(request, &text, &reference, &mut rng, |samples| {
+                for chunk in samples.chunks(4096) {
+                    for &sample in chunk {
+                        output
+                            .write_sample((sample.clamp(-1.0, 1.0) * 32767.0).round() as i16)?;
+                    }
+                    sink(chunk, SAMPLE_RATE as u32)?;
                 }
-                sink(chunk, SAMPLE_RATE as u32)?;
-            }
+                Ok(())
+            })?;
         }
         output.finalize()?;
         eprintln!(
@@ -701,36 +1189,71 @@ fn sample(logits: &[f32], do_sample: bool, rng: &mut StdRng) -> Result<usize> {
     )
 }
 
+#[cfg(test)]
 fn sample_with_options(
     logits: &[f32],
     do_sample: bool,
     options: &crate::QwenSamplingOptions,
     rng: &mut StdRng,
 ) -> Result<usize> {
-    let mut candidates = logits
-        .iter()
-        .copied()
-        .enumerate()
-        .filter(|(_, v)| v.is_finite())
-        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    let mut weights = Vec::new();
+    sample_with_scratch(logits, do_sample, options, rng, &mut candidates, &mut weights)
+}
+
+fn sample_with_scratch(
+    logits: &[f32],
+    do_sample: bool,
+    options: &crate::QwenSamplingOptions,
+    rng: &mut StdRng,
+    candidates: &mut Vec<(usize, f32)>,
+    weights: &mut Vec<f64>,
+) -> Result<usize> {
+    if !do_sample {
+        let mut best: Option<(usize, f32)> = None;
+        for (idx, &v) in logits.iter().enumerate() {
+            if v.is_finite()
+                && best.is_none_or(|(_, bv)| v.total_cmp(&bv).is_gt())
+            {
+                best = Some((idx, v));
+            }
+        }
+        return best
+            .map(|(idx, _)| idx)
+            .context("model produced no finite token logits");
+    }
+
+    candidates.clear();
+    candidates.extend(
+        logits
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, v)| v.is_finite()),
+    );
     ensure!(
         !candidates.is_empty(),
         "model produced no finite token logits"
     );
+
+    if options.top_k > 0 && options.top_k < candidates.len() {
+        let k = options.top_k;
+        candidates.select_nth_unstable_by(k - 1, |a, b| b.1.total_cmp(&a.1));
+        candidates.truncate(k);
+    }
     candidates.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-    if !do_sample {
-        return Ok(candidates[0].0);
-    }
-    if options.top_k > 0 {
-        candidates.truncate(options.top_k);
-    }
+
     let maximum = candidates[0].1;
-    let mut weights = candidates
-        .iter()
-        .map(|(_, v)| f64::from((*v - maximum) / options.temperature).exp())
-        .collect::<Vec<_>>();
+    let inv_temp = 1.0f32 / options.temperature;
+    weights.clear();
+    let mut total_weight = 0.0f64;
+    for &(_, v) in candidates.iter() {
+        let w = f64::from((v - maximum) * inv_temp).exp();
+        weights.push(w);
+        total_weight += w;
+    }
     if options.top_p < 1.0 {
-        let limit = f64::from(options.top_p) * weights.iter().sum::<f64>();
+        let limit = f64::from(options.top_p) * total_weight;
         let mut accumulated = 0.0;
         let keep = weights
             .iter()
@@ -741,9 +1264,10 @@ fn sample_with_options(
             .map_or(weights.len(), |index| index + 1);
         weights.truncate(keep);
         candidates.truncate(keep);
+        total_weight = weights.iter().sum();
     }
-    let mut target = rng.random::<f64>() * weights.iter().sum::<f64>();
-    for ((id, _), weight) in candidates.iter().zip(weights) {
+    let mut target = rng.random::<f64>() * total_weight;
+    for ((id, _), &weight) in candidates.iter().zip(weights.iter()) {
         target -= weight;
         if target <= 0.0 {
             return Ok(*id);
@@ -787,33 +1311,99 @@ fn read_reference(path: &Path) -> Result<Vec<f32>> {
     Ok(resample(&mono, spec.sample_rate as usize, SAMPLE_RATE))
 }
 
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
+fn resample_point(input: &[f32], position: f64, cutoff: f64) -> f32 {
+    let center = position.floor() as isize;
+    let (mut sum, mut norm) = (0.0, 0.0);
+    for j in center - 32..=center + 32 {
+        if j < 0 || j as usize >= input.len() {
+            continue;
+        }
+        let distance = position - j as f64;
+        if distance.abs() > 32.0 {
+            continue;
+        }
+        let x = std::f64::consts::PI * distance * cutoff;
+        let sinc = if x.abs() < 1e-12 { 1.0 } else { x.sin() / x };
+        let window = 0.5 + 0.5 * (std::f64::consts::PI * distance / 32.0).cos();
+        let weight = sinc * window * cutoff;
+        sum += f64::from(input[j as usize]) * weight;
+        norm += weight;
+    }
+    (sum / norm) as f32
+}
+
 fn resample(input: &[f32], source: usize, target: usize) -> Vec<f32> {
-    if source == target {
+    if source == target || input.is_empty() {
         return input.to_vec();
     }
     let count = input.len() * target / source;
     let cutoff = (target as f64 / source as f64).min(1.0) * 0.95;
+
+    // Polyphase precomputed Hann-windowed sinc table for standard rational
+    // sample-rate ratios (covers 8k/11.025k/16k/22.05k/32k/44.1k/48k/96k -> 24k).
+    let g = gcd(source, target);
+    let phases = target / g;
+    const HALF_TAPS: usize = 32;
+    const TAPS: usize = HALF_TAPS * 2 + 1; // 65
+    if phases <= 1024 && input.len() > TAPS {
+        let step_num = source / g;
+        let mut table = vec![0.0f32; phases * TAPS];
+        for phase in 0..phases {
+            let frac = ((phase * step_num) % phases) as f64 / phases as f64;
+            let row = &mut table[phase * TAPS..(phase + 1) * TAPS];
+            let mut weights = [0.0f64; TAPS];
+            let mut norm = 0.0f64;
+            for (k, w) in weights.iter_mut().enumerate() {
+                let offset = k as isize - HALF_TAPS as isize;
+                let distance = frac - offset as f64;
+                if distance.abs() <= 32.0 {
+                    let x = std::f64::consts::PI * distance * cutoff;
+                    let sinc = if x.abs() < 1e-12 { 1.0 } else { x.sin() / x };
+                    let window = 0.5 + 0.5 * (std::f64::consts::PI * distance / 32.0).cos();
+                    let weight = sinc * window * cutoff;
+                    *w = weight;
+                    norm += weight;
+                }
+            }
+            let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
+            for (dst, &w) in row.iter_mut().zip(&weights) {
+                *dst = (w * inv_norm) as f32;
+            }
+        }
+        let mut output = Vec::with_capacity(count);
+        let max_center = input.len() - 1 - HALF_TAPS;
+        for i in 0..count {
+            let center = (i * step_num) / phases;
+            if center >= HALF_TAPS && center <= max_center {
+                let phase = i % phases;
+                let row = &table[phase * TAPS..(phase + 1) * TAPS];
+                let slice = &input[center - HALF_TAPS..center + HALF_TAPS + 1];
+                let mut sum = 0.0f32;
+                for (&s, &w) in slice.iter().zip(row) {
+                    sum = s.mul_add(w, sum);
+                }
+                output.push(sum);
+            } else {
+                let position = i as f64 * source as f64 / target as f64;
+                output.push(resample_point(input, position, cutoff));
+            }
+        }
+        return output;
+    }
+
     (0..count)
         .map(|i| {
             let position = i as f64 * source as f64 / target as f64;
-            let center = position.floor() as isize;
-            let (mut sum, mut norm) = (0.0, 0.0);
-            for j in center - 32..=center + 32 {
-                if j < 0 || j as usize >= input.len() {
-                    continue;
-                }
-                let distance = position - j as f64;
-                if distance.abs() > 32.0 {
-                    continue;
-                }
-                let x = std::f64::consts::PI * distance * cutoff;
-                let sinc = if x.abs() < 1e-12 { 1.0 } else { x.sin() / x };
-                let window = 0.5 + 0.5 * (std::f64::consts::PI * distance / 32.0).cos();
-                let weight = sinc * window * cutoff;
-                sum += f64::from(input[j as usize]) * weight;
-                norm += weight;
-            }
-            (sum / norm) as f32
+            resample_point(input, position, cutoff)
         })
         .collect()
 }
@@ -869,6 +1459,8 @@ mod tests {
             max_new_tokens: 256,
             do_sample: true,
             sampling: crate::QwenSamplingOptions::default(),
+            stream: false,
+            stream_format: None,
         };
         let mut streamed = Vec::new();
         pipeline
@@ -972,7 +1564,7 @@ mod tests {
         );
         let source = read_reference(request.reference_audio.as_ref().unwrap()).unwrap();
         let encoded = run(
-            &mut pipeline.encoder,
+            pipeline.encoder_session().unwrap(),
             vec![(
                 "audio",
                 tensor_f32(vec![1, 1, SAMPLE_RATE], source[..SAMPLE_RATE].to_vec()).unwrap(),
@@ -1009,9 +1601,11 @@ mod tests {
     }
     #[test]
     fn resampling_preserves_duration_and_dc() {
-        let output = resample(&vec![0.25; 16_000], 16_000, 24_000);
-        assert_eq!(output.len(), 24_000);
-        assert!(output.iter().all(|v| (v - 0.25).abs() < 1e-5));
+        for (src, dst) in [(16_000, 24_000), (44_100, 24_000), (48_000, 24_000)] {
+            let output = resample(&vec![0.25; src], src, dst);
+            assert_eq!(output.len(), dst);
+            assert!(output.iter().all(|v| (v - 0.25).abs() < 1e-5));
+        }
     }
     #[test]
     fn chunks_preserve_unicode_and_sentence_boundaries() {

@@ -15,6 +15,7 @@ use uuid::Uuid;
 pub struct PlaybackController {
     tx: mpsc::Sender<Command>,
     shared: Arc<Mutex<AudioBuffer>>,
+    activity: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,20 +130,33 @@ impl AudioBuffer {
         if self.status != PlayerStatus::Playing {
             return;
         }
-        for sample in output {
-            let Some(value) = self.rendered.pop_front() else {
-                self.status = if self.complete && self.drained {
-                    PlayerStatus::Finished
-                } else {
-                    PlayerStatus::Buffering
-                };
-                if self.status == PlayerStatus::Finished {
-                    self.cursor = self.source.len() as f64;
+        let available = self.rendered.len().min(output.len());
+        if available > 0 {
+            let vol = self.volume as f32;
+            let (first, second) = self.rendered.as_slices();
+            let n1 = available.min(first.len());
+            for (dst, &src) in output[..n1].iter_mut().zip(&first[..n1]) {
+                *dst = src * vol;
+            }
+            let n2 = available - n1;
+            if n2 > 0 {
+                for (dst, &src) in output[n1..available].iter_mut().zip(&second[..n2]) {
+                    *dst = src * vol;
                 }
-                break;
+            }
+            self.rendered.drain(..available);
+            self.cursor = (self.cursor + self.rate * available as f64)
+                .min(self.source.len() as f64);
+        }
+        if available < output.len() {
+            self.status = if self.complete && self.drained {
+                PlayerStatus::Finished
+            } else {
+                PlayerStatus::Buffering
             };
-            *sample = value * self.volume as f32;
-            self.cursor = (self.cursor + self.rate).min(self.source.len() as f64);
+            if self.status == PlayerStatus::Finished {
+                self.cursor = self.source.len() as f64;
+            }
         }
     }
 }
@@ -194,17 +208,28 @@ impl PlaybackController {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Mutex::new(AudioBuffer::default()));
+        let activity = Arc::new(tokio::sync::Notify::new());
         let thread_shared = shared.clone();
+        let thread_activity = activity.clone();
         thread::Builder::new()
             .name("sayit-audio".into())
-            .spawn(move || player_thread(rx, thread_shared))
+            .spawn(move || player_thread(rx, thread_shared, thread_activity))
             .expect("audio thread");
-        Self { tx, shared }
+        Self {
+            tx,
+            shared,
+            activity,
+        }
+    }
+    pub fn activity_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.activity.clone()
     }
     fn request(&self, make: impl FnOnce(Reply) -> Command) -> Result<()> {
         let (tx, rx) = mpsc::channel();
         self.tx.send(make(tx))?;
-        rx.recv().context("audio thread stopped")?
+        let res = rx.recv().context("audio thread stopped")?;
+        self.activity.notify_one();
+        res
     }
     pub fn begin_stream(&self, id: Uuid, rate: f64, volume: f64) -> Result<()> {
         valid_rate(rate)?;
@@ -244,6 +269,7 @@ impl PlaybackController {
     }
     pub fn abort_stream(&self, id: Uuid) -> Result<()> {
         self.tx.send(Command::Abort(id))?;
+        self.activity.notify_one();
         Ok(())
     }
     pub fn play(&self, id: Uuid, path: PathBuf, rate: f64, volume: f64) -> Result<()> {
@@ -417,11 +443,27 @@ impl Renderer {
         }
     }
 }
-fn player_thread(rx: mpsc::Receiver<Command>, shared: Arc<Mutex<AudioBuffer>>) {
+fn player_thread(
+    rx: mpsc::Receiver<Command>,
+    shared: Arc<Mutex<AudioBuffer>>,
+    activity: Arc<tokio::sync::Notify>,
+) {
     let mut device: Option<Device> = None;
     let mut renderer = Renderer::default();
     loop {
-        match rx.recv_timeout(Duration::from_millis(5)) {
+        let needs_periodic_pump = {
+            let state = shared.lock().unwrap();
+            state.sample_rate > 0
+                && !renderer.flushed
+                && state.status == PlayerStatus::Playing
+                && (renderer.next_input < state.source.len() || state.complete)
+        };
+        let next_command = if needs_periodic_pump {
+            rx.recv_timeout(Duration::from_millis(5))
+        } else {
+            rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+        };
+        match next_command {
             Ok(command) => match command {
                 Command::PreviewText { id, text, reply } => {
                     let mut state = shared.lock().unwrap();
@@ -577,6 +619,7 @@ fn player_thread(rx: mpsc::Receiver<Command>, shared: Arc<Mutex<AudioBuffer>>) {
             let mut state = shared.lock().unwrap();
             state.error = Some(format!("speech tempo processing failed: {error:#}"));
             state.status = PlayerStatus::Failed;
+            activity.notify_one();
         }
     }
 }

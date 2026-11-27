@@ -120,15 +120,16 @@ fn strip_html(input: &str) -> String {
     html_escape::decode_html_entities(&HTML_TAG.replace_all(&value, "")).into_owned()
 }
 
+const BACKTICK_FENCE: &str = "```";
+
 fn contains_fence(input: &str) -> bool {
     input.lines().any(|line| {
         let line = line.trim_start();
-        line.starts_with(&char::from(96).to_string().repeat(3)) || line.starts_with("~~~")
+        line.starts_with(BACKTICK_FENCE) || line.starts_with("~~~")
     })
 }
 
 fn remove_fenced_code(input: &str) -> (String, usize) {
-    let backtick_fence = char::from(96).to_string().repeat(3);
     let mut output = Vec::new();
     let mut fence: Option<&str> = None;
     let mut removed = 0;
@@ -140,8 +141,8 @@ fn remove_fenced_code(input: &str) -> (String, usize) {
             }
             continue;
         }
-        let marker = if trimmed.starts_with(&backtick_fence) {
-            Some(backtick_fence.as_str())
+        let marker = if trimmed.starts_with(BACKTICK_FENCE) {
+            Some(BACKTICK_FENCE)
         } else if trimmed.starts_with("~~~") {
             Some("~~~")
         } else {
@@ -158,30 +159,49 @@ fn remove_fenced_code(input: &str) -> (String, usize) {
 }
 
 fn strip_markdown(input: &str) -> String {
-    input
-        .lines()
-        .map(|line| {
-            let mut value = line.trim().to_owned();
-            if !value.is_empty()
-                && value
-                    .chars()
-                    .all(|value| "-*_=".contains(value) || value.is_whitespace())
-            {
-                return String::new();
-            }
-            if let Some(index) = value.find(|value: char| !matches!(value, '#' | '>' | ' ')) {
-                value = value[index..].to_owned();
-            }
-            value = MARKDOWN_LINK.replace_all(&value, "$1").into_owned();
-            value = INLINE_CODE.replace_all(&value, "$1").into_owned();
-            value = STRONG_STAR.replace_all(&value, "$1").into_owned();
-            value = STRONG_UNDER.replace_all(&value, "$1").into_owned();
-            value = EMPHASIS_STAR.replace_all(&value, "$1").into_owned();
-            value = EMPHASIS_UNDER.replace_all(&value, "$1").into_owned();
-            STRIKE.replace_all(&value, "$1").into_owned()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    use std::borrow::Cow;
+    let mut result = String::with_capacity(input.len());
+    for (idx, line) in input.lines().enumerate() {
+        if idx > 0 {
+            result.push('\n');
+        }
+        let trimmed = line.trim();
+        if !trimmed.is_empty()
+            && trimmed
+                .chars()
+                .all(|ch| matches!(ch, '-' | '*' | '_' | '=') || ch.is_whitespace())
+        {
+            continue;
+        }
+        let stripped = match trimmed.find(|ch: char| !matches!(ch, '#' | '>' | ' ')) {
+            Some(index) => &trimmed[index..],
+            None => trimmed,
+        };
+        let v: Cow<'_, str> = MARKDOWN_LINK.replace_all(stripped, "$1");
+        let v: Cow<'_, str> = match INLINE_CODE.replace_all(&v, "$1") {
+            Cow::Borrowed(_) => v,
+            Cow::Owned(s) => Cow::Owned(s),
+        };
+        let v: Cow<'_, str> = match STRONG_STAR.replace_all(&v, "$1") {
+            Cow::Borrowed(_) => v,
+            Cow::Owned(s) => Cow::Owned(s),
+        };
+        let v: Cow<'_, str> = match STRONG_UNDER.replace_all(&v, "$1") {
+            Cow::Borrowed(_) => v,
+            Cow::Owned(s) => Cow::Owned(s),
+        };
+        let v: Cow<'_, str> = match EMPHASIS_STAR.replace_all(&v, "$1") {
+            Cow::Borrowed(_) => v,
+            Cow::Owned(s) => Cow::Owned(s),
+        };
+        let v: Cow<'_, str> = match EMPHASIS_UNDER.replace_all(&v, "$1") {
+            Cow::Borrowed(_) => v,
+            Cow::Owned(s) => Cow::Owned(s),
+        };
+        let v = STRIKE.replace_all(&v, "$1");
+        result.push_str(&v);
+    }
+    result
 }
 
 fn normalize(input: String, options: TextCleaningOptions) -> String {

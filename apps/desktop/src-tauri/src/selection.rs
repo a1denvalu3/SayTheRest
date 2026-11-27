@@ -294,12 +294,25 @@ fn capture_selection_via_copy(copy: impl FnOnce() -> Result<(), String>) -> Resu
 }
 
 #[cfg(target_os = "linux")]
+fn linux_atspi_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
+    static RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, String>> =
+        std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name("sayit-atspi")
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+#[cfg(target_os = "linux")]
 fn capture_linux_accessible_selection() -> Result<String, String> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| error.to_string())?
-        .block_on(capture_linux_accessible_selection_async())
+    linux_atspi_runtime()?.block_on(capture_linux_accessible_selection_async())
 }
 
 #[cfg(target_os = "linux")]
@@ -308,20 +321,74 @@ async fn capture_linux_accessible_selection_async() -> Result<String, String> {
         AccessibilityConnection, State,
         proxy::{accessible::ObjectRefExt, text::TextProxy},
     };
-    use std::collections::VecDeque;
+    use std::{collections::VecDeque, sync::OnceLock};
+    use tokio::sync::Mutex;
 
-    let accessibility = AccessibilityConnection::new()
-        .await
-        .map_err(|error| format!("AT-SPI is unavailable: {error}"))?;
-    let root = accessibility
-        .root_accessible_on_registry()
+    static CONNECTION: OnceLock<Mutex<Option<AccessibilityConnection>>> = OnceLock::new();
+    let slot = CONNECTION.get_or_init(|| Mutex::new(None));
+    let mut guard = slot.lock().await;
+    if guard.is_none() {
+        let conn = AccessibilityConnection::new()
+            .await
+            .map_err(|error| format!("AT-SPI is unavailable: {error}"))?;
+        *guard = Some(conn);
+    }
+    let root = match guard.as_ref().unwrap().root_accessible_on_registry().await {
+        Ok(root) => root,
+        Err(_) => {
+            // Reconnect once if the cached accessibility bus connection went stale.
+            let conn = AccessibilityConnection::new()
+                .await
+                .map_err(|error| format!("AT-SPI is unavailable: {error}"))?;
+            *guard = Some(conn);
+            guard
+                .as_ref()
+                .unwrap()
+                .root_accessible_on_registry()
+                .await
+                .map_err(|error| error.to_string())?
+        }
+    };
+    let accessibility = guard.as_ref().unwrap();
+
+    // First collect top-level application windows and prioritize any window
+    // reporting `State::Active`, avoiding a full cross-application BFS crawl.
+    let apps = root
+        .get_children()
         .await
         .map_err(|error| error.to_string())?;
-    let mut pending = VecDeque::from(
-        root.get_children()
-            .await
-            .map_err(|error| error.to_string())?,
-    );
+    let mut active_windows = Vec::new();
+    let mut fallback_windows = Vec::new();
+    for app_ref in apps {
+        let Ok(app) = app_ref.as_accessible_proxy(accessibility.connection()).await else {
+            continue;
+        };
+        let Ok(windows) = app.get_children().await else {
+            continue;
+        };
+        for win_ref in windows {
+            let Ok(win) = win_ref.as_accessible_proxy(accessibility.connection()).await else {
+                continue;
+            };
+            let Ok(states) = win.get_state().await else {
+                continue;
+            };
+            if states.contains(State::Defunct) {
+                continue;
+            }
+            if states.contains(State::Active) {
+                active_windows.push(win_ref);
+            } else if states.contains(State::Showing) || states.contains(State::Visible) {
+                fallback_windows.push(win_ref);
+            }
+        }
+    }
+
+    let mut pending = if !active_windows.is_empty() {
+        VecDeque::from(active_windows)
+    } else {
+        VecDeque::from(fallback_windows)
+    };
     let mut visited = 0usize;
     while let Some(reference) = pending.pop_front() {
         visited += 1;
@@ -335,11 +402,13 @@ async fn capture_linux_accessible_selection_async() -> Result<String, String> {
             Ok(accessible) => accessible,
             Err(_) => continue,
         };
-        let focused = accessible
-            .get_state()
-            .await
-            .is_ok_and(|states| states.contains(State::Focused));
-        if focused {
+        let Ok(states) = accessible.get_state().await else {
+            continue;
+        };
+        if states.contains(State::Defunct) {
+            continue;
+        }
+        if states.contains(State::Focused) {
             let text = TextProxy::builder(accessibility.connection())
                 .destination(accessible.inner().destination().clone())
                 .map_err(|error| error.to_string())?
@@ -369,6 +438,9 @@ async fn capture_linux_accessible_selection_async() -> Result<String, String> {
             if !selected.is_empty() {
                 return Ok(selected.join("\n"));
             }
+        }
+        if !states.contains(State::Showing) && !states.contains(State::Visible) {
+            continue;
         }
         if let Ok(children) = accessible.get_children().await {
             pending.extend(children);

@@ -9,13 +9,16 @@ before importing the inference stack.
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
+import hashlib
 import json
 import os
 import re
 import sys
 import tempfile
 import traceback
+import weakref
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -29,6 +32,64 @@ MAX_CPU_THREADS = 8
 MAX_CHUNK_CHARACTERS = 160
 MAX_NEW_TOKENS = 512
 MAX_REFERENCE_SECONDS = 45
+
+# Bounded 1-entry cache per loaded model instance for voice-clone prompts so
+# repeated requests with the same reference WAV + transcript avoid re-encoding
+# (~1.5s saved per block on CPU). WeakKeyDictionary automatically frees entries
+# when a model instance is released.
+_VOICE_CLONE_PROMPT_CACHE: weakref.WeakKeyDictionary[Any, tuple[Any, Any]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _linux_preferred_physical_cpus(limit: int) -> list[int]:
+    """Return up to `limit` primary logical CPUs ordered fastest-first on Linux."""
+    if not sys.platform.startswith("linux") or limit <= 0:
+        return []
+    cpu_root = Path("/sys/devices/system/cpu")
+    if not cpu_root.is_dir():
+        return []
+    try:
+        allowed = os.sched_getaffinity(0)
+    except (AttributeError, OSError):
+        allowed = None
+    seen: dict[tuple[int, int, int], tuple[int, int]] = {}
+    for entry in cpu_root.iterdir():
+        name = entry.name
+        if not name.startswith("cpu") or not name[3:].isdigit():
+            continue
+        cpu_id = int(name[3:])
+        if allowed is not None and cpu_id not in allowed:
+            continue
+        try:
+            online_path = entry / "online"
+            if online_path.is_file() and online_path.read_text().strip() == "0":
+                continue
+            pkg = int((entry / "topology/physical_package_id").read_text().strip())
+        except OSError:
+            pkg = 0
+        try:
+            core = int((entry / "topology/core_id").read_text().strip())
+        except OSError:
+            core = cpu_id
+        try:
+            sib = (entry / "topology/thread_siblings_list").read_text().strip()
+            primary = int(sib.split(",")[0].split("-")[0])
+        except (OSError, ValueError):
+            primary = cpu_id
+        score = 0
+        for rel in ("cpufreq/cpuinfo_max_freq", "cpu_capacity"):
+            try:
+                score = int((entry / rel).read_text().strip())
+                break
+            except (OSError, ValueError):
+                pass
+        key = (pkg, core, primary)
+        prev = seen.get(key)
+        if prev is None or cpu_id < prev[0] or score > prev[1]:
+            seen[key] = (min(cpu_id, prev[0]) if prev else cpu_id, max(score, prev[1]) if prev else score)
+    ranked = sorted(seen.values(), key=lambda item: (-item[1], item[0]))
+    return [cpu_id for cpu_id, _ in ranked[:limit]]
 
 
 def resource_thread_count(cpu_count: int | None = None) -> int:
@@ -48,6 +109,15 @@ def configure_resource_limits() -> int:
     ):
         os.environ[name] = str(threads)
     os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+    os.environ.setdefault("OMP_PROC_BIND", "close")
+    os.environ.setdefault("OMP_PLACES", "cores")
+
+    preferred_cpus = _linux_preferred_physical_cpus(threads)
+    if preferred_cpus:
+        try:
+            os.sched_setaffinity(0, set(preferred_cpus))
+        except (AttributeError, OSError):
+            pass
 
     # Inference is background work. Lowering its scheduler priority keeps input,
     # audio, and the desktop responsive when the CPU is under sustained load.
@@ -191,16 +261,31 @@ def synthesize(model: Any, mode: str, request: dict[str, Any], torch: Any, sound
             if not 0 < info.duration <= MAX_REFERENCE_SECONDS:
                 raise ValueError(f"reference audio must contain at most {MAX_REFERENCE_SECONDS} seconds of speech")
             reference_text = optional_text(request, "reference_text")
-            # Reuse just this request's prompt, without retaining tensors from
-            # previous requests or re-encoding the reference for every chunk.
-            options["voice_clone_prompt"] = model.create_voice_clone_prompt(
-                ref_audio=reference,
-                ref_text=reference_text,
-                x_vector_only_mode=reference_text is None,
-            )
+            x_vector_only = reference_text is None
+            ref_digest = hashlib.sha256(Path(reference).read_bytes()).digest()
+            cache_key = (ref_digest, reference_text, x_vector_only)
+            cached_prompt = None
+            try:
+                entry = _VOICE_CLONE_PROMPT_CACHE.get(model)
+                if entry is not None and entry[0] == cache_key:
+                    cached_prompt = entry[1]
+            except TypeError:
+                pass
+            if cached_prompt is None:
+                cached_prompt = model.create_voice_clone_prompt(
+                    ref_audio=reference,
+                    ref_text=reference_text,
+                    x_vector_only_mode=x_vector_only,
+                )
+                try:
+                    _VOICE_CLONE_PROMPT_CACHE[model] = (cache_key, cached_prompt)
+                except TypeError:
+                    pass
+            options["voice_clone_prompt"] = cached_prompt
 
         pending = Path(temporary) / "speech.wav"
         writer = None
+        use_b64 = request.get("stream_format") == "pcm_f32le_b64"
         for chunk in text_chunks(text):
             wavs, sample_rate = generate(text=chunk, **options)
             if len(wavs) != 1 or len(wavs[0]) == 0:
@@ -217,8 +302,19 @@ def synthesize(model: Any, mode: str, request: dict[str, Any], torch: Any, sound
             writer.write(wavs[0])
             if request.get("stream") and emit is not None:
                 for start in range(0, len(wavs[0]), 4096):
-                    emit({"audio": {"sample_rate": sample_rate,
-                                    "samples": [float(value) for value in wavs[0][start:start + 4096]]}})
+                    piece = wavs[0][start:start + 4096]
+                    if use_b64:
+                        if hasattr(piece, "astype"):
+                            raw = piece.astype("<f4", copy=False).tobytes()
+                        else:
+                            import struct
+                            raw = struct.pack(f"<{len(piece)}f", *(float(v) for v in piece))
+                        emit({"audio": {"sample_rate": sample_rate,
+                                        "pcm_f32le_b64": base64.b64encode(raw).decode("ascii")}})
+                    else:
+                        emit({"audio": {"sample_rate": sample_rate,
+                                        "samples": [float(value) for value in piece]}})
+                    del piece
             del wavs
         stack.close()
         if not pending.is_file() or pending.stat().st_size <= 44:
