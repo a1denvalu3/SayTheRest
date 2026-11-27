@@ -2,10 +2,11 @@ use anyhow::Result;
 use clap::Parser;
 use sayit_core::{
     EngineConfig, ResidentSherpaEngine, SynthesisRequest,
+    pcm_codec::{FORMAT_PCM_F32LE_B64, write_audio_event},
     qwen_onnx::{NativeQwenPipeline, NativeRequest},
 };
 use std::{
-    io::{self, BufRead, Write},
+    io::{self, BufRead, BufWriter, Write},
     path::PathBuf,
 };
 
@@ -25,7 +26,8 @@ struct Options {
     precision: String,
     #[arg(long, default_value = "cpu")]
     device: String,
-    #[arg(long, default_value_t = 4)]
+    /// Inference threads (`0` selects the CPU topology optimum automatically).
+    #[arg(long, default_value_t = 0)]
     threads: usize,
 }
 
@@ -45,7 +47,7 @@ fn main() -> Result<()> {
         options.threads,
     )?;
     let stdout = io::stdout();
-    let mut output = stdout.lock();
+    let mut output = BufWriter::with_capacity(64 * 1024, stdout.lock());
     writeln!(
         output,
         "{}",
@@ -60,10 +62,11 @@ fn main() -> Result<()> {
         let result = serde_json::from_str::<NativeRequest>(&line)
             .map_err(anyhow::Error::from)
             .and_then(|request| {
-                let streaming = serde_json::from_str::<serde_json::Value>(&line)?["stream"].as_bool().unwrap_or(false);
+                let streaming = request.stream;
+                let use_b64 = request.stream_format.as_deref() == Some(FORMAT_PCM_F32LE_B64);
                 pipeline.synthesize_streaming(&request, &mut |samples, sample_rate| {
                     if streaming {
-                        writeln!(output, "{}", serde_json::json!({"audio": {"sample_rate": sample_rate, "samples": samples}}))?;
+                        write_audio_event(&mut output, sample_rate, samples, use_b64)?;
                         output.flush()?;
                     }
                     Ok(())
@@ -83,7 +86,7 @@ fn run_sherpa(config: EngineConfig) -> Result<()> {
     let mut engine = ResidentSherpaEngine::load(&config)?;
     eprintln!("SAYIT_SHERPA_READY");
     let stdout = io::stdout();
-    let mut output = stdout.lock();
+    let mut output = BufWriter::with_capacity(64 * 1024, stdout.lock());
     writeln!(
         output,
         "{}",
@@ -100,17 +103,26 @@ fn run_sherpa(config: EngineConfig) -> Result<()> {
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing output path"))?;
             let reference = request["reference_audio"].as_str().map(PathBuf::from);
-            engine.synthesize_streaming(&SynthesisRequest { generation: None,
-                text, output: std::path::Path::new(destination), reference_audio: reference.as_deref(),
-                reference_text: request["reference_text"].as_str(),
-                speaking_pace: request["speaking_pace"].as_f64().unwrap_or(1.0),
-            }, None, &mut |samples, sample_rate| {
-                if request["stream"].as_bool().unwrap_or(false) {
-                    writeln!(output, "{}", serde_json::json!({"audio": {"sample_rate": sample_rate, "samples": samples}}))?;
-                    output.flush()?;
-                }
-                Ok(())
-            })
+            let streaming = request["stream"].as_bool().unwrap_or(false);
+            let use_b64 = request["stream_format"].as_str() == Some(FORMAT_PCM_F32LE_B64);
+            engine.synthesize_streaming(
+                &SynthesisRequest {
+                    generation: None,
+                    text,
+                    output: std::path::Path::new(destination),
+                    reference_audio: reference.as_deref(),
+                    reference_text: request["reference_text"].as_str(),
+                    speaking_pace: request["speaking_pace"].as_f64().unwrap_or(1.0),
+                },
+                None,
+                &mut |samples, sample_rate| {
+                    if streaming {
+                        write_audio_event(&mut output, sample_rate, samples, use_b64)?;
+                        output.flush()?;
+                    }
+                    Ok(())
+                },
+            )
         })();
         let response = match result {
             Ok(()) => serde_json::json!({"ok": true}),

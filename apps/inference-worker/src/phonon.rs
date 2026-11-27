@@ -6,10 +6,13 @@ use ptts::{
     preprocess::Lang,
     synth::{DeviceKind, Quant, SpeechOptions, Synth},
 };
-use sayit_core::EngineConfig;
+use sayit_core::{
+    EngineConfig,
+    pcm_codec::{FORMAT_PCM_F32LE_B64, write_audio_event},
+};
 use sha2::{Digest, Sha256};
 use std::{
-    io::{self, BufRead, Write},
+    io::{self, BufRead, BufWriter, Write},
     path::{Path, PathBuf},
 };
 
@@ -40,7 +43,7 @@ pub fn run(config: EngineConfig) -> Result<()> {
     let options = SpeechOptions::default().voice(config.voice.clone());
     let mut custom_voice: Option<(PathBuf, Vec<u8>)> = None;
     let stdout = io::stdout();
-    let mut output = stdout.lock();
+    let mut output = BufWriter::with_capacity(64 * 1024, stdout.lock());
     writeln!(
         output,
         "{}",
@@ -79,6 +82,7 @@ pub fn run(config: EngineConfig) -> Result<()> {
             let destination =
                 PathBuf::from(request["output"].as_str().context("missing output path")?);
             let streaming = request["stream"].as_bool().unwrap_or(false);
+            let use_b64 = request["stream_format"].as_str() == Some(FORMAT_PCM_F32LE_B64);
             synthesize(
                 &synth,
                 &request_options,
@@ -86,11 +90,7 @@ pub fn run(config: EngineConfig) -> Result<()> {
                 &destination,
                 &mut |samples, rate| {
                     if streaming {
-                        writeln!(
-                            output,
-                            "{}",
-                            serde_json::json!({"audio":{"sample_rate":rate,"samples":samples}})
-                        )?;
+                        write_audio_event(&mut output, rate, samples, use_b64)?;
                         output.flush()?;
                     }
                     Ok(())

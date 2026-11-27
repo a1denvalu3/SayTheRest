@@ -1,13 +1,16 @@
 mod benchmark;
 mod config;
+pub mod cpu_topology;
 mod device;
 mod engine;
 mod inference;
 pub mod language;
 pub mod onnx_runtime;
+pub mod pcm_codec;
 pub mod phonon;
 pub mod pocket;
 mod qwen;
+mod qwen_code_predictor;
 pub mod qwen_onnx;
 pub mod qwen_runtime;
 mod resident;

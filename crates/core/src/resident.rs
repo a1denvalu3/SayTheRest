@@ -292,11 +292,20 @@ impl ResidentSherpaEngine {
                 unreachable!()
             }
         };
-        native.max_num_sentences = 2;
+        native.max_num_sentences = 1;
         // Callbacks contain the original PCM. A post-generation silence edit
         // would change audio that has already reached the streaming player.
         native.silence_scale = 1.0;
+        // Temporarily pin the creating thread to performance cores on Linux so
+        // sherpa-onnx's internal ONNX Runtime worker pool inherits P-core
+        // affinity without constraining the caller's own runtime afterwards.
+        let _affinity_guard = (config.provider() == "cpu").then(|| {
+            let cpus = crate::cpu_topology::detect()
+                .select_worker_cpus(native.model.num_threads.max(1) as usize);
+            crate::cpu_topology::pin_current_thread(&cpus)
+        });
         let tts = unsafe { create(&native) };
+        drop(_affinity_guard);
         if tts.is_null() {
             bail!("sherpa-onnx could not load the selected model")
         }
@@ -318,6 +327,10 @@ impl ResidentSherpaEngine {
             },
             _library: library,
         })
+    }
+
+    pub fn set_speaker_id(&mut self, speaker_id: u32) {
+        self.speaker_id = speaker_id as i32;
     }
 
     pub fn synthesize(&mut self, request: &SynthesisRequest<'_>) -> Result<()> {

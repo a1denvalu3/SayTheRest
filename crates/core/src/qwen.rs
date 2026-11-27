@@ -46,8 +46,18 @@ struct SynthesisResponse {
 
 #[derive(Deserialize)]
 struct WorkerAudio {
-    samples: Vec<f32>,
+    #[serde(default)]
+    samples: Option<Vec<f32>>,
+    #[serde(default)]
+    pcm_f32le_b64: Option<String>,
     sample_rate: u32,
+}
+
+enum ParsedWorkerMessage {
+    Audio { sample_rate: u32, samples: Vec<f32> },
+    Ok,
+    Error(String),
+    Eof,
 }
 
 #[derive(Serialize)]
@@ -66,6 +76,8 @@ struct WorkerRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     reference_text: Option<&'a str>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_format: Option<&'static str>,
     speaking_pace: f64,
 }
 
@@ -325,27 +337,53 @@ impl ResidentSpeechWorker {
                 .map(|path| path.to_string_lossy().into_owned()),
             reference_text: request.reference_text,
             stream: sink.is_some(),
+            stream_format: sink.is_some().then_some(crate::pcm_codec::FORMAT_PCM_F32LE_B64),
             speaking_pace: request.speaking_pace,
         };
         serde_json::to_writer(&mut self.stdin, &payload)?;
         self.stdin.write_all(b"\n")?;
         self.stdin.flush()?;
         std::thread::scope(|scope| -> Result<()> {
-            let (tx, rx) = mpsc::sync_channel(1);
+            let (tx, rx) = mpsc::sync_channel::<Result<ParsedWorkerMessage>>(4);
             let stdout = &mut self.stdout;
             let reader = scope.spawn(move || {
+                let mut line = String::new();
                 loop {
-                    let mut line = String::new();
-                    let result = stdout.read_line(&mut line).map(|count| (count, line));
-                    let terminal = match &result {
-                        Ok((count, line)) => {
-                            *count == 0
-                                || serde_json::from_str::<serde_json::Value>(line)
-                                    .map_or(true, |value| value.get("ok").is_some())
-                        }
-                        Err(_) => true,
+                    line.clear();
+                    let parsed = match stdout.read_line(&mut line) {
+                        Ok(0) => Ok(ParsedWorkerMessage::Eof),
+                        Ok(_) => match serde_json::from_str::<SynthesisResponse>(&line)
+                            .context("speech worker returned an invalid response")
+                        {
+                            Ok(response) => {
+                                if let Some(audio) = response.audio {
+                                    let decoded = if let Some(b64) = audio.pcm_f32le_b64 {
+                                        crate::pcm_codec::decode_f32le_base64(&b64)
+                                    } else if let Some(samples) = audio.samples {
+                                        Ok(samples)
+                                    } else {
+                                        Err(anyhow::anyhow!("invalid streaming audio"))
+                                    };
+                                    decoded.map(|samples| ParsedWorkerMessage::Audio {
+                                        sample_rate: audio.sample_rate,
+                                        samples,
+                                    })
+                                } else if response.ok == Some(true) {
+                                    Ok(ParsedWorkerMessage::Ok)
+                                } else {
+                                    Ok(ParsedWorkerMessage::Error(
+                                        response
+                                            .error
+                                            .unwrap_or_else(|| "invalid worker response".into()),
+                                    ))
+                                }
+                            }
+                            Err(err) => Err(err),
+                        },
+                        Err(err) => Err(err.into()),
                     };
-                    if tx.send(result).is_err() || terminal {
+                    let terminal = !matches!(parsed, Ok(ParsedWorkerMessage::Audio { .. }));
+                    if tx.send(parsed).is_err() || terminal {
                         break;
                     }
                 }
@@ -356,35 +394,33 @@ impl ResidentSpeechWorker {
                         cancelled.is_none_or(|flag| !flag.load(Ordering::Relaxed)),
                         "speech generation cancelled"
                     );
-                    let (count, line) = match rx.recv_timeout(std::time::Duration::from_millis(25))
-                    {
+                    let message = match rx.recv_timeout(std::time::Duration::from_millis(25)) {
                         Ok(result) => result?,
                         Err(mpsc::RecvTimeoutError::Timeout) => continue,
                         Err(_) => bail!("speech worker exited during synthesis"),
                     };
-                    anyhow::ensure!(count > 0, "speech worker exited during synthesis");
-                    let response: SynthesisResponse = serde_json::from_str(&line)
-                        .context("speech worker returned an invalid response")?;
-                    if let Some(audio) = response.audio {
-                        anyhow::ensure!(
-                            (8_000..=192_000).contains(&audio.sample_rate)
-                                && audio.samples.len() <= 65_536
-                                && audio.samples.iter().all(|s| s.is_finite()),
-                            "invalid streaming audio"
-                        );
-                        if let Some(sink) = sink.as_deref_mut() {
-                            sink(&audio.samples, audio.sample_rate)?;
+                    match message {
+                        ParsedWorkerMessage::Audio {
+                            sample_rate,
+                            samples,
+                        } => {
+                            anyhow::ensure!(
+                                (8_000..=192_000).contains(&sample_rate)
+                                    && samples.len() <= 65_536
+                                    && samples.iter().all(|s| s.is_finite()),
+                                "invalid streaming audio"
+                            );
+                            if let Some(sink) = sink.as_deref_mut() {
+                                sink(&samples, sample_rate)?;
+                            }
                         }
-                    } else if response.ok == Some(true) {
-                        return Ok(());
-                    } else {
-                        bail!(
-                            "speech synthesis failed: {}",
-                            response
-                                .error
-                                .as_deref()
-                                .unwrap_or("invalid worker response")
-                        );
+                        ParsedWorkerMessage::Ok => return Ok(()),
+                        ParsedWorkerMessage::Error(detail) => {
+                            bail!("speech synthesis failed: {detail}");
+                        }
+                        ParsedWorkerMessage::Eof => {
+                            bail!("speech worker exited during synthesis");
+                        }
                     }
                 }
             })();
@@ -685,6 +721,7 @@ mod tests {
         let request = WorkerRequest {
             generation: None,
             stream: false,
+            stream_format: None,
             speaking_pace: 1.0,
             text: "hello",
             output: "out.wav".into(),
